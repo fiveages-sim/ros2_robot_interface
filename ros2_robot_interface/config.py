@@ -50,6 +50,9 @@ class ROS2RobotInterfaceConfig:
     head_joint_controller_topic: str | None = None  # e.g., "/head_joint_controller/target_joint_position"
     body_joint_controller_topic: str | None = None  # e.g., "/body_joint_controller/target_joint_position"
     
+    left_arm_joint_controller_topic: str | None = None  # Auto-detected based on available topics
+    right_arm_joint_controller_topic: str | None = None  # Auto-detected for dual-arm mode
+    
     # Joint names
     joint_names: list[str] = field(default_factory=lambda: [
         "joint1", "joint2", "joint3", "joint4", "joint5", "joint6"

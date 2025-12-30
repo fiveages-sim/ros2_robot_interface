@@ -16,7 +16,8 @@ A standalone Python package for communicating with ROS 2 robots through topics. 
 ### From Source (Development)
 
 ```bash
-cd ros2_robot_interface
+conda activate lerobot_ros2
+cd ~/PythonProject/ros2_robot_interface/
 pip install -e .
 ```
 
