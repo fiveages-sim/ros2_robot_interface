@@ -152,7 +152,7 @@ def main():
             
             # 发送左臂关节位置（会自动切换到MOVEJ状态）
             try:
-                interface.send_left_arm_joint_positions(left_arm_current_positions)
+                interface.left_arm_handler.send_joint_positions(left_arm_current_positions)
                 print(f"  ✓ 左臂关节位置已发送")
             except Exception as e:
                 print(f"  ✗ 左臂发送失败: {e}")
@@ -161,7 +161,7 @@ def main():
             # 发送右臂关节位置（双臂模式，会自动切换到MOVEJ状态）
             if right_arm_current_positions:
                 try:
-                    interface.send_right_arm_joint_positions(right_arm_current_positions)
+                    interface.right_arm_handler.send_joint_positions(right_arm_current_positions)
                     print(f"  ✓ 右臂关节位置已发送")
                 except Exception as e:
                     print(f"  ✗ 右臂发送失败: {e}")

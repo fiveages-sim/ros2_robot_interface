@@ -129,7 +129,7 @@ def main():
     print("-" * 70)
     
     # 左臂/主臂位姿
-    left_pose = interface.get_end_effector_pose()
+    left_pose = interface.left_arm_handler.get_pose()
     if left_pose:
         print(f"  ✓ 末端执行器位姿已接收")
         print(f"    位置:    ({left_pose.position.x:7.3f}, {left_pose.position.y:7.3f}, {left_pose.position.z:7.3f})")
@@ -139,7 +139,7 @@ def main():
         print("  ⚠ 尚未接收到末端执行器位姿")
     
     # 右臂位姿（仅双臂模式）
-    right_pose = interface.get_right_end_effector_pose()
+    right_pose = interface.right_arm_handler.get_pose()
     if right_pose:
         print(f"\n  ✓ 右臂位姿已接收")
         print(f"    位置:    ({right_pose.position.x:7.3f}, {right_pose.position.y:7.3f}, {right_pose.position.z:7.3f})")
@@ -235,8 +235,8 @@ def main():
             
             # 获取当前状态数据
             joint_state = interface.get_joint_state()  # 获取关节状态
-            left_pose = interface.get_end_effector_pose()  # 获取左臂末端位姿
-            right_pose = interface.get_right_end_effector_pose()  # 获取右臂末端位姿（双臂模式）
+            left_pose = interface.left_arm_handler.get_pose()  # 获取左臂末端位姿
+            right_pose = interface.right_arm_handler.get_pose()  # 获取右臂末端位姿（双臂模式）
             
             # ========================================================================
             # 第六点五部分：夹爪开合测试（基于到达判断切换，左右独立）
@@ -247,7 +247,7 @@ def main():
                 left_position = 1.0 if left_gripper_target_open else 0.0
                 left_status = "张开" if left_gripper_target_open else "闭合"
                 try:
-                    interface.send_gripper_command(left_position)
+                    interface.left_gripper_handler.send_joint_positions(left_position)
                     print(f"  [夹爪] → 左臂夹爪: {left_status} (位置: {left_position:.1f})")
                     left_gripper_command_sent = True
                     left_gripper_arrived = False
@@ -271,7 +271,7 @@ def main():
                     right_position = 1.0 if right_gripper_target_open else 0.0
                     right_status = "张开" if right_gripper_target_open else "闭合"
                     try:
-                        interface.send_right_gripper_command(right_position)
+                        interface.right_gripper_handler.send_joint_positions(right_position)
                         print(f"  [夹爪] → 右臂夹爪: {right_status} (位置: {right_position:.1f})")
                         right_gripper_command_sent = True
                         right_gripper_arrived = False
@@ -327,7 +327,7 @@ def main():
                     left_target.orientation.x = 0.0
                     left_target.orientation.y = 0.0
                     left_target.orientation.z = 0.0
-                    interface.send_end_effector_target_stamped("left_eef", left_target)
+                    interface.left_arm_handler.send_target_stamped("left_eef", left_target)
                     # # 旧方法：使用绝对坐标系
                     # left_target = Pose()
                     # left_target.position.x = left_initial_pose.position.x + extend_distance  # 向前伸出
@@ -340,7 +340,7 @@ def main():
                 # 状态机：左臂伸出中
                 elif arm_movement_state == "left_extending":
                     # 检查左臂是否到达目标位置，或超时后切换
-                    left_arm_check = interface.check_arrive('left_arm')
+                    left_arm_check = interface.left_arm_handler.check_arrival()
                     if left_arm_check['arrived']:
                         arm_movement_state = "left_extended"
                         arm_movement_start_time = current_time
@@ -360,7 +360,7 @@ def main():
                         left_retract.orientation.x = 0.0
                         left_retract.orientation.y = 0.0
                         left_retract.orientation.z = 0.0
-                        interface.send_end_effector_target_stamped("left_eef", left_retract)
+                        interface.left_arm_handler.send_target_stamped("left_eef", left_retract)
                         # # 旧方法：使用绝对坐标系
                         # if left_initial_pose:
                         #     left_retract = Pose()
@@ -374,7 +374,7 @@ def main():
                 # 状态机：左臂收回中
                 elif arm_movement_state == "left_retracting":
                     # 检查左臂是否到达目标位置，或超时后切换
-                    left_arm_check = interface.check_arrive('left_arm')
+                    left_arm_check = interface.left_arm_handler.check_arrival()
                     if left_arm_check['arrived']:
                         # 开始右臂伸出
                         arm_movement_state = "right_extending"
@@ -389,7 +389,7 @@ def main():
                         right_target.orientation.x = 0.0
                         right_target.orientation.y = 0.0
                         right_target.orientation.z = 0.0
-                        interface.send_right_end_effector_target_stamped("right_eef", right_target)
+                        interface.right_arm_handler.send_target_stamped("right_eef", right_target)
                         # # 旧方法：使用绝对坐标系
                         # if right_initial_pose:
                         #     right_target = Pose()
@@ -403,7 +403,7 @@ def main():
                 # 状态机：右臂伸出中
                 elif arm_movement_state == "right_extending":
                     # 检查右臂是否到达目标位置，或超时后切换
-                    right_arm_check = interface.check_arrive('right_arm')
+                    right_arm_check = interface.right_arm_handler.check_arrival()
                     if right_arm_check['arrived']:
                         arm_movement_state = "right_extended"
                         arm_movement_start_time = current_time
@@ -423,7 +423,7 @@ def main():
                         right_retract.orientation.x = 0.0
                         right_retract.orientation.y = 0.0
                         right_retract.orientation.z = 0.0
-                        interface.send_right_end_effector_target_stamped("right_eef", right_retract)
+                        interface.right_arm_handler.send_target_stamped("right_eef", right_retract)
                         # # 旧方法：使用绝对坐标系
                         # if right_initial_pose:
                         #     right_retract = Pose()
@@ -437,7 +437,7 @@ def main():
                 # 状态机：右臂收回中
                 elif arm_movement_state == "right_retracting":
                     # 检查右臂是否到达目标位置，或超时后切换
-                    right_arm_check = interface.check_arrive('right_arm')
+                    right_arm_check = interface.right_arm_handler.check_arrival()
                     if right_arm_check['arrived']:
                         arm_movement_state = "completed"  # 标记为完成，准备切换状态
                         arm_movement_start_time = None

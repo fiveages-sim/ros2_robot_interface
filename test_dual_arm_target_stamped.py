@@ -73,8 +73,8 @@ def main():
     print("[5] 获取当前双臂位姿")
     print("-" * 70)
     
-    left_current_pose = interface.get_end_effector_pose()
-    right_current_pose = interface.get_right_end_effector_pose()
+    left_current_pose = interface.left_arm_handler.get_pose()
+    right_current_pose = interface.right_arm_handler.get_pose()
     
     if not left_current_pose or not right_current_pose:
         print("⚠ 错误: 无法获取当前位姿！")
