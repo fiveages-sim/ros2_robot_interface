@@ -33,15 +33,33 @@ interface.right_arm_handler
 **功能：** 获取当前 end-effector 的 pose（位置和姿态）
 
 **返回值：**
-- `Pose` 对象：包含当前位置和姿态
+- `Pose` 对象：包含当前位置和姿态（在 `base_frame` 坐标系下）
 - `None`：如果数据过期或不存在
+
+**使用场景：**
+- **状态监控**：获取机器人末端执行器的当前实际位姿，用于显示或记录
+- **初始位姿保存**：保存初始位姿，用于后续计算相对运动
+- **内部调用**：`check_arrival()` 内部会调用此函数获取当前位姿进行比较
 
 **示例：**
 ```python
+# 场景1：获取当前位姿用于显示
 current_pose = interface.left_arm_handler.get_pose()
 if current_pose:
-    print(f"位置: ({current_pose.position.x}, {current_pose.position.y}, {current_pose.position.z})")
+    print(f"当前位置: ({current_pose.position.x}, {current_pose.position.y}, {current_pose.position.z})")
     print(f"姿态: ({current_pose.orientation.x}, {current_pose.orientation.y}, {current_pose.orientation.z}, {current_pose.orientation.w})")
+
+# 场景2：保存初始位姿，用于后续计算相对运动
+left_initial_pose = interface.left_arm_handler.get_pose()
+# 然后基于初始位姿计算目标位姿
+
+# 场景3：在主循环中持续获取当前位姿
+while True:
+    current_pose = interface.left_arm_handler.get_pose()
+    if current_pose:
+        # 处理当前位姿
+        pass
+    time.sleep(0.1)
 ```
 
 ---
@@ -51,14 +69,25 @@ if current_pose:
 **功能：** 获取当前设置的目标 pose
 
 **返回值：**
-- `Pose` 对象：目标位置和姿态
+- `Pose` 对象：目标位置和姿态（在 `base_frame` 坐标系下）
 - `None`：如果未设置目标
+
+**使用场景：**
+- **查询目标**：查询之前通过 `send_target()` 或 `send_target_stamped()` 设置的目标位姿
+- **调试验证**：验证目标位姿是否正确设置
+- **内部调用**：`check_arrival()` 内部会调用此函数获取目标位姿进行比较
 
 **示例：**
 ```python
+# 场景1：查询当前目标位姿
 target_pose = interface.left_arm_handler.get_target_pose()
 if target_pose:
     print(f"目标位置: ({target_pose.position.x}, {target_pose.position.y}, {target_pose.position.z})")
+
+# 场景2：验证目标是否已设置
+target_pose = interface.left_arm_handler.get_target_pose()
+if target_pose is None:
+    print("警告：未设置目标位姿")
 ```
 
 ---
@@ -68,19 +97,28 @@ if target_pose:
 **功能：** 发送目标 pose（不带坐标系信息）
 
 **参数：**
-- `pose` (Pose): 目标 pose 对象
+- `pose` (Pose): 目标 pose 对象（应在 `base_frame` 坐标系下）
 
 **说明：**
 - 直接发布到 `/left_target` 或 `/right_target` topic
-- 不进行 TF 坐标转换
-- 会自动更新内部目标 pose 状态
+- **不进行 TF 坐标转换**，假设传入的 pose 已经在 `base_frame` 坐标系下
+- 会自动更新内部目标 pose 状态（直接保存，不转换）
+
+**使用场景：**
+- **简单场景**：目标 pose 已经在 `base_frame`（`arm_base`）坐标系下，不需要坐标系转换
+- **向后兼容**：兼容旧代码或简单应用场景
+
+**注意事项：**
+- ⚠️ 需要确保传入的 pose 在正确的坐标系下（`base_frame`）
+- ⚠️ 不支持其他坐标系，如果 pose 在其他坐标系下，应使用 `send_target_stamped()`
 
 **示例：**
 ```python
 from geometry_msgs.msg import Pose
 
+# 场景：目标位姿已经在 arm_base 坐标系下
 target_pose = Pose()
-target_pose.position.x = 0.5
+target_pose.position.x = 0.5  # 在 arm_base 坐标系下
 target_pose.position.y = 0.0
 target_pose.position.z = 0.3
 target_pose.orientation.w = 1.0
@@ -90,32 +128,115 @@ interface.left_arm_handler.send_target(target_pose)
 
 ---
 
-#### 4. `send_target_stamped(frame_id: str, pose: Pose) -> None`
+#### 4. `send_target_stamped(frame_id: str, pose: Pose) -> None` ⭐ **推荐使用**
 
 **功能：** 发送带坐标系的目标 pose（推荐使用）
 
 **参数：**
-- `frame_id` (str): 坐标系 ID（如 "arm_base", "base_link"）
-- `pose` (Pose): 目标 pose 对象
+- `frame_id` (str): 坐标系 ID（如 `"arm_base"`, `"base_link"`, `"head_link2"`, `"left_eef"`, `"left_link6"` 等）
+- `pose` (Pose): 目标 pose 对象（在 `frame_id` 指定的坐标系下）
 
 **说明：**
 - 发布到 `/left_target/stamped` 或 `/right_target/stamped` topic
-- **会自动进行 TF 坐标转换**到 base_frame
-- 如果 frame_id 与 base_frame 不同，会自动转换
-- 会自动更新内部目标 pose 状态（转换后的）
+- **会自动进行 TF 坐标转换**到 `base_frame`
+- 如果 `frame_id` 与 `base_frame` 不同，会自动转换
+- 会自动更新内部目标 pose 状态（转换后的，在 `base_frame` 下）
+
+**使用场景：**
+- **相对运动控制**：使用末端执行器坐标系（如 `"left_eef"`）进行相对运动
+- **其他坐标系下的目标**：目标 pose 在其他坐标系下（如 `"head_link2"`, `"left_link6"` 等）
+- **双臂协调控制**：通过 `send_dual_arm_target_stamped()` 间接调用
+
+**优势：**
+- ✅ 自动进行坐标转换，无需手动计算
+- ✅ 支持任意坐标系，更灵活
+- ✅ 与 `check_arrival()` 兼容（自动转换到 `base_frame`）
 
 **示例：**
 ```python
 from geometry_msgs.msg import Pose
 
+# 场景1：使用其他坐标系（如 head_link2）
+target_pose = Pose()
+target_pose.position.x = 0.5  # 在 head_link2 坐标系下
+target_pose.position.y = 0.0
+target_pose.position.z = 0.3
+target_pose.orientation.w = 1.0
+interface.left_arm_handler.send_target_stamped("head_link2", target_pose)
+
+# 场景2：相对运动（使用末端执行器坐标系 left_eef）
+relative_pose = Pose()
+relative_pose.position.x = 0.15   # 相对于当前末端向前 0.15m
+relative_pose.position.y = 0.0
+relative_pose.position.z = 0.0
+relative_pose.orientation.w = 1.0
+interface.left_arm_handler.send_target_stamped("left_eef", relative_pose)
+
+# 场景3：通过 send_dual_arm_target_stamped 间接调用
+interface.send_dual_arm_target_stamped(left_pose, right_pose, frame_id="arm_base")
+# 内部会调用 left_arm_handler.send_target_stamped(frame_id, left_pose)
+```
+
+---
+
+### 四个核心函数的使用场景对比
+
+| 函数 | 主要用途 | 典型场景 | 坐标系处理 | 推荐度 |
+|------|---------|---------|-----------|--------|
+| `get_pose()` | **读取**当前实际位姿 | 1. 状态监控<br>2. 保存初始位姿<br>3. 显示当前位置 | 返回 `base_frame` 下的位姿 | ⭐⭐⭐ |
+| `get_target_pose()` | **读取**目标位姿 | 1. 查询设置的目标<br>2. 调试验证<br>3. 内部比较使用 | 返回 `base_frame` 下的位姿 | ⭐⭐ |
+| `send_target(pose)` | **写入**目标位姿（简单） | 1. 目标已在 `base_frame` 下<br>2. 向后兼容 | 不转换，假设 `base_frame` | ⭐ |
+| `send_target_stamped(frame_id, pose)` | **写入**目标位姿（推荐） | 1. 相对运动控制<br>2. 其他坐标系下的目标<br>3. 双臂协调控制 | 自动转换到 `base_frame` | ⭐⭐⭐ |
+
+### 典型工作流程
+
+```python
+from geometry_msgs.msg import Pose
+import time
+
+# ===== 工作流程1：相对运动控制（推荐） =====
+# 1. 获取当前位姿
+current_pose = interface.left_arm_handler.get_pose()
+if current_pose:
+    print(f"当前位置: ({current_pose.position.x:.3f}, {current_pose.position.y:.3f}, {current_pose.position.z:.3f})")
+
+# 2. 基于当前位姿计算目标（相对运动）
+target_pose = Pose()
+target_pose.position.x = 0.15   # 相对于末端向前 0.15m
+target_pose.position.y = 0.0
+target_pose.position.z = 0.0
+target_pose.orientation.w = 1.0
+
+# 3. 发送目标（使用末端坐标系 left_eef）
+interface.left_arm_handler.send_target_stamped("left_eef", target_pose)
+
+# 4. 等待到达
+while True:
+    result = interface.left_arm_handler.check_arrival()
+    if result['arrived']:
+        print("手臂已到达目标位置")
+        break
+    time.sleep(0.1)
+
+# ===== 工作流程2：使用其他坐标系 =====
+# 目标位姿在 head_link2 坐标系下
 target_pose = Pose()
 target_pose.position.x = 0.5
 target_pose.position.y = 0.0
 target_pose.position.z = 0.3
 target_pose.orientation.w = 1.0
 
-# 发送带坐标系的目标（会自动转换到 arm_base）
-interface.left_arm_handler.send_target_stamped("base_link", target_pose)
+# 发送并自动转换到 base_frame
+interface.left_arm_handler.send_target_stamped("head_link2", target_pose)
+
+# ===== 工作流程3：简单场景（目标已在 base_frame 下） =====
+target_pose = Pose()
+target_pose.position.x = 0.5  # 已在 arm_base 坐标系下
+target_pose.position.y = 0.0
+target_pose.position.z = 0.3
+target_pose.orientation.w = 1.0
+
+interface.left_arm_handler.send_target(target_pose)  # 不转换
 ```
 
 ---
@@ -165,25 +286,51 @@ interface.left_arm_handler.send_joint_positions(joint_positions, custom_callback
 ```
 
 **说明：**
-- 比较当前 pose 和目标 pose
-- 位置距离：欧氏距离
-- 姿态距离：基于四元数的点积计算
-- 会打印详细的检查信息
+- **内部调用**：自动调用 `get_pose()` 获取当前位姿，调用 `get_target_pose()` 获取目标位姿
+- **坐标系一致性**：比较的两个位姿都在 `base_frame` 坐标系下
+  - `get_pose()` 返回的是 `base_frame` 下的当前位姿
+  - `get_target_pose()` 返回的是 `base_frame` 下的目标位姿（如果使用 `send_target_stamped()`，会自动转换）
+- **位置距离**：欧氏距离（米）
+- **姿态距离**：基于四元数的点积计算
+- **会打印详细的检查信息**
+
+**与四个核心函数的关系：**
+- ✅ 与 `send_target_stamped()` 配合使用：目标位姿会自动转换到 `base_frame`，与 `get_pose()` 返回的位姿在同一坐标系下
+- ✅ 与 `send_target()` 配合使用：目标位姿直接保存在 `base_frame` 下，与 `get_pose()` 返回的位姿在同一坐标系下
+- ✅ 内部使用 `get_pose()` 和 `get_target_pose()` 进行比较
 
 **示例：**
 ```python
-# 使用默认阈值
+# 场景1：使用默认阈值
 result = interface.left_arm_handler.check_arrival()
 if result['arrived']:
     print("手臂已到达目标位置")
 
-# 使用自定义阈值
+# 场景2：使用自定义阈值
 result = interface.left_arm_handler.check_arrival(
     pose_threshold=0.05,      # 5厘米
     orient_threshold=0.08     # 更严格的姿态要求
 )
 print(f"位置距离: {result['position_distance']:.4f} 米")
 print(f"姿态距离: {result['orientation_distance']:.4f}")
+
+# 场景3：完整的工作流程
+# 1. 发送目标（使用 send_target_stamped，自动转换到 base_frame）
+target_pose = Pose()
+target_pose.position.x = 0.15
+target_pose.position.y = 0.0
+target_pose.position.z = 0.0
+target_pose.orientation.w = 1.0
+interface.left_arm_handler.send_target_stamped("left_eef", target_pose)
+
+# 2. 等待到达（内部会调用 get_pose() 和 get_target_pose()）
+while True:
+    result = interface.left_arm_handler.check_arrival()
+    if result['arrived']:
+        print("到达目标！")
+        break
+    print(f"距离目标: {result['position_distance']:.4f} 米")
+    time.sleep(0.1)
 ```
 
 ---
@@ -529,13 +676,20 @@ interface.send_fsm_command(4)
 **功能：** 发送双臂目标 pose（仅双臂模式）
 
 **参数：**
-- `left_pose` (Pose): 左臂目标 pose
-- `right_pose` (Pose): 右臂目标 pose
+- `left_pose` (Pose): 左臂目标 pose（在 `frame_id` 指定的坐标系下）
+- `right_pose` (Pose): 右臂目标 pose（在 `frame_id` 指定的坐标系下）
 - `frame_id` (str): 坐标系 ID，默认 "arm_base"
 
 **说明：**
 - 发布到 `/dual_target/stamped` topic
-- 会自动更新左右臂 handler 的目标 pose（带 TF 转换）
+- **内部实现**：会调用 `left_arm_handler.send_target_stamped(frame_id, left_pose)` 和 `right_arm_handler.send_target_stamped(frame_id, right_pose)`
+- 会自动更新左右臂 handler 的目标 pose（带 TF 转换到各自的 `base_frame`）
+- 可以使用 `left_arm_handler.check_arrival()` 和 `right_arm_handler.check_arrival()` 分别检查到达状态
+
+**与四个核心函数的关系：**
+- ✅ 内部使用 `send_target_stamped()` 更新目标位姿
+- ✅ 更新后的目标位姿可以通过 `get_target_pose()` 查询
+- ✅ 可以使用 `check_arrival()` 检查到达状态
 
 **示例：**
 ```python
@@ -553,7 +707,14 @@ right_pose.position.y = -0.2
 right_pose.position.z = 0.3
 right_pose.orientation.w = 1.0
 
-interface.send_dual_arm_target_stamped("arm_base", left_pose, right_pose)
+# 发送双臂目标（会自动转换到各自的 base_frame）
+interface.send_dual_arm_target_stamped(left_pose, right_pose, frame_id="arm_base")
+
+# 检查到达状态
+left_result = interface.left_arm_handler.check_arrival()
+right_result = interface.right_arm_handler.check_arrival()
+if left_result['arrived'] and right_result['arrived']:
+    print("双臂都已到达目标位置")
 ```
 
 ---
@@ -582,8 +743,16 @@ interface.send_dual_arm_target_stamped("arm_base", left_pose, right_pose)
    - 夹爪的 `check_arrival()` 需要手动传入当前位置
 
 4. **坐标系转换**：
-   - `send_target_stamped()` 会自动进行 TF 转换
-   - `send_target()` 不进行转换
+   - `send_target_stamped()` 会自动进行 TF 转换到 `base_frame`
+   - `send_target()` 不进行转换，需要确保传入的 pose 已在 `base_frame` 下
+   - `get_pose()` 和 `get_target_pose()` 返回的位姿都在 `base_frame` 坐标系下
+   - `check_arrival()` 比较的两个位姿都在 `base_frame` 下，因此可以安全比较
+
+5. **函数选择建议**：
+   - **推荐使用** `send_target_stamped()` 而不是 `send_target()`，因为它支持坐标系转换，更灵活
+   - 使用 `get_pose()` 获取当前实际位姿，用于状态监控或计算相对运动
+   - 使用 `get_target_pose()` 查询已设置的目标位姿，主要用于调试
+   - `check_arrival()` 会自动调用 `get_pose()` 和 `get_target_pose()`，通常不需要手动调用这两个函数
 
 5. **默认阈值**：
    - 手臂位置阈值：0.06 米
