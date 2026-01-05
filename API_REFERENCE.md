@@ -9,6 +9,7 @@
 - [头部控制](#头部控制)
 - [身体控制](#身体控制)
 - [统一接口方法](#统一接口方法)
+  - [坐标转换和坐标系转换](#坐标转换和坐标系转换-)
 
 ---
 
@@ -715,6 +716,73 @@ left_result = interface.left_arm_handler.check_arrival()
 right_result = interface.right_arm_handler.check_arrival()
 if left_result['arrived'] and right_result['arrived']:
     print("双臂都已到达目标位置")
+```
+
+---
+
+### 坐标转换和坐标系转换 🔄
+
+以下两个接口用于查询坐标系之间的变换关系和进行坐标转换。
+
+#### 5.1 `lookup_transform(target_frame: str, source_frame: str, timeout: Optional[float] = None) -> Optional[TransformStamped]`
+
+**功能：** 查询两个坐标系之间的变换关系
+
+**参数：**
+- `target_frame` (str): 参考坐标系（在这个坐标系下观察）
+- `source_frame` (str): 被查询的坐标系（要查询它的位置）
+- `timeout` (Optional[float]): 可选超时时间（秒），如果为 `None` 则立即返回（不等待）
+
+**返回值：**
+- `TransformStamped` 对象：表示 **`source_frame` 相对于 `target_frame`** 的位姿（`source_frame` 在 `target_frame` 坐标系下的位姿）
+- `None`：如果查询失败
+
+**示例：**
+```python
+# 查询 left_link6 相对于 head_link2 的位置
+# 返回结果表示：left_link6 在 head_link2 坐标系下的位姿
+transform = interface.lookup_transform("head_link2", "left_link6")
+if transform:
+    trans = transform.transform.translation
+    rot = transform.transform.rotation
+    print(f"平移: ({trans.x:.4f}, {trans.y:.4f}, {trans.z:.4f}) 米")
+    print(f"旋转: ({rot.x:.4f}, {rot.y:.4f}, {rot.z:.4f}, {rot.w:.4f})")
+```
+
+---
+
+#### 5.2 `transform_pose(pose: Pose, source_frame: str, target_frame: str, timeout: Optional[float] = None) -> Optional[Pose]`
+
+**功能：** 将坐标从一个坐标系转换到另一个坐标系
+
+**参数：**
+- `pose` (Pose): 要转换的 Pose（在 `source_frame` 坐标系下）
+- `source_frame` (str): 源坐标系（`pose` 当前所在的坐标系）
+- `target_frame` (str): 目标坐标系（转换后的 `pose` 所在的坐标系）
+- `timeout` (Optional[float]): 可选超时时间（秒），如果为 `None` 则立即返回（不等待）
+
+**返回值：**
+- `Pose` 对象：转换后的 Pose（在 `target_frame` 坐标系下）
+- `None`：如果转换失败
+
+**示例：**
+```python
+from geometry_msgs.msg import Pose
+
+# 将 pose 从 head_link2 坐标系转换到 arm_base 坐标系
+pose_in_head = Pose()
+pose_in_head.position.x = 0.5  # 在 head_link2 坐标系下
+pose_in_head.position.y = 0.0
+pose_in_head.position.z = 0.3
+pose_in_head.orientation.w = 1.0
+
+# 参数说明：
+# - pose_in_head: 要转换的 Pose
+# - "head_link2": 源坐标系（pose_in_head 当前所在的坐标系）
+# - "arm_base": 目标坐标系（转换后的 pose 所在的坐标系）
+pose_in_base = interface.transform_pose(pose_in_head, "head_link2", "arm_base")
+if pose_in_base:
+    print(f"转换后的位置: ({pose_in_base.position.x:.4f}, {pose_in_base.position.y:.4f}, {pose_in_base.position.z:.4f})")
 ```
 
 ---
