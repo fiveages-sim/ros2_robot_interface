@@ -13,12 +13,14 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import rclpy
-from geometry_msgs.msg import Pose, PoseStamped, Twist
+from geometry_msgs.msg import Pose, PoseStamped, TransformStamped, Twist
 from nav_msgs.msg import Path
+from rclpy.duration import Duration
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.publisher import Publisher
 from rclpy.subscription import Subscription
+from rclpy.time import Time
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Float64, Float64MultiArray, Int32
 import tf2_ros
@@ -632,6 +634,142 @@ class ROS2RobotInterface:
                 result['right_gripper'] = right_gripper_result
         
         return result
+    
+    def lookup_transform(self, target_frame: str, source_frame: str, 
+                        timeout: Optional[float] = None) -> Optional[TransformStamped]:
+        """查询两个坐标系之间的变换关系
+        
+        **参数语义说明：**
+        - target_frame: 参考坐标系（在这个坐标系下观察）
+        - source_frame: 被查询的坐标系（要查询它的位置）
+        
+        **返回的 Transform 方向说明：**
+        - 返回的 TransformStamped 表示：**source_frame → target_frame** 的变换
+        - 即：source_frame 相对于 target_frame 的位姿（source_frame 在 target_frame 坐标系下的位姿）
+        - 语义上：查询 "source_frame 相对于 target_frame 的位置"
+        
+        **与 tf2_echo 的对应关系：**
+        - lookup_transform("head_link2", "left_link6") 等价于：ros2 run tf2_ros tf2_echo head_link2 left_link6
+        - 两者都返回 left_link6 → head_link2 的变换（left_link6 在 head_link2 坐标系下的位姿）
+        
+        **注意：**
+        - 参数命名遵循 tf2 底层 API 的约定（与 tf_buffer.lookup_transform 一致）
+        - 虽然语义上 source_frame 是"目标"（要查询的），target_frame 是"源"（参考坐标系）
+        - 但为了与底层 API 保持一致，保持现有参数顺序
+        
+        Args:
+            target_frame: 参考坐标系（在这个坐标系下观察，对应 tf2_echo 的第一个参数）
+            source_frame: 被查询的坐标系（要查询它的位置，对应 tf2_echo 的第二个参数）
+            timeout: 可选超时时间（秒），如果为 None 则立即返回（不等待）
+            
+        Returns:
+            TransformStamped 消息，表示 source_frame → target_frame 的变换
+            （source_frame 在 target_frame 坐标系下的位姿）
+            如果查询失败则返回 None
+            
+        Example:
+            # 查询 left_link6 相对于 head_link2 的位置
+            # 返回的是 left_link6 → head_link2 的变换
+            transform = interface.lookup_transform("head_link2", "left_link6")
+            if transform:
+                print(f"Translation: {transform.transform.translation}")
+                print(f"Rotation: {transform.transform.rotation}")
+        """
+        if not self.is_connected:
+            logger.warning("ROS2RobotInterface is not connected")
+            return None
+        
+        if self.tf_buffer is None:
+            logger.warning("TF buffer is not initialized")
+            return None
+        
+        try:
+            time_arg = Time()
+            
+            # 如果指定了 timeout，使用 Duration；否则不传递 timeout 参数
+            # 注意：tf_buffer.lookup_transform(target_frame, source_frame) 返回的是
+            # source_frame → target_frame 的变换（source_frame 在 target_frame 坐标系下的位姿）
+            if timeout is not None:
+                timeout_arg = Duration(seconds=timeout)
+                transform = self.tf_buffer.lookup_transform(
+                    target_frame, source_frame, time_arg, timeout=timeout_arg
+                )
+            else:
+                # 不传递 timeout 参数，使用默认行为（立即返回）
+                transform = self.tf_buffer.lookup_transform(
+                    target_frame, source_frame, time_arg
+                )
+            # 返回的 transform 表示：source_frame → target_frame 的变换
+            return transform
+        except TransformException as ex:
+            logger.warning(
+                f"Failed to lookup transform from '{source_frame}' to '{target_frame}': {ex}"
+            )
+            return None
+    
+    def transform_pose(self, pose: Pose, source_frame: str, target_frame: str,
+                      timeout: Optional[float] = None) -> Optional[Pose]:
+        """将坐标从一个坐标系转换到另一个坐标系
+        
+        将 pose 从 source_frame 坐标系转换到 target_frame 坐标系。
+        
+        Args:
+            pose: 要转换的 Pose（在 source_frame 坐标系下）
+            source_frame: 源坐标系
+            target_frame: 目标坐标系
+            timeout: 可选超时时间（秒），如果为 None 则立即返回（不等待）
+            
+        Returns:
+            转换后的 Pose（在 target_frame 坐标系下），如果转换失败则返回 None
+            
+        Example:
+            # 将 pose 从 head_link2 坐标系转换到 left_link6 坐标系
+            pose_in_head = Pose()  # 某个在 head_link2 坐标系下的 pose
+            pose_in_left = interface.transform_pose(pose_in_head, "head_link2", "left_link6")
+            if pose_in_left:
+                print(f"转换后的位置: {pose_in_left.position}")
+        """
+        if not self.is_connected:
+            logger.warning("ROS2RobotInterface is not connected")
+            return None
+        
+        if self.tf_buffer is None:
+            logger.warning("TF buffer is not initialized")
+            return None
+        
+        # 如果源坐标系和目标坐标系相同，直接返回副本
+        if source_frame == target_frame:
+            result_pose = Pose()
+            self._copy_pose(pose, result_pose)
+            return result_pose
+        
+        try:
+            time_arg = Time()
+            
+            # 如果指定了 timeout，使用 Duration；否则不传递 timeout 参数
+            if timeout is not None:
+                timeout_arg = Duration(seconds=timeout)
+                transform = self.tf_buffer.lookup_transform(
+                    target_frame, source_frame, time_arg, timeout=timeout_arg
+                )
+            else:
+                # 不传递 timeout 参数，使用默认行为（立即返回）
+                transform = self.tf_buffer.lookup_transform(
+                    target_frame, source_frame, time_arg
+                )
+            
+            # 执行坐标转换
+            transformed_pose = do_transform_pose(pose, transform)
+            
+            # 创建结果并复制
+            result_pose = Pose()
+            self._copy_pose(transformed_pose, result_pose)
+            return result_pose
+        except TransformException as ex:
+            logger.warning(
+                f"Failed to transform pose from '{source_frame}' to '{target_frame}': {ex}"
+            )
+            return None
     
     def send_cartesian_velocity(self, linear: Tuple[float, float, float], angular: Tuple[float, float, float]) -> None:
         """Send cartesian velocity commands."""
