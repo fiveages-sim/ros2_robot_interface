@@ -95,20 +95,27 @@ class GripperHandler:
             logger.debug(f"{self.label}: Created position command publisher for {self.command_topic}")
         
         # 创建target_command发布器和订阅器（新功能）
-        # 判断是否为单臂模式
-        is_dual_arm = self.config.right_end_effector_pose_topic is not None
-        
+        # 根据配置中的控制器名称构建topic
         if self.gripper_type == GripperType.LEFT:
-            # 单臂模式下，控制器名称可能是 hand_controller（无left前缀）
-            # 双臂模式下，使用 left_hand_controller
-            if is_dual_arm:
-                target_command_topic = "/left_hand_controller/target_command"
+            # 使用配置中检测到的控制器名称
+            controller_name = self.config.left_gripper_controller_name
+            if controller_name:
+                target_command_topic = f"/{controller_name}/target_command"
             else:
-                # 单臂模式：优先尝试 hand_controller，如果没有则使用 left_hand_controller
-                target_command_topic = "/hand_controller/target_command"
+                # 如果没有配置，使用默认值（向后兼容）
+                is_dual_arm = self.config.right_end_effector_pose_topic is not None
+                if is_dual_arm:
+                    target_command_topic = "/left_hand_controller/target_command"
+                else:
+                    target_command_topic = "/gripper_controller/target_command"
         else:  # RIGHT
-            # 右夹爪只在双臂模式下存在
-            target_command_topic = "/right_hand_controller/target_command"
+            # 使用配置中检测到的控制器名称
+            controller_name = self.config.right_gripper_controller_name
+            if controller_name:
+                target_command_topic = f"/{controller_name}/target_command"
+            else:
+                # 如果没有配置，使用默认值（向后兼容）
+                target_command_topic = "/right_hand_controller/target_command"
         
         self.target_command_pub = self.node.create_publisher(
             Int32, target_command_topic, 10

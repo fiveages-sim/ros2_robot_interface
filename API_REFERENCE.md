@@ -389,8 +389,10 @@ interface.left_gripper_handler.send_joint_positions(1.0)
 
 **说明：**
 - 使用 `target_command` 话题进行开关控制，与 VR、RViz、Joystick 保持一致
-- 发布到 `/left_hand_controller/target_command` 或 `/right_hand_controller/target_command` 话题
-- 单臂模式下发布到 `/hand_controller/target_command` 话题
+- **控制器名称自动检测**：系统会根据实际存在的 topic 自动检测控制器类型
+  - 灵巧手：`hand_controller` 或 `left_hand_controller` / `right_hand_controller`
+  - 夹爪：`gripper_controller` 或 `left_gripper_controller` / `right_gripper_controller`
+- 发布到对应的 `target_command` 话题（如 `/left_hand_controller/target_command` 或 `/left_gripper_controller/target_command`）
 - 使用 `std_msgs/Int32` 消息类型
 - 会自动订阅相同话题以同步状态（通过回调更新 `is_open` 属性）
 - 如果传入的值不是 0 或 1，会发出警告并返回
@@ -409,9 +411,19 @@ target_value = 0 if current_state else 1
 interface.left_gripper_handler.send_target_command(target_value)
 ```
 
-**话题映射：**
-- 左夹爪：`/left_hand_controller/target_command`（双臂模式）或 `/hand_controller/target_command`（单臂模式）
-- 右夹爪：`/right_hand_controller/target_command`（仅双臂模式）
+**话题映射（自动检测）：**
+- **双臂模式 - 灵巧手：**
+  - 左夹爪：`/left_hand_controller/target_command`
+  - 右夹爪：`/right_hand_controller/target_command`
+- **双臂模式 - 夹爪：**
+  - 左夹爪：`/left_gripper_controller/target_command`
+  - 右夹爪：`/right_gripper_controller/target_command`
+- **单臂模式 - 灵巧手：**
+  - 夹爪：`/hand_controller/target_command`
+- **单臂模式 - 夹爪：**
+  - 夹爪：`/gripper_controller/target_command`
+
+**注意：** 控制器名称会在 `connect()` 时自动检测，无需手动配置。
 
 ---
 

@@ -206,8 +206,10 @@ python examples/test_gripper.py
 
 **注意事项：**
 - 测试脚本会持续运行，每3秒切换一次夹爪状态，按 `Ctrl+C` 停止
-- 使用 `/left_hand_controller/target_command` 和 `/right_hand_controller/target_command` 话题
-- 单臂模式下使用 `/hand_controller/target_command` 话题
+- 控制器名称自动检测：系统会根据实际存在的 topic 自动选择正确的控制器
+  - 灵巧手：`/left_hand_controller/target_command` 或 `/right_hand_controller/target_command`
+  - 夹爪：`/left_gripper_controller/target_command` 或 `/right_gripper_controller/target_command`
+  - 单臂模式：`/hand_controller/target_command`（灵巧手）或 `/gripper_controller/target_command`（夹爪）
 
 ---
 

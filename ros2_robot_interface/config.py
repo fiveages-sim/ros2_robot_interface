@@ -65,6 +65,8 @@ class ROS2RobotInterfaceConfig:
     gripper_command_topic: str = "/gripper_joint/position_command"  # Required for gripper control
     gripper_min_position: float = 0.0  # Closed position
     gripper_max_position: float = 0.0384  # Open position
+    left_gripper_controller_name: str | None = None  # Auto-detected: "hand_controller", "left_hand_controller", or "left_gripper_controller"
+    right_gripper_controller_name: str | None = None  # Auto-detected: "right_hand_controller" or "right_gripper_controller"
     
     # Control parameters
     control_type: ControlType = ControlType.CARTESIAN_POSE

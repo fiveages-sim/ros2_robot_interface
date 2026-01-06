@@ -127,10 +127,32 @@ class ROS2RobotInterface:
                 self.config.right_end_effector_pose_topic = "/right_current_pose"
             if "/right_target" in topic_names:
                 self.config.right_end_effector_target_topic = "/right_target"
-            
-            if "/right_gripper_joint/position_command" in topic_names:
-                self.config.right_gripper_command_topic = "/right_gripper_joint/position_command"
-                self.config.gripper_command_topic = "/left_gripper_joint/position_command"
+        
+        # 检测位置控制话题（gripper模式）
+        if "/left_gripper_joint/position_command" in topic_names:
+            self.config.gripper_command_topic = "/left_gripper_joint/position_command"
+        if "/right_gripper_joint/position_command" in topic_names:
+            self.config.right_gripper_command_topic = "/right_gripper_joint/position_command"
+        
+        # 检测 target_command 话题，确定控制器类型（hand_controller 或 gripper_controller）
+        # 左夹爪控制器检测
+        if "/left_hand_controller/target_command" in topic_names:
+            self.config.left_gripper_controller_name = "left_hand_controller"
+        elif "/left_gripper_controller/target_command" in topic_names:
+            self.config.left_gripper_controller_name = "left_gripper_controller"
+        elif "/hand_controller/target_command" in topic_names:
+            # 单臂模式 - 灵巧手
+            self.config.left_gripper_controller_name = "hand_controller"
+        elif "/gripper_controller/target_command" in topic_names:
+            # 单臂模式 - 夹爪
+            self.config.left_gripper_controller_name = "gripper_controller"
+        
+        # 右夹爪控制器检测（仅双臂模式）
+        if is_dual_arm:
+            if "/right_hand_controller/target_command" in topic_names:
+                self.config.right_gripper_controller_name = "right_hand_controller"
+            elif "/right_gripper_controller/target_command" in topic_names:
+                self.config.right_gripper_controller_name = "right_gripper_controller"
         
         if "/head_joint_controller/target_joint_position" in topic_names:
             self.config.head_joint_controller_topic = "/head_joint_controller/target_joint_position"
@@ -221,7 +243,8 @@ class ROS2RobotInterface:
                 self.dual_target_stamped_pub = self.robot_node.create_publisher(Path, "/dual_target/stamped", 10)
             
             # Create left gripper handler (if enabled)
-            if self.config.gripper_enabled and self.config.gripper_command_topic:
+            # 检查是否有位置控制topic或target_command控制器（灵巧手或夹爪）
+            if self.config.gripper_enabled and (self.config.gripper_command_topic or self.config.left_gripper_controller_name):
                 self.left_gripper_handler = GripperHandler(
                     self.robot_node,
                     GripperType.LEFT,
@@ -231,7 +254,8 @@ class ROS2RobotInterface:
                 self.left_gripper_handler.initialize()
             
             # Create right gripper handler (if dual-arm mode)
-            if self.config.right_gripper_command_topic:
+            # 检查是否有位置控制topic或target_command控制器（灵巧手或夹爪）
+            if is_dual_arm_detected and (self.config.right_gripper_command_topic or self.config.right_gripper_controller_name):
                 self.right_gripper_handler = GripperHandler(
                     self.robot_node,
                     GripperType.RIGHT,

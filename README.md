@@ -144,9 +144,12 @@ config = ROS2RobotInterfaceConfig(
 - `check_arrival(pose_threshold, orient_threshold)` - 检查到达状态
 
 **GripperHandler（夹爪）：**
-- `send_joint_positions(positions)` - 发送夹爪关节位置命令（与手臂 API 一致）
+- `send_joint_positions(position)` - 发送夹爪关节位置命令（位置控制方式）
+- `send_target_command(target_value)` - 发送夹爪开关控制命令（开关控制方式，0=关闭，1=打开）
 - `check_arrival(current_position, threshold)` - 检查到达状态
 - `get_target_position()` - 获取目标位置
+
+**注意：** 控制器名称（`hand_controller` 或 `gripper_controller`）会在 `connect()` 时自动检测，无需手动配置。
 
 ### ROS2RobotInterfaceConfig
 
