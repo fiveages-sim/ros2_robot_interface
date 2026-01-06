@@ -452,6 +452,27 @@ class ROS2RobotInterface:
         self.target_path_pub.publish(path_msg)
         logger.info(f"Published target path with {len(left_poses)} left arm waypoints and {len(right_poses)} right arm waypoints (total: {len(path_msg.poses)})")
         logger.debug(f"Path frame_id: {path_msg.header.frame_id}")
+        
+        # Update target poses in handlers with the last waypoint of each path (for check_arrival)
+        if left_poses and self.left_arm_handler:
+            last_left_pose = left_poses[-1]
+            # Extract Pose from PoseStamped if needed
+            if isinstance(last_left_pose, PoseStamped):
+                left_target_pose = last_left_pose.pose
+            else:
+                left_target_pose = last_left_pose
+            self.left_arm_handler.send_target_stamped(default_frame_id, left_target_pose)
+            logger.debug(f"Updated left arm target pose to last waypoint for arrival checking")
+        
+        if right_poses and self.right_arm_handler:
+            last_right_pose = right_poses[-1]
+            # Extract Pose from PoseStamped if needed
+            if isinstance(last_right_pose, PoseStamped):
+                right_target_pose = last_right_pose.pose
+            else:
+                right_target_pose = last_right_pose
+            self.right_arm_handler.send_target_stamped(default_frame_id, right_target_pose)
+            logger.debug(f"Updated right arm target pose to last waypoint for arrival checking")
     
     def send_dual_arm_target_stamped(self, left_pose: Pose, right_pose: Pose, frame_id: str = "arm_base") -> None:
         """Send dual-arm target poses to /dual_target/stamped topic."""
