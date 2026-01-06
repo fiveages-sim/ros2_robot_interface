@@ -192,7 +192,14 @@ def main():
         print("  ✓ A点initial路径已发送")
         print(f"  → 等待轨迹执行完成（约{TRAJECTORY_EXECUTION_WAIT_TIME}秒）...")
         time.sleep(TRAJECTORY_EXECUTION_WAIT_TIME)
-        print("  ✓ A点initial轨迹执行完成\n")
+        
+        # 检查到达状态
+        left_result = interface.left_arm_handler.check_arrival()
+        right_result = interface.right_arm_handler.check_arrival()
+        if left_result['arrived'] and right_result['arrived']:
+            print("  ✓ A点initial轨迹执行完成（左右臂均已到达）\n")
+        else:
+            print("  ⚠ A点initial轨迹执行完成（部分或全部未到达）\n")
     except Exception as e:
         print(f"  ✗ 发送A点initial路径失败: {e}\n")
     
@@ -216,7 +223,14 @@ def main():
         print("  ✓ A点end路径已发送")
         print(f"  → 等待轨迹执行完成（约{TRAJECTORY_EXECUTION_WAIT_TIME}秒）...")
         time.sleep(TRAJECTORY_EXECUTION_WAIT_TIME)
-        print("  ✓ A点end轨迹执行完成\n")
+        
+        # 检查到达状态
+        left_result = interface.left_arm_handler.check_arrival()
+        right_result = interface.right_arm_handler.check_arrival()
+        if left_result['arrived'] and right_result['arrived']:
+            print("  ✓ A点end轨迹执行完成（左右臂均已到达）\n")
+        else:
+            print("  ⚠ A点end轨迹执行完成（部分或全部未到达）\n")
     except Exception as e:
         print(f"  ✗ 发送A点end路径失败: {e}\n")
     
@@ -242,7 +256,14 @@ def main():
         print("  ✓ B点initial路径已发送")
         print(f"  → 等待轨迹执行完成（约{TRAJECTORY_EXECUTION_WAIT_TIME}秒）...")
         time.sleep(TRAJECTORY_EXECUTION_WAIT_TIME)
-        print("  ✓ B点initial轨迹执行完成\n")
+        
+        # 检查到达状态
+        left_result = interface.left_arm_handler.check_arrival()
+        right_result = interface.right_arm_handler.check_arrival()
+        if left_result['arrived'] and right_result['arrived']:
+            print("  ✓ B点initial轨迹执行完成（左右臂均已到达）\n")
+        else:
+            print("  ⚠ B点initial轨迹执行完成（部分或全部未到达）\n")
     except Exception as e:
         print(f"  ✗ 发送B点initial路径失败: {e}\n")
     
@@ -266,7 +287,14 @@ def main():
         print("  ✓ B点end路径已发送")
         print(f"  → 等待轨迹执行完成（约{TRAJECTORY_EXECUTION_WAIT_TIME}秒）...")
         time.sleep(TRAJECTORY_EXECUTION_WAIT_TIME)
-        print("  ✓ B点end轨迹执行完成\n")
+        
+        # 检查到达状态
+        left_result = interface.left_arm_handler.check_arrival()
+        right_result = interface.right_arm_handler.check_arrival()
+        if left_result['arrived'] and right_result['arrived']:
+            print("  ✓ B点end轨迹执行完成（左右臂均已到达）\n")
+        else:
+            print("  ⚠ B点end轨迹执行完成（部分或全部未到达）\n")
     except Exception as e:
         print(f"  ✗ 发送B点end路径失败: {e}\n")
     
@@ -296,7 +324,14 @@ def main():
         print("  ✓ A点initial第一个点路径已发送")
         print(f"  → 等待轨迹执行完成（约{TRAJECTORY_EXECUTION_WAIT_TIME}秒）...")
         time.sleep(TRAJECTORY_EXECUTION_WAIT_TIME)
-        print("  ✓ A点initial第一个点轨迹执行完成\n")
+        
+        # 检查到达状态
+        left_result = interface.left_arm_handler.check_arrival()
+        right_result = interface.right_arm_handler.check_arrival()
+        if left_result['arrived'] and right_result['arrived']:
+            print("  ✓ A点initial第一个点轨迹执行完成（左右臂均已到达）\n")
+        else:
+            print("  ⚠ A点initial第一个点轨迹执行完成（部分或全部未到达）\n")
     except Exception as e:
         print(f"  ✗ 发送A点initial第一个点路径失败: {e}\n")
     

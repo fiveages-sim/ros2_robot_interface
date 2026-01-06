@@ -16,7 +16,8 @@ A standalone Python package for communicating with ROS 2 robots through topics. 
 ### From Source (Development)
 
 ```bash
-cd ros2_robot_interface
+conda activate lerobot_ros2
+cd ~/PythonProject/ros2_robot_interface/
 pip install -e .
 ```
 
@@ -104,33 +105,60 @@ config = ROS2RobotInterfaceConfig(
 
 ## API Reference
 
-### ROS2RobotInterface
+详细的 API 参考文档请查看 [API_REFERENCE.md](API_REFERENCE.md)，其中包含：
 
-Main interface class for ROS 2 robot communication.
+- 每个部分（手臂、夹爪、头部、身体）的详细函数说明
+- 每个函数的功能、参数、返回值
+- 完整的使用示例
+- 各部分功能总结表
 
-#### Methods
+### 快速参考
 
-- `connect()` - Connect to ROS 2 and create subscriptions/publishers
-- `disconnect()` - Disconnect and cleanup resources
-- `get_joint_state()` - Get the latest joint state
-- `get_end_effector_pose()` - Get the latest end-effector pose
-- `send_end_effector_target(pose)` - Send target end-effector pose
-- `send_gripper_command(position)` - Send gripper position command
-- `send_cartesian_velocity(linear, angular)` - Send cartesian velocity commands (placeholder)
+#### ROS2RobotInterface 主要方法
 
-#### Properties
+- `connect()` - 连接到 ROS 2 并创建订阅器和发布器
+- `disconnect()` - 断开连接并清理资源
+- `get_joint_state(categorized=False)` - 获取关节状态
+- `send_fsm_command(command)` - 发送 FSM 状态切换命令
+- `send_head_joint_positions(positions)` - 发送头部关节位置
+- `send_body_joint_positions(positions)` - 发送身体关节位置
+- `send_dual_arm_target_stamped(left_pose, right_pose, frame_id)` - 发送双臂目标 pose
+- `check_arrive(part, ...)` - 统一检查到达状态
 
-- `is_connected` - Check if the interface is connected
+#### 属性
+
+- `is_connected` - 检查接口是否已连接
+- `left_arm_handler` - 左臂处理器（ArmHandler 实例）
+- `right_arm_handler` - 右臂处理器（ArmHandler 实例，双臂模式）
+- `left_gripper_handler` - 左夹爪处理器（GripperHandler 实例）
+- `right_gripper_handler` - 右夹爪处理器（GripperHandler 实例，双臂模式）
+
+#### 各部分 Handler 方法
+
+**ArmHandler（手臂）：**
+- `get_pose()` - 获取当前 pose
+- `get_target_pose()` - 获取目标 pose
+- `send_target(pose)` - 发送目标 pose
+- `send_target_stamped(frame_id, pose)` - 发送带坐标系的目标 pose
+- `send_joint_positions(positions)` - 发送关节位置（MoveJ 模式）
+- `check_arrival(pose_threshold, orient_threshold)` - 检查到达状态
+
+**GripperHandler（夹爪）：**
+- `send_joint_positions(position)` - 发送夹爪关节位置命令（位置控制方式）
+- `send_target_command(target_value)` - 发送夹爪开关控制命令（开关控制方式，0=关闭，1=打开）
+- `check_arrival(current_position, threshold)` - 检查到达状态
+- `get_target_position()` - 获取目标位置
+
+**注意：** 控制器名称（`hand_controller` 或 `gripper_controller`）会在 `connect()` 时自动检测，无需手动配置。
 
 ### ROS2RobotInterfaceConfig
 
-Configuration dataclass for the interface.
+配置数据类，用于设置接口参数。
 
 ### Exceptions
 
-- `ROS2InterfaceError` - Base exception for ROS 2 interface errors
-- `ROS2NotConnectedError` - Raised when trying to use the interface while not connected
-- `ROS2AlreadyConnectedError` - Raised when trying to connect while already connected
+- `ROS2NotConnectedError` - 当接口未连接时尝试使用接口
+- `ROS2AlreadyConnectedError` - 当接口已连接时尝试再次连接
 
 ## Requirements
 

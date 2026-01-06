@@ -50,6 +50,9 @@ class ROS2RobotInterfaceConfig:
     head_joint_controller_topic: str | None = None  # e.g., "/head_joint_controller/target_joint_position"
     body_joint_controller_topic: str | None = None  # e.g., "/body_joint_controller/target_joint_position"
     
+    left_arm_joint_controller_topic: str | None = None  # Auto-detected based on available topics
+    right_arm_joint_controller_topic: str | None = None  # Auto-detected for dual-arm mode
+    
     # Joint names
     joint_names: list[str] = field(default_factory=lambda: [
         "joint1", "joint2", "joint3", "joint4", "joint5", "joint6"
@@ -62,6 +65,8 @@ class ROS2RobotInterfaceConfig:
     gripper_command_topic: str = "/gripper_joint/position_command"  # Required for gripper control
     gripper_min_position: float = 0.0  # Closed position
     gripper_max_position: float = 0.0384  # Open position
+    left_gripper_controller_name: str | None = None  # Auto-detected: "hand_controller", "left_hand_controller", or "left_gripper_controller"
+    right_gripper_controller_name: str | None = None  # Auto-detected: "right_hand_controller" or "right_gripper_controller"
     
     # Control parameters
     control_type: ControlType = ControlType.CARTESIAN_POSE

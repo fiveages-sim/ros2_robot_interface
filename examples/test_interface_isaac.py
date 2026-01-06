@@ -129,7 +129,7 @@ def main():
     print("-" * 70)
     
     # 左臂/主臂位姿
-    left_pose = interface.get_end_effector_pose()
+    left_pose = interface.left_arm_handler.get_pose()
     if left_pose:
         print(f"  ✓ 末端执行器位姿已接收")
         print(f"    位置:    ({left_pose.position.x:7.3f}, {left_pose.position.y:7.3f}, {left_pose.position.z:7.3f})")
@@ -139,7 +139,7 @@ def main():
         print("  ⚠ 尚未接收到末端执行器位姿")
     
     # 右臂位姿（仅双臂模式）
-    right_pose = interface.get_right_end_effector_pose()
+    right_pose = interface.right_arm_handler.get_pose()
     if right_pose:
         print(f"\n  ✓ 右臂位姿已接收")
         print(f"    位置:    ({right_pose.position.x:7.3f}, {right_pose.position.y:7.3f}, {right_pose.position.z:7.3f})")
@@ -227,7 +227,7 @@ def main():
                 gripper_status = "张开" if gripper_target_open else "闭合"
                 
                 try:
-                    interface.send_gripper_command(gripper_position)
+                    interface.left_gripper_handler.send_joint_positions(gripper_position)
                     print(f"[{i:3d}s] → 夹爪: {gripper_status} (位置: {gripper_position:.1f})")
                     gripper_command_sent = True
                 except Exception as e:
