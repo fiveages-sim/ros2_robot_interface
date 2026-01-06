@@ -13,7 +13,8 @@ from typing import Optional, Dict, Any
 import rclpy
 from rclpy.node import Node
 from rclpy.publisher import Publisher
-from std_msgs.msg import Float64
+from rclpy.subscription import Subscription
+from std_msgs.msg import Float64, Int32
 
 from .exceptions import ROS2NotConnectedError
 
@@ -75,20 +76,51 @@ class GripperHandler:
         # 状态变量
         self.target_position: Optional[float] = None
         self.position_history: list[float] = []
+        self.is_open: bool = False  # 开关状态：True=打开, False=关闭（用于target_command）
         
-        # Publisher
+        # Publisher（位置控制 - 保留原有功能）
         self.command_pub: Optional[Publisher] = None
+        
+        # Publisher 和 Subscription（开关控制 - 新功能）
+        self.target_command_pub: Optional[Publisher] = None
+        self.target_command_sub: Optional[Subscription] = None
     
     def initialize(self) -> None:
-        """初始化发布器"""
-        # 创建命令发布器
+        """初始化发布器和订阅器"""
+        # 创建位置控制发布器（保留原有功能）
         if self.command_topic:
             self.command_pub = self.node.create_publisher(
                 Float64, self.command_topic, 10
             )
-            logger.debug(f"{self.label}: Created command publisher for {self.command_topic}")
-        else:
-            logger.debug(f"{self.label}: Command topic not configured, skipping publisher")
+            logger.debug(f"{self.label}: Created position command publisher for {self.command_topic}")
+        
+        # 创建target_command发布器和订阅器（新功能）
+        # 判断是否为单臂模式
+        is_dual_arm = self.config.right_end_effector_pose_topic is not None
+        
+        if self.gripper_type == GripperType.LEFT:
+            # 单臂模式下，控制器名称可能是 hand_controller（无left前缀）
+            # 双臂模式下，使用 left_hand_controller
+            if is_dual_arm:
+                target_command_topic = "/left_hand_controller/target_command"
+            else:
+                # 单臂模式：优先尝试 hand_controller，如果没有则使用 left_hand_controller
+                target_command_topic = "/hand_controller/target_command"
+        else:  # RIGHT
+            # 右夹爪只在双臂模式下存在
+            target_command_topic = "/right_hand_controller/target_command"
+        
+        self.target_command_pub = self.node.create_publisher(
+            Int32, target_command_topic, 10
+        )
+        logger.debug(f"{self.label}: Created target_command publisher for {target_command_topic}")
+        
+        # 创建订阅器用于状态同步（像VR和joystick一样）
+        self.target_command_sub = self.node.create_subscription(
+            Int32, target_command_topic,
+            self._target_command_callback, 10
+        )
+        logger.debug(f"{self.label}: Created target_command subscription for state sync")
     
     def send_joint_positions(self, position: float) -> None:
         """发送夹爪关节位置命令
@@ -121,11 +153,66 @@ class GripperHandler:
             self.target_position = clamped_position
             self.position_history.clear()
         
-        # 发布消息
+        # 发布消息（位置控制方式）
         gripper_msg = Float64()
         gripper_msg.data = clamped_position
         self.command_pub.publish(gripper_msg)
         logger.debug(f"Published {self.label.lower()} joint positions: {clamped_position}")
+    
+    def send_target_command(self, target_value: int) -> None:
+        """发送夹爪开关控制命令（新方式）
+        
+        使用 target_command 话题进行开关控制，与 VR、RViz、Joystick 保持一致。
+        
+        Args:
+            target_value: 目标值，0=关闭, 1=打开
+            
+        Raises:
+            ROS2NotConnectedError: 如果发布器未初始化或夹爪未启用
+        """
+        if not self.config.gripper_enabled:
+            logger.warning(f"{self.label} is not enabled in configuration")
+            return
+        
+        if self.target_command_pub is None:
+            logger.warning(f"{self.label} target_command publisher not initialized")
+            return
+        
+        # 验证参数值
+        if target_value not in [0, 1]:
+            logger.warning(f"{self.label}: Invalid target_value {target_value}, must be 0 or 1")
+            return
+        
+        # 创建 Int32 消息
+        target_msg = Int32()
+        target_msg.data = target_value
+        
+        # 发布到 target_command 话题
+        self.target_command_pub.publish(target_msg)
+        
+        # 不立即更新状态，等待订阅器回调来更新（与VR/joystick逻辑一致）
+        action = "打开" if target_value == 1 else "关闭"
+        logger.debug(f"Published {self.label.lower()} target_command: {action} (value={target_value})")
+    
+    def _target_command_callback(self, msg: Int32) -> None:
+        """target_command 话题回调 - 同步夹爪状态
+        
+        接收其他节点发送的 target_command 消息，更新本地状态。
+        与 VR 和 joystick 的逻辑保持一致。
+        
+        Args:
+            msg: Int32 消息，data=1 表示打开，data=0 表示关闭
+        """
+        with self.data_lock:
+            self.is_open = (msg.data == 1)
+            # 同时更新 target_position 用于兼容性
+            if msg.data == 1:
+                self.target_position = self.config.gripper_max_position
+            else:
+                self.target_position = self.config.gripper_min_position
+        
+        action = "打开" if self.is_open else "关闭"
+        logger.debug(f"{self.label}: 状态同步更新 (target_command): {action}")
     
     def update_position_history(self, position: float) -> None:
         """更新位置历史记录
@@ -216,4 +303,10 @@ class GripperHandler:
         if self.command_pub:
             self.command_pub.destroy()
             self.command_pub = None
+        if self.target_command_pub:
+            self.target_command_pub.destroy()
+            self.target_command_pub = None
+        if self.target_command_sub:
+            self.target_command_sub.destroy()
+            self.target_command_sub = None
 

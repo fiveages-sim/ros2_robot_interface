@@ -14,7 +14,7 @@
 - ✅ 单臂/双臂自动检测
 - ✅ 手臂位姿获取（`get_pose()`）
 - ✅ 手臂目标位姿发送（`send_target()`、`send_target_stamped()`）
-- ✅ 夹爪控制（`send_joint_positions()`）
+- ✅ 夹爪控制（`send_joint_positions()`、`send_target_command()`）
 - ✅ 到达检查（`check_arrive()`）
 - ✅ 头部和身体关节控制
 - ✅ 关节状态获取（`get_joint_state()`）
@@ -176,6 +176,70 @@ python examples/test_tf_transform.py
 - 测试脚本会持续运行，按 `Ctrl+C` 停止
 - 需要确保机器人控制器已启动，TF 系统正在发布变换数据
 - 默认测试 `left_link7` → `left_link1` 的变换，可根据需要修改
+
+---
+
+### 7. `test_gripper.py` - 夹爪开关控制测试
+
+**功能：** 测试夹爪开关控制功能（使用 `target_command` 话题）
+
+**测试内容：**
+- ✅ `send_target_command()` 方法 - 发送开关控制命令（0=关闭，1=打开）
+- ✅ 状态同步 - 通过订阅器回调更新本地状态
+- ✅ 自动切换 - 每3秒根据当前实际状态切换到相反状态
+- ✅ 到达检测 - 使用 `check_arrival()` 检查是否到达目标位置
+- ✅ 支持单臂和双臂模式
+
+**适用场景：**
+- 夹爪开关控制功能验证
+- 状态同步机制测试
+- 与 VR、RViz、Joystick 控制的一致性验证
+- 夹爪到达检测功能测试
+
+**运行方式：**
+```bash
+conda activate lerobot_ros2
+source ~/ros2_ws/install/setup.bash
+cd /home/fiveages/PythonProject/ros2_robot_interface
+python examples/test_gripper.py
+```
+
+**注意事项：**
+- 测试脚本会持续运行，每3秒切换一次夹爪状态，按 `Ctrl+C` 停止
+- 使用 `/left_hand_controller/target_command` 和 `/right_hand_controller/target_command` 话题
+- 单臂模式下使用 `/hand_controller/target_command` 话题
+
+---
+
+### 8. `test_gripper_position.py` - 夹爪位置到达测试
+
+**功能：** 测试夹爪位置控制功能（发送具体位置值并检测到达）
+
+**测试内容：**
+- ✅ `send_joint_positions()` 方法 - 发送位置命令（如 0.2）
+- ✅ `check_arrival()` 方法 - 检查是否到达目标位置
+- ✅ 位置稳定性检测 - 关闭时考虑位置稳定性（可能已夹住物体）
+- ✅ 每3秒发送一次位置命令并检测到达
+- ✅ 支持单臂和双臂模式
+
+**适用场景：**
+- 夹爪位置精确控制
+- 位置到达检测功能验证
+- 稳定性检测机制测试
+- 夹爪抓取物体检测
+
+**运行方式：**
+```bash
+conda activate lerobot_ros2
+source ~/ros2_ws/install/setup.bash
+cd /home/fiveages/PythonProject/ros2_robot_interface
+python examples/test_gripper_position.py
+```
+
+**注意事项：**
+- 测试脚本会持续运行，每3秒发送一次位置命令（0.2），按 `Ctrl+C` 停止
+- 默认目标位置为 0.2，可在代码中修改 `test_position` 变量
+- `check_arrival()` 方法会打印详细的检查信息，包括位置历史记录
 
 ---
 

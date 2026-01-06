@@ -354,7 +354,7 @@ interface.right_gripper_handler
 
 #### 1. `send_joint_positions(position: float) -> None`
 
-**功能：** 发送夹爪关节位置命令
+**功能：** 发送夹爪关节位置命令（位置控制方式）
 
 **参数：**
 - `position` (float): 目标关节位置（夹爪通常只有一个关节）
@@ -380,7 +380,42 @@ interface.left_gripper_handler.send_joint_positions(1.0)
 
 ---
 
-#### 2. `check_arrival(current_position: Optional[float], threshold: float = 0.01) -> Dict[str, Any]`
+#### 2. `send_target_command(target_value: int) -> None`
+
+**功能：** 发送夹爪开关控制命令（开关控制方式，使用 `target_command` 话题）
+
+**参数：**
+- `target_value` (int): 目标值，`0` = 关闭，`1` = 打开
+
+**说明：**
+- 使用 `target_command` 话题进行开关控制，与 VR、RViz、Joystick 保持一致
+- 发布到 `/left_hand_controller/target_command` 或 `/right_hand_controller/target_command` 话题
+- 单臂模式下发布到 `/hand_controller/target_command` 话题
+- 使用 `std_msgs/Int32` 消息类型
+- 会自动订阅相同话题以同步状态（通过回调更新 `is_open` 属性）
+- 如果传入的值不是 0 或 1，会发出警告并返回
+
+**示例：**
+```python
+# 打开夹爪
+interface.left_gripper_handler.send_target_command(1)
+
+# 关闭夹爪
+interface.left_gripper_handler.send_target_command(0)
+
+# 根据当前状态切换
+current_state = interface.left_gripper_handler.is_open
+target_value = 0 if current_state else 1
+interface.left_gripper_handler.send_target_command(target_value)
+```
+
+**话题映射：**
+- 左夹爪：`/left_hand_controller/target_command`（双臂模式）或 `/hand_controller/target_command`（单臂模式）
+- 右夹爪：`/right_hand_controller/target_command`（仅双臂模式）
+
+---
+
+#### 3. `check_arrival(current_position: Optional[float], threshold: float = 0.01) -> Dict[str, Any]`
 
 **功能：** 检查夹爪是否到达目标位置
 
@@ -793,8 +828,8 @@ if pose_in_base:
 |------|-------------|---------|---------|---------|
 | **左臂** | `left_arm_handler` | `send_target()`<br>`send_target_stamped()`<br>`send_joint_positions()` | `get_pose()`<br>`get_target_pose()` | `check_arrival()` |
 | **右臂** | `right_arm_handler` | `send_target()`<br>`send_target_stamped()`<br>`send_joint_positions()` | `get_pose()`<br>`get_target_pose()` | `check_arrival()` |
-| **左夹爪** | `left_gripper_handler` | `send_joint_positions()` | `get_target_position()` | `check_arrival()` |
-| **右夹爪** | `right_gripper_handler` | `send_joint_positions()` | `get_target_position()` | `check_arrival()` |
+| **左夹爪** | `left_gripper_handler` | `send_joint_positions()`<br>`send_target_command()` | `get_target_position()` | `check_arrival()` |
+| **右夹爪** | `right_gripper_handler` | `send_joint_positions()`<br>`send_target_command()` | `get_target_position()` | `check_arrival()` |
 | **头部** | 直接方法 | `send_head_joint_positions()` | `get_joint_state()` | `check_arrive('head')` |
 | **身体** | 直接方法 | `send_body_joint_positions()` | `get_joint_state()` | `check_arrive('body')` |
 
