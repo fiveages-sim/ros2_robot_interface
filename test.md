@@ -135,6 +135,50 @@ python examples/test_w2_path.py
 
 ---
 
+### 6. `test_tf_transform.py` - TF 变换查询和坐标转换测试
+
+**功能：** 测试 TF 变换查询和坐标转换功能
+
+**测试内容：**
+- ✅ `lookup_transform()` 方法 - 查询两个坐标系之间的变换关系
+- ✅ `transform_pose()` 方法 - 将位姿从一个坐标系转换到另一个坐标系
+- ✅ 持续查询变换（每2秒查询一次）
+- ✅ 变换信息格式化输出（平移、旋转四元数、RPY角度）
+- ✅ 坐标转换结果验证
+
+**函数说明：**
+
+- **`lookup_transform(target_frame, source_frame)`**
+  - 查询两个坐标系之间的变换关系
+  - 例如：`lookup_transform("left_link1", "left_link7")` 返回 **left_link7 → left_link1** 的变换
+  - 返回结果表示：left_link7 在 left_link1 坐标系下的位姿（包含平移和旋转）
+
+- **`transform_pose(pose, source_frame, target_frame)`**
+  - 将位姿从一个坐标系转换到另一个坐标系
+  - 例如：`transform_pose(pose, "left_link7", "left_link1")` 将位姿从 left_link7 坐标系转换到 left_link1 坐标系
+  - 返回结果表示：转换后的位姿（在 left_link1 坐标系下）
+
+**适用场景：**
+- TF 坐标系变换查询
+- 不同坐标系之间的位姿转换
+- TF 系统功能验证
+- 多坐标系协作任务开发
+
+**运行方式：**
+```bash
+conda activate lerobot_ros2
+source ~/ros2_ws/install/setup.bash
+cd /home/fiveages/PythonProject/ros2_robot_interface
+python examples/test_tf_transform.py
+```
+
+**注意事项：**
+- 测试脚本会持续运行，按 `Ctrl+C` 停止
+- 需要确保机器人控制器已启动，TF 系统正在发布变换数据
+- 默认测试 `left_link7` → `left_link1` 的变换，可根据需要修改
+
+---
+
 ## 🤖 启动机器人
 
 ### 单臂机器人（CR5）
