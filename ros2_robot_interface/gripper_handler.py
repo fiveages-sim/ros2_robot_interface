@@ -20,10 +20,7 @@ from .exceptions import ROS2NotConnectedError
 
 logger = logging.getLogger(__name__)
 
-# 默认阈值常量
-DEFAULT_GRIPPER_POSITION_THRESHOLD: float = 0.01  # 位置距离阈值
-DEFAULT_GRIPPER_STABILITY_THRESHOLD: float = 0.0001  # 稳定性阈值
-DEFAULT_GRIPPER_STABILITY_HISTORY_SIZE: int = 15  # 历史记录大小
+
 
 
 class GripperType(Enum):
@@ -232,23 +229,26 @@ class GripperHandler:
         """
         # 注意：调用者已经持有 data_lock，这里不再获取锁以避免死锁
         self.position_history.append(position)
-        if len(self.position_history) > DEFAULT_GRIPPER_STABILITY_HISTORY_SIZE:
+        if len(self.position_history) > self.config.gripper_stability_history_size:
             self.position_history.pop(0)
     
     def check_arrival(
         self,
         current_position: Optional[float],
-        threshold: float = DEFAULT_GRIPPER_POSITION_THRESHOLD
+        threshold: float | None = None
     ) -> Dict[str, Any]:
         """检查夹爪是否到达目标位置
         
         Args:
             current_position: 当前位置（从 get_joint_state() 获取）
-            threshold: 位置距离阈值，默认 DEFAULT_GRIPPER_POSITION_THRESHOLD
+            threshold: 位置距离阈值，如果为 None 则使用 config.gripper_position_threshold
             
         Returns:
             包含到达状态、距离等信息的字典
         """
+        # 使用 config 中的默认值
+        threshold = threshold if threshold is not None else self.config.gripper_position_threshold
+        
         arrived = False
         distance = float('inf')
         
@@ -259,10 +259,11 @@ class GripperHandler:
             is_stable = False
             position_variance = float('inf')
             with self.data_lock:
-                if len(self.position_history) == DEFAULT_GRIPPER_STABILITY_HISTORY_SIZE:
-                    recent_positions = self.position_history[-DEFAULT_GRIPPER_STABILITY_HISTORY_SIZE:]
+                history_size = self.config.gripper_stability_history_size
+                if len(self.position_history) == history_size:
+                    recent_positions = self.position_history[-history_size:]
                     position_variance = max(recent_positions) - min(recent_positions)
-                    is_stable = position_variance < DEFAULT_GRIPPER_STABILITY_THRESHOLD
+                    is_stable = position_variance < self.config.gripper_stability_threshold
             
             # 判断是否在关闭过程中
             is_closing = current_position > self.target_position
@@ -282,8 +283,9 @@ class GripperHandler:
                 if len(self.position_history) > 0:
                     history_str = ", ".join([f"{p:.4f}" for p in self.position_history])
                     print(f"  [位置检查-{self.label}] 位置历史 ({len(self.position_history)}个值): [{history_str}]")
-                if len(self.position_history) == DEFAULT_GRIPPER_STABILITY_HISTORY_SIZE:
-                    print(f"  [位置检查-{self.label}] 位置稳定性: {is_stable} (变化: {position_variance:.4f}, 阈值: {DEFAULT_GRIPPER_STABILITY_THRESHOLD:.4f})")
+                history_size = self.config.gripper_stability_history_size
+                if len(self.position_history) == history_size:
+                    print(f"  [位置检查-{self.label}] 位置稳定性: {is_stable} (变化: {position_variance:.4f}, 阈值: {self.config.gripper_stability_threshold:.4f})")
             
             if arrived:
                 if is_stable and is_closing and distance >= threshold:

@@ -25,10 +25,6 @@ from .exceptions import ROS2NotConnectedError
 
 logger = logging.getLogger(__name__)
 
-# 默认阈值常量
-DEFAULT_POSE_POSITION_THRESHOLD: float = 0.06  # 位置距离阈值（米）
-DEFAULT_POSE_ORIENTATION_THRESHOLD: float = 0.1  # 姿态距离阈值
-
 
 class ArmType(Enum):
     """手臂类型枚举"""
@@ -285,17 +281,21 @@ class ArmHandler:
         self.joint_controller_pub.publish(msg)
         logger.info(f"Published {self.label.lower()} joint positions: {positions}")
     
-    def check_arrival(self, pose_threshold: float = DEFAULT_POSE_POSITION_THRESHOLD, 
-                     orient_threshold: float = DEFAULT_POSE_ORIENTATION_THRESHOLD) -> Dict[str, Any]:
+    def check_arrival(self, pose_threshold: float | None = None, 
+                     orient_threshold: float | None = None) -> Dict[str, Any]:
         """检查手臂是否到达目标位置
         
         Args:
-            pose_threshold: 位置距离阈值（米），默认 DEFAULT_POSE_POSITION_THRESHOLD
-            orient_threshold: 姿态距离阈值，默认 DEFAULT_POSE_ORIENTATION_THRESHOLD
+            pose_threshold: 位置距离阈值（米），如果为 None 则使用 config.pose_position_threshold
+            orient_threshold: 姿态距离阈值，如果为 None 则使用 config.pose_orientation_threshold
             
         Returns:
             包含到达状态、距离等信息的字典
         """
+        # 使用 config 中的默认值
+        pose_threshold = pose_threshold if pose_threshold is not None else self.config.pose_position_threshold
+        orient_threshold = orient_threshold if orient_threshold is not None else self.config.pose_orientation_threshold
+        
         arrived = False
         pos_dist = float('inf')
         orient_dist = float('inf')

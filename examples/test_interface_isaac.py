@@ -247,18 +247,20 @@ def main():
                                 # 检查位置历史是否稳定（单臂和双臂模式都使用 left_gripper_position_history）
                                 history = interface.left_gripper_position_history
                                 
-                                if len(history) >= interface.gripper_stability_history_size:
-                                    recent_positions = history[-interface.gripper_stability_history_size:]
+                                history_size = interface.config.gripper_stability_history_size
+                                stability_threshold = interface.config.gripper_stability_threshold
+                                if len(history) >= history_size:
+                                    recent_positions = history[-history_size:]
                                     max_pos = max(recent_positions)
                                     min_pos = min(recent_positions)
                                     variance = max_pos - min_pos
                                     
-                                    if variance < interface.gripper_stability_threshold:
+                                    if variance < stability_threshold:
                                         # 位置稳定且不在0，说明抓到物体了
                                         object_detected = True
                                         print(f"[{i:3d}s] ✓ 夹爪已到达关闭状态")
                                         print(f"  ⚠ 检测到物体！当前位置: {gripper_current_position:.4f} (不在0)")
-                                        print(f"  → 位置稳定性: {variance:.4f} < {interface.gripper_stability_threshold:.4f}")
+                                        print(f"  → 位置稳定性: {variance:.4f} < {stability_threshold:.4f}")
                                         print(f"  → 停止打开操作")
                                         print()
                                         continue

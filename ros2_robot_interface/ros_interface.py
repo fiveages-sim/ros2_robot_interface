@@ -62,11 +62,9 @@ class ROS2RobotInterface:
         
         self.head_target_positions: Optional[List[float]] = None
         self.body_target_positions: Optional[List[float]] = None
-        self.position_threshold: float = 0.05
         
         self.tf_buffer: Optional[tf2_ros.Buffer] = None
         self.tf_listener: Optional[tf2_ros.TransformListener] = None
-        self.base_frame: str = "arm_base"
         
         # Arm handlers
         self.left_arm_handler: Optional[ArmHandler] = None
@@ -222,7 +220,7 @@ class ROS2RobotInterface:
                 self.config,
                 self.data_lock,
                 self.tf_buffer,
-                self.base_frame,
+                self.config.base_frame,
                 self.send_fsm_command
             )
             self.left_arm_handler.initialize()
@@ -235,7 +233,7 @@ class ROS2RobotInterface:
                     self.config,
                     self.data_lock,
                     self.tf_buffer,
-                    self.base_frame,
+                    self.config.base_frame,
                     self.send_fsm_command
                 )
                 self.right_arm_handler.initialize()
@@ -622,7 +620,7 @@ class ROS2RobotInterface:
         if part == 'gripper' and not is_dual_arm:
             part = 'left_gripper'
         
-        threshold = position_threshold if position_threshold is not None else self.position_threshold
+        threshold = position_threshold if position_threshold is not None else self.config.position_threshold
         result = {}
         
         categorized_state = self.get_joint_state(categorized=True)
