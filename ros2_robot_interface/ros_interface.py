@@ -23,6 +23,7 @@ from rclpy.subscription import Subscription
 from rclpy.time import Time
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Float64, Float64MultiArray, Int32
+from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 import tf2_ros
 from tf2_ros import TransformException
 from tf2_geometry_msgs import do_transform_pose
@@ -50,6 +51,7 @@ class ROS2RobotInterface:
         self.fsm_command_pub: Publisher | None = None
         self.head_joint_controller_pub: Publisher | None = None
         self.body_joint_controller_pub: Publisher | None = None
+        self.arm_trajectory_pub: Publisher | None = None  # Unified trajectory publisher for both arms
         
         self.latest_joint_state: Dict[str, Any] | None = None
         
@@ -273,6 +275,26 @@ class ROS2RobotInterface:
                 self.body_joint_controller_pub = self.robot_node.create_publisher(
                     Float64MultiArray, self.config.body_joint_controller_topic, 10
                 )
+            
+            # Create trajectory publishers for joint space multi-node trajectory planning
+            # Create unified trajectory publisher for joint space multi-node trajectory planning
+            # The topic is shared for both arms, controlled by joint_names in the message
+            # Try to detect controller name from left_arm_joint_controller_topic or right_arm_joint_controller_topic
+            controller_name = None
+            if self.config.left_arm_joint_controller_topic:
+                topic_parts = self.config.left_arm_joint_controller_topic.strip("/").split("/")
+                controller_name = topic_parts[0]
+            elif self.config.right_arm_joint_controller_topic:
+                topic_parts = self.config.right_arm_joint_controller_topic.strip("/").split("/")
+                controller_name = topic_parts[0]
+            
+            if controller_name:
+                trajectory_topic = f"/{controller_name}/target_joint_trajectory"
+                self.arm_trajectory_pub = self.robot_node.create_publisher(
+                    JointTrajectory, trajectory_topic, 10
+                )
+                logger.info(f"Created unified arm trajectory publisher: {trajectory_topic} "
+                           f"(supports single-arm and dual-arm via joint_names)")
             
             self.executor = SingleThreadedExecutor()
             self.executor.add_node(self.robot_node)
@@ -578,6 +600,80 @@ class ROS2RobotInterface:
         logger.debug(f"Published body joint positions: {positions}")
         
         self.body_target_positions = positions.copy() if positions else None
+    
+    def send_joint_trajectory(self, 
+                             joint_names: List[str],
+                             waypoints: List[List[float]]) -> None:
+        """Send multi-node joint trajectory for arm joints.
+        
+        This method uses a unified topic for both single-arm and dual-arm control.
+        The controller determines which arm(s) to control based on the joint_names in the message.
+        
+        Args:
+            joint_names: List of joint names (must match controller joints)
+                       - For left arm only: use left arm joint names (e.g., ["left_joint1", "left_joint2", ...])
+                       - For right arm only: use right arm joint names (e.g., ["right_joint1", "right_joint2", ...])
+                       - For dual-arm: use both left and right arm joint names in order
+            waypoints: List of waypoints, each waypoint is a list of joint positions
+                      Note: Current joint position will be added as first waypoint automatically
+                      Each waypoint must have the same length as joint_names
+        
+        Raises:
+            ROS2NotConnectedError: If interface is not connected
+            ValueError: If waypoints are invalid
+        """
+        if not self.is_connected:
+            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+        
+        if not waypoints or len(waypoints) < 2:
+            raise ValueError("At least 2 waypoints are required (current position will be added as first waypoint)")
+        
+        if len(joint_names) == 0:
+            raise ValueError("joint_names cannot be empty")
+        
+        if self.arm_trajectory_pub is None:
+            raise ROS2NotConnectedError("Arm trajectory publisher not initialized. "
+                                       "Arm joint controller topic not configured.")
+        
+        # Check waypoint dimensions
+        for i, waypoint in enumerate(waypoints):
+            if len(waypoint) != len(joint_names):
+                raise ValueError(f"Waypoint {i} has {len(waypoint)} positions, but expected {len(joint_names)}")
+        
+        # Create JointTrajectory message
+        trajectory_msg = JointTrajectory()
+        trajectory_msg.header.stamp = self.robot_node.get_clock().now().to_msg()
+        trajectory_msg.header.frame_id = ""
+        trajectory_msg.joint_names = joint_names
+        
+        # Add waypoints (current position will be added as first point by the controller)
+        for waypoint in waypoints:
+            point = JointTrajectoryPoint()
+            point.positions = waypoint
+            # time_from_start is not used currently, but we can set it for future use
+            # For now, trajectory_duration parameter in controller will be used
+            trajectory_msg.points.append(point)
+        
+        # Publish trajectory
+        self.arm_trajectory_pub.publish(trajectory_msg)
+        
+        # Determine which arm(s) are being controlled based on joint names
+        left_arm_joints = [name for name in joint_names if name.lower().startswith('left_')]
+        right_arm_joints = [name for name in joint_names if name.lower().startswith('right_')]
+        
+        if left_arm_joints and right_arm_joints:
+            arm_info = "dual-arm"
+        elif left_arm_joints:
+            arm_info = "left arm"
+        elif right_arm_joints:
+            arm_info = "right arm"
+        else:
+            arm_info = "arms (joint names don't match left_/right_ pattern)"
+        
+        logger.info(f"Published {arm_info} joint trajectory with {len(waypoints)} waypoints "
+                   f"for {len(joint_names)} joints")
+        logger.debug(f"Joint names: {joint_names}")
+        logger.debug(f"Waypoints: {len(waypoints)} points")
     
     
     def _check_joint_arrival(self, part_name: str, target_positions: Optional[List[float]], 
