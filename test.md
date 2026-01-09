@@ -28,7 +28,7 @@
 ```bash
 conda activate lerobot_ros2
 source ~/ros2_ws/install/setup.bash
-cd /home/fiveages/PythonProject/ros2_robot_interface
+cd ~/libraries/ros2_robot_interface
 python examples/test_interface.py
 ```
 
@@ -54,7 +54,7 @@ python examples/test_interface.py
 ```bash
 conda activate lerobot_ros2
 source ~/ros2_ws/install/setup.bash
-cd /home/fiveages/PythonProject/ros2_robot_interface
+cd ~/libraries/ros2_robot_interface
 python examples/test_interface_isaac.py
 ```
 
@@ -79,7 +79,7 @@ python examples/test_interface_isaac.py
 ```bash
 conda activate lerobot_ros2
 source ~/ros2_ws/install/setup.bash
-cd /home/fiveages/PythonProject/ros2_robot_interface
+cd ~/libraries/ros2_robot_interface
 python examples/test_dual_arm_target_stamped.py
 ```
 
@@ -104,7 +104,7 @@ python examples/test_dual_arm_target_stamped.py
 ```bash
 conda activate lerobot_ros2
 source ~/ros2_ws/install/setup.bash
-cd /home/fiveages/PythonProject/ros2_robot_interface
+cd ~/libraries/ros2_robot_interface
 python examples/test_arm_joint_movej.py
 ```
 
@@ -129,7 +129,7 @@ python examples/test_arm_joint_movej.py
 ```bash
 conda activate lerobot_ros2
 source ~/ros2_ws/install/setup.bash
-cd /home/fiveages/PythonProject/ros2_robot_interface
+cd ~/libraries/ros2_robot_interface
 python examples/test_w2_path.py
 ```
 
@@ -168,7 +168,7 @@ python examples/test_w2_path.py
 ```bash
 conda activate lerobot_ros2
 source ~/ros2_ws/install/setup.bash
-cd /home/fiveages/PythonProject/ros2_robot_interface
+cd ~/libraries/ros2_robot_interface
 python examples/test_tf_transform.py
 ```
 
@@ -200,7 +200,7 @@ python examples/test_tf_transform.py
 ```bash
 conda activate lerobot_ros2
 source ~/ros2_ws/install/setup.bash
-cd /home/fiveages/PythonProject/ros2_robot_interface
+cd ~/libraries/ros2_robot_interface
 python examples/test_gripper.py
 ```
 
@@ -234,7 +234,7 @@ python examples/test_gripper.py
 ```bash
 conda activate lerobot_ros2
 source ~/ros2_ws/install/setup.bash
-cd /home/fiveages/PythonProject/ros2_robot_interface
+cd ~/libraries/ros2_robot_interface
 python examples/test_gripper_position.py
 ```
 
@@ -242,6 +242,70 @@ python examples/test_gripper_position.py
 - 测试脚本会持续运行，每3秒发送一次位置命令（0.2），按 `Ctrl+C` 停止
 - 默认目标位置为 0.2，可在代码中修改 `test_position` 变量
 - `check_arrival()` 方法会打印详细的检查信息，包括位置历史记录
+
+---
+
+### 9. `examples/fancy/demo_wavearm.py` - W2 机器人挥手演示（手臂）
+
+**功能：** W2 机器人挥手演示脚本，测试双臂协调挥手动作（手臂运动）
+
+**测试内容：**
+- ✅ `send_target_path()` 方法 - 发送路径轨迹
+- ✅ 双臂协调运动 - 左臂或右臂单独挥手，另一臂保持位置
+- ✅ 重复执行挥手动作（重复2次）
+- ✅ 路径轨迹执行和到达检测
+
+**适用场景：**
+- W2 机器人挥手演示
+- 双臂协调运动测试
+- 路径轨迹执行功能验证
+- 演示场景应用
+
+**运行方式：**
+```bash
+conda activate lerobot_ros2
+source ~/ros2_ws/install/setup.bash
+cd ~/libraries/ros2_robot_interface
+python examples/fancy/demo_wavearm.py
+```
+
+**注意事项：**
+- 适用于 W2 机器人分体控制模式（Split Body Control）
+- 演示脚本会自动切换到 OCS2 状态并执行挥手轨迹
+- 执行完成后会自动回到 HOME 位置并切换到 HOLD 状态
+
+---
+
+### 10. `examples/fancy/demo_wavehand.py` - W2 机器人挥手演示（灵巧手）
+
+**功能：** W2 机器人挥手演示脚本，测试双臂协调挥手动作（灵巧手版本）
+
+**测试内容：**
+- ✅ `send_target_path()` 方法 - 发送路径轨迹
+- ✅ 双臂协调运动 - 左臂或右臂单独挥手，另一臂保持位置
+- ✅ 重复执行挥手动作（重复2次）
+- ✅ 路径轨迹执行和到达检测
+- ✅ 与 `demo_wavearm.py` 类似，但针对灵巧手配置优化
+
+**适用场景：**
+- W2 机器人挥手演示（灵巧手版本）
+- 双臂协调运动测试
+- 路径轨迹执行功能验证
+- 演示场景应用
+
+**运行方式：**
+```bash
+conda activate lerobot_ros2
+source ~/ros2_ws/install/setup.bash
+cd ~/libraries/ros2_robot_interface
+python examples/fancy/demo_wavehand.py
+```
+
+**注意事项：**
+- 适用于 W2 机器人分体控制模式（Split Body Control）
+- 演示脚本会自动切换到 OCS2 状态并执行挥手轨迹
+- 执行完成后会自动回到 HOME 位置并切换到 HOLD 状态
+- 与 `demo_wavearm.py` 的区别：针对灵巧手（Jodell Hand）的配置和轨迹优化
 
 ---
 
