@@ -477,25 +477,29 @@ class ROS2RobotInterface:
         logger.info(f"Published target path with {len(left_poses)} left arm waypoints and {len(right_poses)} right arm waypoints (total: {len(path_msg.poses)})")
         logger.debug(f"Path frame_id: {path_msg.header.frame_id}")
         
-        # Update target poses in handlers with the last waypoint of each path (for check_arrival)
+        # Update target poses in handlers internally with the last waypoint of each path (for check_arrival, without publishing to target/stamped topics)
         if left_poses and self.left_arm_handler:
             last_left_pose = left_poses[-1]
-            # Extract Pose from PoseStamped if needed
+            # Extract Pose and frame_id from PoseStamped if needed
             if isinstance(last_left_pose, PoseStamped):
                 left_target_pose = last_left_pose.pose
+                left_frame_id = frame_id if frame_id is not None else last_left_pose.header.frame_id
             else:
                 left_target_pose = last_left_pose
-            self.left_arm_handler.send_target_stamped(default_frame_id, left_target_pose)
+                left_frame_id = frame_id if frame_id is not None else default_frame_id
+            self.left_arm_handler.set_target_pose_internal(left_frame_id, left_target_pose)
             logger.debug(f"Updated left arm target pose to last waypoint for arrival checking")
         
         if right_poses and self.right_arm_handler:
             last_right_pose = right_poses[-1]
-            # Extract Pose from PoseStamped if needed
+            # Extract Pose and frame_id from PoseStamped if needed
             if isinstance(last_right_pose, PoseStamped):
                 right_target_pose = last_right_pose.pose
+                right_frame_id = frame_id if frame_id is not None else last_right_pose.header.frame_id
             else:
                 right_target_pose = last_right_pose
-            self.right_arm_handler.send_target_stamped(default_frame_id, right_target_pose)
+                right_frame_id = frame_id if frame_id is not None else default_frame_id
+            self.right_arm_handler.set_target_pose_internal(right_frame_id, right_target_pose)
             logger.debug(f"Updated right arm target pose to last waypoint for arrival checking")
     
     def send_dual_arm_target_stamped(self, left_pose: Pose, right_pose: Pose, frame_id: str = "arm_base") -> None:
@@ -524,11 +528,11 @@ class ROS2RobotInterface:
         logger.debug(f"Left arm pose: ({left_pose.position.x:.4f}, {left_pose.position.y:.4f}, {left_pose.position.z:.4f})")
         logger.debug(f"Right arm pose: ({right_pose.position.x:.4f}, {right_pose.position.y:.4f}, {right_pose.position.z:.4f})")
         
-        # Update target poses in handlers (with TF transformation)
+        # Update target poses in handlers internally (for arrival checking, without publishing to target/stamped topics)
         if self.left_arm_handler:
-            self.left_arm_handler.send_target_stamped(frame_id, left_pose)
+            self.left_arm_handler.set_target_pose_internal(frame_id, left_pose)
         if self.right_arm_handler:
-            self.right_arm_handler.send_target_stamped(frame_id, right_pose)
+            self.right_arm_handler.set_target_pose_internal(frame_id, right_pose)
     
     
     def send_fsm_command(self, command: int) -> None:

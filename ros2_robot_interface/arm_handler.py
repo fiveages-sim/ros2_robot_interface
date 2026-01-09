@@ -236,6 +236,20 @@ class ArmHandler:
         """
         return self.target_pose
     
+    def set_target_pose_internal(self, frame_id: str, pose: Pose) -> None:
+        """仅更新内部目标 pose（不发布到话题），用于到达判断
+        
+        此方法只更新内部的 target_pose 变量，不发布任何消息到 ROS 话题。
+        主要用于在需要到达判断但不想发布目标到话题的场景。
+        
+        Args:
+            frame_id: 坐标系 ID
+            pose: 目标 pose
+        """
+        # 使用 TF 转换并更新内部 target pose（不发布）
+        self._update_target_pose_with_tf(pose, frame_id)
+        logger.debug(f"Updated {self.label.lower()} internal target pose (not published) in frame '{frame_id}'")
+    
     def send_joint_positions(self, positions: List[float], 
                             fsm_command_callback: Optional[Callable[[int], None]] = None) -> None:
         """发送关节位置命令（MoveJ 模式）
