@@ -309,6 +309,39 @@ python examples/fancy/demo_wavehand.py
 
 ---
 
+### 11. `examples/fancy/demo_pourbeer_o6.py` - W2 机器人倒酒演示（O6灵巧手）
+
+**功能：** W2 机器人倒酒动作演示脚本，基于 `pick_by_registration.py` 中的 `pour_beer` 方法实现，适用于 O6 灵巧手
+
+**测试内容：**
+- ✅ `send_target_path()` 方法 - 发送路径轨迹
+- ✅ 双臂协调运动 - 左臂持杯子，右臂持酒枪
+- ✅ 倒酒动作轨迹执行（前进和返回两段轨迹）
+- ✅ 四元数格式轨迹点支持
+- ✅ 轨迹执行完成等待
+
+**适用场景：**
+- W2 机器人倒酒演示（O6灵巧手版本）
+- 双臂协调倒酒任务
+- 路径轨迹执行功能验证
+- 演示场景应用
+
+**运行方式：**
+```bash
+conda activate lerobot_ros2
+source ~/ros2_ws/install/setup.bash
+cd ~/libraries/ros2_robot_interface
+python examples/fancy/demo_pourbeer_o6.py
+```
+
+**注意事项：**
+- 适用于 W2 机器人分体控制模式（Split Body Control）
+- 演示脚本会自动切换到 OCS2 状态并执行倒酒轨迹
+- 执行完成后会自动回到 HOME 位置并切换到 HOLD 状态
+- 使用四元数格式的轨迹点，支持精确的位姿控制
+
+---
+
 ## 🤖 启动机器人
 
 ### 单臂机器人（CR5）
