@@ -170,7 +170,31 @@ def main():
                 print(f"  ✗ 发送失败: {e}")
                 break
             
-            # 等待指定间隔时间后发送下一个目标
+            # 等待到达目标位置
+            print(f"  → 等待到达目标位置...")
+            max_wait_time = 30.0  # 最大等待时间（秒）
+            check_interval = 0.5  # 检查间隔（秒）
+            start_wait_time = time.time()
+            arrived = False
+            
+            while time.time() - start_wait_time < max_wait_time:
+                # 检查左臂到达状态
+                left_result = interface.left_arm_handler.check_arrival()
+                right_result = interface.right_arm_handler.check_arrival()
+                
+                if left_result['arrived'] and right_result['arrived']:
+                    elapsed_time = time.time() - start_wait_time
+                    print(f"  ✓ 双臂均已到达目标位置（耗时 {elapsed_time:.1f} 秒）")
+                    arrived = True
+                    break
+                
+                time.sleep(check_interval)
+            
+            if not arrived:
+                elapsed_time = time.time() - start_wait_time
+                print(f"  ⚠ 超时：{elapsed_time:.1f} 秒内未到达目标位置，继续下一步...")
+            
+            # 到达后等待一小段时间再发送下一个目标
             print(f"  → 等待 {interval} 秒后发送下一个目标...")
             time.sleep(interval)
             

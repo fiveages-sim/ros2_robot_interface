@@ -128,6 +128,12 @@ class ROS2RobotInterface:
             if "/right_target" in topic_names:
                 self.config.right_end_effector_target_topic = "/right_target"
         
+        # 检测目标位置订阅话题（用于到达判断）
+        if "/left_current_target" in topic_names:
+            self.config.end_effector_current_target_topic = "/left_current_target"
+        if "/right_current_target" in topic_names:
+            self.config.right_end_effector_current_target_topic = "/right_current_target"
+        
         # 检测位置控制话题（gripper模式）
         if "/left_gripper_joint/position_command" in topic_names:
             self.config.gripper_command_topic = "/left_gripper_joint/position_command"
@@ -507,7 +513,7 @@ class ROS2RobotInterface:
             else:
                 left_target_pose = last_left_pose
                 left_frame_id = frame_id if frame_id is not None else default_frame_id
-            self.left_arm_handler.set_target_pose_internal(left_frame_id, left_target_pose)
+            # 不再需要 set_target_pose_internal，到达判断完全依赖话题订阅
             logger.debug(f"Updated left arm target pose to last waypoint for arrival checking")
         
         if right_poses and self.right_arm_handler:
@@ -519,7 +525,7 @@ class ROS2RobotInterface:
             else:
                 right_target_pose = last_right_pose
                 right_frame_id = frame_id if frame_id is not None else default_frame_id
-            self.right_arm_handler.set_target_pose_internal(right_frame_id, right_target_pose)
+            # 不再需要 set_target_pose_internal，到达判断完全依赖话题订阅
             logger.debug(f"Updated right arm target pose to last waypoint for arrival checking")
     
     def send_dual_arm_target_stamped(self, left_pose: Pose, right_pose: Pose, frame_id: str = "arm_base") -> None:
@@ -548,11 +554,7 @@ class ROS2RobotInterface:
         logger.debug(f"Left arm pose: ({left_pose.position.x:.4f}, {left_pose.position.y:.4f}, {left_pose.position.z:.4f})")
         logger.debug(f"Right arm pose: ({right_pose.position.x:.4f}, {right_pose.position.y:.4f}, {right_pose.position.z:.4f})")
         
-        # Update target poses in handlers internally (for arrival checking, without publishing to target/stamped topics)
-        if self.left_arm_handler:
-            self.left_arm_handler.set_target_pose_internal(frame_id, left_pose)
-        if self.right_arm_handler:
-            self.right_arm_handler.set_target_pose_internal(frame_id, right_pose)
+        # 不再需要 set_target_pose_internal，到达判断完全依赖话题订阅（/left_current_target 或 /right_current_target）
     
     
     def send_fsm_command(self, command: int) -> None:
