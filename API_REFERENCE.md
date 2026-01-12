@@ -146,7 +146,7 @@ interface.left_arm_handler.send_target(target_pose)
 **使用场景：**
 - **相对运动控制**：使用末端执行器坐标系（如 `"left_eef"`）进行相对运动
 - **其他坐标系下的目标**：目标 pose 在其他坐标系下（如 `"head_link2"`, `"left_link6"` 等）
-- **双臂协调控制**：通过 `send_dual_arm_target_stamped()` 间接调用
+- **单臂控制**：单独控制左臂或右臂（双臂模式下）
 
 **优势：**
 - ✅ 自动进行坐标转换，无需手动计算
@@ -173,9 +173,9 @@ relative_pose.position.z = 0.0
 relative_pose.orientation.w = 1.0
 interface.left_arm_handler.send_target_stamped("left_eef", relative_pose)
 
-# 场景3：通过 send_dual_arm_target_stamped 间接调用
-interface.send_dual_arm_target_stamped(left_pose, right_pose, frame_id="arm_base")
-# 内部会调用 left_arm_handler.send_target_stamped(frame_id, left_pose)
+# 场景3：单独控制左臂（双臂模式下）
+interface.left_arm_handler.send_target_stamped("arm_base", left_pose)
+# 注意：如果需要同时控制双臂，应使用 send_dual_arm_target_stamped()
 ```
 
 ---
@@ -729,13 +729,16 @@ interface.send_fsm_command(4)
 - `frame_id` (str): 坐标系 ID，默认 "arm_base"
 
 **说明：**
-- 发布到 `/dual_target/stamped` topic
-- **内部实现**：会调用 `left_arm_handler.send_target_stamped(frame_id, left_pose)` 和 `right_arm_handler.send_target_stamped(frame_id, right_pose)`
-- 会自动更新左右臂 handler 的目标 pose（带 TF 转换到各自的 `base_frame`）
+- 发布到 `/dual_target/stamped` topic（使用 `nav_msgs/Path` 消息类型，包含两个 `PoseStamped`）
+- **内部实现**：
+  - 将左右两个 pose 封装为 `Path` 消息并发布到 `/dual_target/stamped` 话题
+  - 调用 `left_arm_handler.set_target_pose_internal(frame_id, left_pose)` 和 `right_arm_handler.set_target_pose_internal(frame_id, right_pose)` 更新内部目标 pose（用于到达检查）
+  - **注意**：不会调用 `send_target_stamped()`，不会发布到 `/left_target/stamped` 或 `/right_target/stamped` 话题
+- 会自动更新左右臂 handler 的内部目标 pose（带 TF 转换到各自的 `base_frame`）
 - 可以使用 `left_arm_handler.check_arrival()` 和 `right_arm_handler.check_arrival()` 分别检查到达状态
 
 **与四个核心函数的关系：**
-- ✅ 内部使用 `send_target_stamped()` 更新目标位姿
+- ✅ 内部使用 `set_target_pose_internal()` 更新目标位姿（仅用于到达检查，不发布到单独的 target/stamped 话题）
 - ✅ 更新后的目标位姿可以通过 `get_target_pose()` 查询
 - ✅ 可以使用 `check_arrival()` 检查到达状态
 
