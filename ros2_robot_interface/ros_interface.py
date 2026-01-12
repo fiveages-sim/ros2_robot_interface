@@ -52,6 +52,7 @@ class ROS2RobotInterface:
         self.head_joint_controller_pub: Publisher | None = None
         self.body_joint_controller_pub: Publisher | None = None
         self.arm_trajectory_pub: Publisher | None = None  # Unified trajectory publisher for both arms
+        self.unified_arm_joint_controller_pub: Publisher | None = None  # Unified joint position publisher for both arms
         
         self.latest_joint_state: Dict[str, Any] | None = None
         
@@ -166,6 +167,7 @@ class ROS2RobotInterface:
         if "/body_joint_controller/target_joint_position" in topic_names:
             self.config.body_joint_controller_topic = "/body_joint_controller/target_joint_position"
         
+        # 检测分开的左右臂 topic（优先检测，双臂模式）
         if "/ocs2_wbc_controller/target_joint_position/left" in topic_names:
             self.config.left_arm_joint_controller_topic = "/ocs2_wbc_controller/target_joint_position/left"
             if is_dual_arm and "/ocs2_wbc_controller/target_joint_position/right" in topic_names:
@@ -174,8 +176,25 @@ class ROS2RobotInterface:
             self.config.left_arm_joint_controller_topic = "/ocs2_arm_controller/target_joint_position/left"
             if is_dual_arm and "/ocs2_arm_controller/target_joint_position/right" in topic_names:
                 self.config.right_arm_joint_controller_topic = "/ocs2_arm_controller/target_joint_position/right"
-        elif "/ocs2_arm_controller/target_joint_position" in topic_names:
-            self.config.left_arm_joint_controller_topic = "/ocs2_arm_controller/target_joint_position"
+        
+        # 检测统一的双臂关节控制器 topic（仅双臂模式，且可以与分开的 topic 同时存在）
+        # 单臂模式下无后缀的 topic 应该设置为 left_arm_joint_controller_topic，而不是统一 topic
+        if is_dual_arm:
+            # 双臂模式：检测统一 topic（优先检测 /ocs2_wbc_controller/target_joint_position，其次 /ocs2_arm_controller/target_joint_position）
+            if "/ocs2_wbc_controller/target_joint_position" in topic_names:
+                # 检查是否是统一 topic（没有 /left 或 /right 后缀）
+                # 注意：统一 topic 和分开的 topic 可以同时存在
+                self.config.unified_arm_joint_controller_topic = "/ocs2_wbc_controller/target_joint_position"
+            elif "/ocs2_arm_controller/target_joint_position" in topic_names:
+                # 检查是否是统一 topic（没有 /left 或 /right 后缀）
+                # 注意：统一 topic 和分开的 topic 可以同时存在
+                self.config.unified_arm_joint_controller_topic = "/ocs2_arm_controller/target_joint_position"
+        else:
+            # 单臂模式：只检测 /ocs2_arm_controller/target_joint_position（无后缀）
+            # 如果没有设置 left_arm_joint_controller_topic（即没有 /left 后缀），则设置为无后缀的 topic
+            if "/ocs2_arm_controller/target_joint_position" in topic_names:
+                if self.config.left_arm_joint_controller_topic is None:
+                    self.config.left_arm_joint_controller_topic = "/ocs2_arm_controller/target_joint_position"
         
         return is_dual_arm
     
@@ -281,6 +300,13 @@ class ROS2RobotInterface:
                 self.body_joint_controller_pub = self.robot_node.create_publisher(
                     Float64MultiArray, self.config.body_joint_controller_topic, 10
                 )
+            
+            # Create unified arm joint position publisher (for dual-arm joint control)
+            if self.config.unified_arm_joint_controller_topic:
+                self.unified_arm_joint_controller_pub = self.robot_node.create_publisher(
+                    Float64MultiArray, self.config.unified_arm_joint_controller_topic, 10
+                )
+                logger.info(f"Created unified arm joint position publisher: {self.config.unified_arm_joint_controller_topic}")
             
             # Create trajectory publishers for joint space multi-node trajectory planning
             # Create unified trajectory publisher for joint space multi-node trajectory planning
@@ -602,6 +628,90 @@ class ROS2RobotInterface:
         logger.debug(f"Published body joint positions: {positions}")
         
         self.body_target_positions = positions.copy() if positions else None
+    
+    def send_dual_arm_joint_positions(self, left_arm_positions: List[float], right_arm_positions: List[float]) -> None:
+        """发送双臂关节位置命令（MoveJ 模式）
+        
+        同时控制左臂和右臂的所有关节，发布到统一的 topic。
+        
+        Args:
+            left_arm_positions: 左臂关节位置列表（弧度）
+            right_arm_positions: 右臂关节位置列表（弧度）
+            
+        Raises:
+            ROS2NotConnectedError: 如果接口未连接或发布器未初始化
+            ValueError: 如果双臂模式未启用或参数无效
+            
+        Example:
+            ```python
+            # 左臂7个关节，右臂7个关节
+            left_positions = [0.0, 0.5, -1.57, 0.0, 1.57, 0.0, 0.0]
+            right_positions = [0.0, -0.5, 1.57, 0.0, -1.57, 0.0, 0.0]
+            interface.send_dual_arm_joint_positions(left_positions, right_positions)
+            ```
+        """
+        if not self.is_connected:
+            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+        
+        if not self.config.right_end_effector_target_topic:
+            raise ValueError("Dual-arm joint control requires dual-arm mode. Right end-effector target topic not configured.")
+        
+        if self.unified_arm_joint_controller_pub is None:
+            raise ROS2NotConnectedError(
+                "Unified arm joint controller publisher not initialized. "
+                "Unified arm joint controller topic not found. "
+                "Please ensure /ocs2_wbc_controller/target_joint_position or "
+                "/ocs2_arm_controller/target_joint_position topic exists."
+            )
+        
+        if not left_arm_positions or not right_arm_positions:
+            raise ValueError("Both left_arm_positions and right_arm_positions must not be empty")
+        
+        if len(left_arm_positions) != len(right_arm_positions):
+            raise ValueError(
+                f"Left and right arm must have the same number of joints. "
+                f"Got {len(left_arm_positions)} and {len(right_arm_positions)}"
+            )
+        
+        # 发送 FSM 命令切换到 MOVEJ 状态
+        try:
+            self.send_fsm_command(4)
+            logger.debug("Automatically switched to MOVEJ state for dual-arm joint control")
+        except Exception as e:
+            logger.warning(f"Failed to switch to MOVEJ state: {e}")
+        
+        # 根据 topic 类型决定是否需要添加身体关节
+        # ocs2_wbc_controller 需要：body_joints + left_arm_joints + right_arm_joints
+        # ocs2_arm_controller 只需要：left_arm_joints + right_arm_joints
+        unified_topic = self.config.unified_arm_joint_controller_topic
+        is_wbc_controller = unified_topic and "ocs2_wbc_controller" in unified_topic
+        
+        if is_wbc_controller:
+            # WBC 控制器需要身体关节 + 左臂 + 右臂
+            # 获取当前身体关节位置（如果可用）
+            body_positions = None
+            categorized_state = self.get_joint_state(categorized=True)
+            if categorized_state and categorized_state.get('body', {}).get('positions'):
+                body_positions = categorized_state['body']['positions']
+            
+            if body_positions is None:
+                # 如果没有身体关节数据，使用零位置或默认值
+                logger.warning("Body joint positions not available, using zeros for WBC controller")
+                # 尝试从配置中获取身体关节数量（通常是4个）
+                body_positions = [0.0] * 4  # 默认4个身体关节
+            
+            # 合并：身体关节 + 左臂 + 右臂
+            combined_positions = list(body_positions) + left_arm_positions + right_arm_positions
+            logger.debug(f"WBC controller: body={len(body_positions)}, left={len(left_arm_positions)}, right={len(right_arm_positions)}, total={len(combined_positions)}")
+        else:
+            # ARM 控制器只需要左臂 + 右臂
+            combined_positions = left_arm_positions + right_arm_positions
+            logger.debug(f"ARM controller: left={len(left_arm_positions)}, right={len(right_arm_positions)}, total={len(combined_positions)}")
+        
+        msg = Float64MultiArray()
+        msg.data = combined_positions
+        self.unified_arm_joint_controller_pub.publish(msg)
+        
     
     def send_joint_trajectory(self, 
                              joint_names: List[str],
@@ -979,6 +1089,10 @@ class ROS2RobotInterface:
         if self.body_joint_controller_pub:
             self.body_joint_controller_pub.destroy()
             self.body_joint_controller_pub = None
+        
+        if self.unified_arm_joint_controller_pub:
+            self.unified_arm_joint_controller_pub.destroy()
+            self.unified_arm_joint_controller_pub = None
         
         if self.robot_node:
             self.robot_node.destroy_node()

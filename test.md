@@ -12,9 +12,10 @@
 - [7. test_gripper.py - 夹爪开关控制测试](#7-test_gripperpy---夹爪开关控制测试)
 - [8. test_gripper_position.py - 夹爪位置到达测试](#8-test_gripper_positionpy---夹爪位置到达测试)
 - [9. test_check_arrival.py - 手臂到达判断测试](#9-test_check_arrivalpy---手臂到达判断测试)
-- [10. demo_wavearm.py - W2 机器人挥手演示（手臂）](#10-examplesfancydemo_wavearmpy---w2-机器人挥手演示手臂)
-- [11. demo_wavehand.py - W2 机器人挥手演示（灵巧手）](#11-examplesfancydemo_wavehandpy---w2-机器人挥手演示灵巧手)
-- [12. demo_pourbeer_o6.py - W2 机器人倒酒演示（O6灵巧手）](#12-examplesfancydemo_pourbeer_o6py---w2-机器人倒酒演示o6灵巧手)
+- [10. test_dual_arm_joint_positions.py - 双臂关节位置统一控制测试](#10-test_dual_arm_joint_positionspy---双臂关节位置统一控制测试)
+- [11. demo_wavearm.py - W2 机器人挥手演示（手臂）](#11-examplesfancydemo_wavearmpy---w2-机器人挥手演示手臂)
+- [12. demo_wavehand.py - W2 机器人挥手演示（灵巧手）](#12-examplesfancydemo_wavehandpy---w2-机器人挥手演示灵巧手)
+- [13. demo_pourbeer_o6.py - W2 机器人倒酒演示（O6灵巧手）](#13-examplesfancydemo_pourbeer_o6py---w2-机器人倒酒演示o6灵巧手)
 
 其他部分：
 - [🔗 相关文档](#-相关文档)
@@ -300,7 +301,42 @@ python examples/test_check_arrival.py
 
 ---
 
-### 10. `examples/fancy/demo_wavearm.py` - W2 机器人挥手演示（手臂）
+### 10. `test_dual_arm_joint_positions.py` - 双臂关节位置统一控制测试
+
+**功能：** 测试双臂关节位置统一控制功能（使用统一 topic 同时控制双臂）
+
+**测试内容：**
+- ✅ `send_dual_arm_joint_positions()` 方法 - 同时控制双臂的所有关节
+- ✅ 统一 topic 自动检测（`/ocs2_wbc_controller/target_joint_position` 或 `/ocs2_arm_controller/target_joint_position`）
+- ✅ WBC 控制器支持（自动添加身体关节）
+- ✅ ARM 控制器支持（仅双臂关节）
+- ✅ FSM 自动切换到 MOVEJ 状态
+- ✅ 关节位置增量控制（每2秒将最后一个关节增加指定弧度）
+
+**适用场景：**
+- 双臂关节空间协调控制
+- 统一 topic 功能验证
+- WBC 和 ARM 控制器兼容性测试
+- 双臂同步关节运动
+
+**运行方式：**
+```bash
+conda activate lerobot_ros2
+source ~/ros2_ws/install/setup.bash
+cd ~/libraries/ros2_robot_interface
+python examples/test_dual_arm_joint_positions.py
+```
+
+**注意事项：**
+- 测试脚本会持续运行，每2秒发送一次关节位置命令，按 `Ctrl+C` 停止
+- 需要双臂模式（检测到 `/right_target` 或 `/right_current_pose`）
+- 需要统一 topic（`/ocs2_wbc_controller/target_joint_position` 或 `/ocs2_arm_controller/target_joint_position`）
+- WBC 控制器会自动添加身体关节位置（从当前关节状态获取）
+- ARM 控制器只需要双臂关节位置
+
+---
+
+### 11. `examples/fancy/demo_wavearm.py` - W2 机器人挥手演示（手臂）
 
 **功能：** W2 机器人挥手演示脚本，测试双臂协调挥手动作（手臂运动）
 
@@ -331,7 +367,7 @@ python examples/fancy/demo_wavearm.py
 
 ---
 
-### 11. `examples/fancy/demo_wavehand.py` - W2 机器人挥手演示（灵巧手）
+### 12. `examples/fancy/demo_wavehand.py` - W2 机器人挥手演示（灵巧手）
 
 **功能：** W2 机器人挥手演示脚本，测试双臂协调挥手动作（灵巧手版本）
 
@@ -364,7 +400,7 @@ python examples/fancy/demo_wavehand.py
 
 ---
 
-### 12. `examples/fancy/demo_pourbeer_o6.py` - W2 机器人倒酒演示（O6灵巧手）
+### 13. `examples/fancy/demo_pourbeer_o6.py` - W2 机器人倒酒演示（O6灵巧手）
 
 **功能：** W2 机器人倒酒动作演示脚本，基于 `pick_by_registration.py` 中的 `pour_beer` 方法实现，适用于 O6 灵巧手
 

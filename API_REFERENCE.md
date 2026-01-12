@@ -701,6 +701,50 @@ if left_result['arrived'] and right_result['arrived']:
 
 ---
 
+#### `send_dual_arm_joint_positions(left_arm_positions: List[float], right_arm_positions: List[float]) -> None` ⭐ **新增**
+
+**功能：** 发送双臂关节位置命令（MoveJ 模式，统一 topic 控制）
+
+**参数：**
+- `left_arm_positions` (List[float]): 左臂关节位置列表（弧度）
+- `right_arm_positions` (List[float]): 右臂关节位置列表（弧度）
+
+**说明：**
+- 同时控制左臂和右臂的所有关节，发布到统一的 topic
+- **自动检测控制器类型**：
+  - **WBC 控制器** (`/ocs2_wbc_controller/target_joint_position`)：需要 `body_joints + left_arm_joints + right_arm_joints`（18个关节）
+    - 自动从当前关节状态获取身体关节位置
+    - 如果没有身体关节数据，使用默认值（4个零值）
+  - **ARM 控制器** (`/ocs2_arm_controller/target_joint_position`)：只需要 `left_arm_joints + right_arm_joints`（14个关节）
+- 自动切换到 MOVEJ 状态（FSM 命令 4）
+- 左臂和右臂的关节数量必须相同
+- 关节顺序：WBC 控制器为 `[body_joint1-4] + [left_joint1-7] + [right_joint1-7]`，ARM 控制器为 `[left_joint1-7] + [right_joint1-7]`
+
+**Raises:**
+- `ROS2NotConnectedError`: 如果接口未连接或发布器未初始化
+- `ValueError`: 如果双臂模式未启用、参数无效或左右臂关节数量不一致
+
+**示例：**
+```python
+# 左臂7个关节，右臂7个关节
+left_positions = [0.0, 0.5, -1.57, 0.0, 1.57, 0.0, 0.0]
+right_positions = [0.0, -0.5, 1.57, 0.0, -1.57, 0.0, 0.0]
+
+# 发送双臂关节位置（自动检测控制器类型并添加身体关节）
+interface.send_dual_arm_joint_positions(left_positions, right_positions)
+
+# WBC 控制器会自动添加身体关节：
+# 最终发送：[body_joint1-4] + [left_joint1-7] + [right_joint1-7] = 18个关节
+# ARM 控制器只发送双臂关节：
+# 最终发送：[left_joint1-7] + [right_joint1-7] = 14个关节
+```
+
+**注意事项：**
+- ⚠️ WBC 控制器会自动添加身体关节，确保身体关节数据可用（从 `/joint_states` 获取）
+- ⚠️ 如果使用 WBC 控制器且没有身体关节数据，会使用默认值（4个零值），可能导致意外运动
+
+---
+
 ### 关节状态获取
 
 #### `get_joint_state(categorized: bool = False) -> Dict[str, Any] | None`
