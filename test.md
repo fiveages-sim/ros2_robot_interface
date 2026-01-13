@@ -1,5 +1,27 @@
 # ROS2 Robot Interface 测试指南.
 
+## 📑 目录
+
+快速跳转：
+- [1. test_interface.py - 通用接口测试](#1-test_interfacepy---通用接口测试)
+- [2. test_interface_isaac.py - Isaac Sim 联合仿真测试](#2-test_interface_isaacpy---isaac-sim-联合仿真测试)
+- [3. test_dual_arm_target_stamped.py - 双臂目标位姿测试](#3-test_dual_arm_target_stampedpy---双臂目标位姿测试)
+- [4. test_arm_joint_movej.py - 手臂关节 MoveJ 模式测试](#4-test_arm_joint_movejpy---手臂关节-movej-模式测试)
+- [5. test_w2_path.py - W2 机器人路径测试](#5-test_w2_pathpy---w2-机器人路径测试)
+- [6. test_tf_transform.py - TF 变换查询和坐标转换测试](#6-test_tf_transformpy---tf-变换查询和坐标转换测试)
+- [7. test_gripper.py - 夹爪开关控制测试](#7-test_gripperpy---夹爪开关控制测试)
+- [8. test_gripper_position.py - 夹爪位置到达测试](#8-test_gripper_positionpy---夹爪位置到达测试)
+- [9. test_check_arrival.py - 手臂到达判断测试](#9-test_check_arrivalpy---手臂到达判断测试)
+- [10. test_dual_arm_joint_positions.py - 双臂关节位置统一控制测试](#10-test_dual_arm_joint_positionspy---双臂关节位置统一控制测试)
+- [11. demo_wavearm.py - W2 机器人挥手演示（手臂）](#11-examplesfancydemo_wavearmpy---w2-机器人挥手演示手臂)
+- [12. demo_wavehand.py - W2 机器人挥手演示（灵巧手）](#12-examplesfancydemo_wavehandpy---w2-机器人挥手演示灵巧手)
+- [13. demo_pourbeer_o6.py - W2 机器人倒酒演示（O6灵巧手）](#13-examplesfancydemo_pourbeer_o6py---w2-机器人倒酒演示o6灵巧手)
+
+其他部分：
+- [🔗 相关文档](#-相关文档)
+
+---
+
 ## 📁 测试文件说明
 
 所有测试文件位于 `examples/` 目录下，每个文件用于测试不同的功能模块：
@@ -245,7 +267,76 @@ python examples/test_gripper_position.py
 
 ---
 
-### 9. `examples/fancy/demo_wavearm.py` - W2 机器人挥手演示（手臂）
+### 9. `test_check_arrival.py` - 手臂到达判断测试
+
+**功能：** 专门用于测试手臂的到达判断功能
+
+**测试内容：**
+- ✅ `check_arrival()` 方法 - 检查手臂是否到达目标位置
+- ✅ 循环检查到达状态（每1秒检查一次）
+- ✅ 位置距离和姿态距离计算
+- ✅ 默认阈值、自定义阈值测试
+- ✅ 支持单臂和双臂模式
+- ✅ 从话题订阅获取目标位置（`/left_current_target` 或 `/right_current_target`）
+
+**适用场景：**
+- 手臂到达判断功能验证
+- 到达检测逻辑测试
+- 目标位置话题订阅功能验证
+- 实时监控手臂到达状态
+
+**运行方式：**
+```bash
+conda activate lerobot_ros2
+source ~/ros2_ws/install/setup.bash
+cd ~/libraries/ros2_robot_interface
+python examples/test_check_arrival.py
+```
+
+**注意事项：**
+- 测试脚本会持续循环检查到达状态，按 `Ctrl+C` 停止
+- 需要确保 `/left_current_target` 或 `/right_current_target` 话题正在发布目标位置
+- 如果没有配置目标位置话题，到达判断将返回 `None`
+- 每1秒检查一次，显示当前位置、目标位置、距离等信息
+
+---
+
+### 10. `test_dual_arm_joint_positions.py` - 双臂关节位置统一控制测试
+
+**功能：** 测试双臂关节位置统一控制功能（使用统一 topic 同时控制双臂）
+
+**测试内容：**
+- ✅ `send_dual_arm_joint_positions()` 方法 - 同时控制双臂的所有关节
+- ✅ 统一 topic 自动检测（`/ocs2_wbc_controller/target_joint_position` 或 `/ocs2_arm_controller/target_joint_position`）
+- ✅ WBC 控制器支持（自动添加身体关节）
+- ✅ ARM 控制器支持（仅双臂关节）
+- ✅ FSM 自动切换到 MOVEJ 状态
+- ✅ 关节位置增量控制（每2秒将最后一个关节增加指定弧度）
+
+**适用场景：**
+- 双臂关节空间协调控制
+- 统一 topic 功能验证
+- WBC 和 ARM 控制器兼容性测试
+- 双臂同步关节运动
+
+**运行方式：**
+```bash
+conda activate lerobot_ros2
+source ~/ros2_ws/install/setup.bash
+cd ~/libraries/ros2_robot_interface
+python examples/test_dual_arm_joint_positions.py
+```
+
+**注意事项：**
+- 测试脚本会持续运行，每2秒发送一次关节位置命令，按 `Ctrl+C` 停止
+- 需要双臂模式（检测到 `/right_target` 或 `/right_current_pose`）
+- 需要统一 topic（`/ocs2_wbc_controller/target_joint_position` 或 `/ocs2_arm_controller/target_joint_position`）
+- WBC 控制器会自动添加身体关节位置（从当前关节状态获取）
+- ARM 控制器只需要双臂关节位置
+
+---
+
+### 11. `examples/fancy/demo_wavearm.py` - W2 机器人挥手演示（手臂）
 
 **功能：** W2 机器人挥手演示脚本，测试双臂协调挥手动作（手臂运动）
 
@@ -276,7 +367,7 @@ python examples/fancy/demo_wavearm.py
 
 ---
 
-### 10. `examples/fancy/demo_wavehand.py` - W2 机器人挥手演示（灵巧手）
+### 12. `examples/fancy/demo_wavehand.py` - W2 机器人挥手演示（灵巧手）
 
 **功能：** W2 机器人挥手演示脚本，测试双臂协调挥手动作（灵巧手版本）
 
@@ -309,7 +400,7 @@ python examples/fancy/demo_wavehand.py
 
 ---
 
-### 11. `examples/fancy/demo_pourbeer_o6.py` - W2 机器人倒酒演示（O6灵巧手）
+### 13. `examples/fancy/demo_pourbeer_o6.py` - W2 机器人倒酒演示（O6灵巧手）
 
 **功能：** W2 机器人倒酒动作演示脚本，基于 `pick_by_registration.py` 中的 `pour_beer` 方法实现，适用于 O6 灵巧手
 
@@ -339,49 +430,6 @@ python examples/fancy/demo_pourbeer_o6.py
 - 演示脚本会自动切换到 OCS2 状态并执行倒酒轨迹
 - 执行完成后会自动回到 HOME 位置并切换到 HOLD 状态
 - 使用四元数格式的轨迹点，支持精确的位姿控制
-
----
-
-## 🤖 启动机器人
-
-### 单臂机器人（CR5）
-
-```bash
-# 终端 1: 启动 OCS2 控制器（Mock）
-source ~/ros2_ws/install/setup.bash
-ros2 launch ocs2_arm_controller demo.launch.py robot:=cr5 type:=AG2F90-C-Soft
-```
-
-### 双臂机器人（FiveAges W1 with Jodell Hand）
-
-```bash
-# 终端 1: 启动双臂机器人控制器
-source ~/ros2_ws/install/setup.bash
-ros2 launch ocs2_arm_controller full_body.launch.py robot:=fiveages_w1 type:=srs_rg75
-```
-
-### 双臂机器人（FiveAges W2）
-
-**Split Body Control:**
-```bash
-source ~/ros2_ws/install/setup.bash
-ros2 launch ocs2_arm_controller split_body.launch.py robot:=fiveages_w2
-```
-
-**Full Body Control:**
-```bash
-source ~/ros2_ws/install/setup.bash
-ros2 launch ocs2_arm_controller full_body.launch.py robot:=fiveages_w2
-```
-
----
-
-## 📝 测试建议
-
-1. **首次使用：** 建议先运行 `test_interface.py` 进行完整功能测试
-2. **功能验证：** 根据要测试的具体功能选择对应的测试文件
-3. **开发调试：** 可以基于这些测试文件修改，创建自己的测试脚本
-4. **环境准备：** 确保机器人控制器已启动，ROS 2 环境已配置
 
 ---
 
