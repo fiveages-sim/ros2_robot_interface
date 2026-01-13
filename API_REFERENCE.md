@@ -209,13 +209,13 @@ if target_pose is None:
 
 ### 检查到达
 
-#### `check_arrival(pose_threshold: float = 0.06, orient_threshold: float = 0.1) -> Dict[str, Any]` ⭐ **最常用**
+#### `check_arrival(pose_threshold: float | None = None, orient_threshold: float | None = None) -> Dict[str, Any]` ⭐ **最常用**
 
 **功能：** 检查手臂是否到达目标位置
 
 **参数：**
-- `pose_threshold` (float): 位置距离阈值（米），默认 0.06
-- `orient_threshold` (float): 姿态距离阈值，默认 0.1
+- `pose_threshold` (float | None): 位置距离阈值（米），如果为 None 则使用 `config.pose_position_threshold`（默认 0.05）
+- `orient_threshold` (float | None): 姿态距离阈值，如果为 None 则使用 `config.pose_orientation_threshold`（默认 0.1）
 
 **返回值：**
 ```python
@@ -235,6 +235,7 @@ if target_pose is None:
   - `get_target_pose()` 返回的是 `base_frame` 下的目标位姿（从 `/left_current_target` 或 `/right_current_target` 话题订阅获取）
 - **位置距离**：欧氏距离（米）
 - **姿态距离**：基于四元数的点积计算
+- **默认阈值**：如果未指定参数，使用配置中的默认值（`config.pose_position_threshold` 和 `config.pose_orientation_threshold`）
 - **会打印详细的检查信息**
 
 **示例：**
@@ -397,13 +398,13 @@ if target_position is not None:
 
 ### 检查到达
 
-#### `check_arrival(current_position: Optional[float], threshold: float = 0.01) -> Dict[str, Any]`
+#### `check_arrival(current_position: Optional[float], threshold: float | None = None) -> Dict[str, Any]`
 
 **功能：** 检查夹爪是否到达目标位置
 
 **参数：**
 - `current_position` (Optional[float]): 当前位置（需要从 `get_joint_state()` 获取）
-- `threshold` (float): 位置距离阈值，默认 0.01
+- `threshold` (float | None): 位置距离阈值，如果为 None 则使用 `config.gripper_position_threshold`（默认 0.01）
 
 **返回值：**
 ```python
@@ -415,6 +416,7 @@ if target_position is not None:
 
 **说明：**
 - **需要手动传入当前位置**（从 joint_state 中提取）
+- **默认阈值**：如果未指定 `threshold` 参数，使用配置中的默认值（`config.gripper_position_threshold`）
 - 关闭时会考虑位置稳定性（可能已夹住物体）
 - 打开时只考虑距离阈值
 - 会打印详细的检查信息，包括位置历史
@@ -668,8 +670,8 @@ interface.send_fsm_command(4)
 - `frame_id` (str): 坐标系 ID，默认 "arm_base"
 
 **说明：**
-- 发布到 `/dual_target/stamped` topic
-- **内部实现**：会调用 `left_arm_handler.send_target_stamped(frame_id, left_pose)` 和 `right_arm_handler.send_target_stamped(frame_id, right_pose)`
+- 发布到 `/dual_target/stamped` topic（使用 `nav_msgs/Path` 消息类型，包含2个 `PoseStamped`：第一个是左臂，第二个是右臂）
+- **内部实现**：直接发布到 `/dual_target/stamped` topic，不调用 handler 的方法
 - 目标位姿会通过话题订阅获取（`/left_current_target` 和 `/right_current_target`），用于到达判断
 - 可以使用 `left_arm_handler.check_arrival()` 和 `right_arm_handler.check_arrival()` 分别检查到达状态
 
@@ -689,7 +691,7 @@ right_pose.position.y = -0.2
 right_pose.position.z = 0.3
 right_pose.orientation.w = 1.0
 
-# 发送双臂目标（会自动转换到各自的 base_frame）
+# 发送双臂目标（pose 在 frame_id 指定的坐标系下，接收端会进行坐标转换）
 interface.send_dual_arm_target_stamped(left_pose, right_pose, frame_id="arm_base")
 
 # 检查到达状态
@@ -992,10 +994,11 @@ if pose_in_base:
    - 使用 `get_target_pose()` 查询已设置的目标位姿，主要用于调试
    - `check_arrival()` 会自动调用 `get_pose()` 和 `get_target_pose()`，通常不需要手动调用这两个函数
 
-6. **默认阈值**：
-   - 手臂位置阈值：0.06 米
-   - 手臂姿态阈值：0.1
-   - 夹爪位置阈值：0.01
+6. **默认阈值**（可在配置中修改）：
+   - 手臂位置阈值：`config.pose_position_threshold`（默认 0.05 米）
+   - 手臂姿态阈值：`config.pose_orientation_threshold`（默认 0.1）
+   - 夹爪位置阈值：`config.gripper_position_threshold`（默认 0.01）
+   - 头部/身体关节阈值：`config.position_threshold`（默认 0.05 弧度）
 
 7. **双臂模式检测**：
    - 如果配置了 `right_end_effector_pose_topic`，会自动检测为双臂模式
