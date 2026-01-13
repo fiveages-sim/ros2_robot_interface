@@ -8,6 +8,7 @@
   - [发送命令](#发送命令-1)
   - [获取状态](#获取状态-1)
   - [检查到达](#检查到达-1)
+  - [双臂协调控制](#双臂协调控制-1)
 - [夹爪控制 (Gripper Handler)](#夹爪控制-gripper-handler)
   - [发送命令](#发送命令-2)
   - [获取状态](#获取状态-2)
@@ -22,7 +23,6 @@
   - [检查到达](#检查到达-4)
 - [统一接口方法](#统一接口方法)
   - [FSM状态切换](#fsm状态切换)
-  - [双臂协调控制](#双臂协调控制)
   - [关节状态获取](#关节状态获取)
   - [统一到达检查](#统一到达检查)
   - [坐标转换](#坐标转换)
@@ -271,6 +271,97 @@ while True:
     print(f"距离目标: {result['position_distance']:.4f} 米")
     time.sleep(0.1)
 ```
+
+---
+
+### 双臂协调控制
+
+这些方法通过 `ROS2RobotInterface` 直接访问，用于同时控制左臂和右臂。
+
+#### `send_dual_arm_target_stamped(left_pose: Pose, right_pose: Pose, frame_id: str = "arm_base") -> None`
+
+**功能：** 发送双臂目标 pose（仅双臂模式）
+
+**参数：**
+- `left_pose` (Pose): 左臂目标 pose（在 `frame_id` 指定的坐标系下）
+- `right_pose` (Pose): 右臂目标 pose（在 `frame_id` 指定的坐标系下）
+- `frame_id` (str): 坐标系 ID，默认 "arm_base"
+
+**说明：**
+- 发布到 `/dual_target/stamped` topic（使用 `nav_msgs/Path` 消息类型，包含2个 `PoseStamped`：第一个是左臂，第二个是右臂）
+- **内部实现**：直接发布到 `/dual_target/stamped` topic，不调用 handler 的方法
+- 目标位姿会通过话题订阅获取（`/left_current_target` 和 `/right_current_target`），用于到达判断
+- 可以使用 `left_arm_handler.check_arrival()` 和 `right_arm_handler.check_arrival()` 分别检查到达状态
+
+**示例：**
+```python
+from geometry_msgs.msg import Pose
+
+left_pose = Pose()
+left_pose.position.x = 0.5
+left_pose.position.y = 0.2
+left_pose.position.z = 0.3
+left_pose.orientation.w = 1.0
+
+right_pose = Pose()
+right_pose.position.x = 0.5
+right_pose.position.y = -0.2
+right_pose.position.z = 0.3
+right_pose.orientation.w = 1.0
+
+# 发送双臂目标（pose 在 frame_id 指定的坐标系下，接收端会进行坐标转换）
+interface.send_dual_arm_target_stamped(left_pose, right_pose, frame_id="arm_base")
+
+# 检查到达状态
+left_result = interface.left_arm_handler.check_arrival()
+right_result = interface.right_arm_handler.check_arrival()
+if left_result['arrived'] and right_result['arrived']:
+    print("双臂都已到达目标位置")
+```
+
+---
+
+#### `send_dual_arm_joint_positions(left_arm_positions: List[float], right_arm_positions: List[float]) -> None` ⭐ **新增**
+
+**功能：** 发送双臂关节位置命令（MoveJ 模式，统一 topic 控制）
+
+**参数：**
+- `left_arm_positions` (List[float]): 左臂关节位置列表（弧度）
+- `right_arm_positions` (List[float]): 右臂关节位置列表（弧度）
+
+**说明：**
+- 同时控制左臂和右臂的所有关节，发布到统一的 topic
+- **自动检测控制器类型**：
+  - **WBC 控制器** (`/ocs2_wbc_controller/target_joint_position`)：需要 `body_joints + left_arm_joints + right_arm_joints`（18个关节）
+    - 自动从当前关节状态获取身体关节位置
+    - 如果没有身体关节数据，使用默认值（4个零值）
+  - **ARM 控制器** (`/ocs2_arm_controller/target_joint_position`)：只需要 `left_arm_joints + right_arm_joints`（14个关节）
+- 自动切换到 MOVEJ 状态（FSM 命令 4）
+- 左臂和右臂的关节数量必须相同
+- 关节顺序：WBC 控制器为 `[body_joint1-4] + [left_joint1-7] + [right_joint1-7]`，ARM 控制器为 `[left_joint1-7] + [right_joint1-7]`
+
+**Raises:**
+- `ROS2NotConnectedError`: 如果接口未连接或发布器未初始化
+- `ValueError`: 如果双臂模式未启用、参数无效或左右臂关节数量不一致
+
+**示例：**
+```python
+# 左臂7个关节，右臂7个关节
+left_positions = [0.0, 0.5, -1.57, 0.0, 1.57, 0.0, 0.0]
+right_positions = [0.0, -0.5, 1.57, 0.0, -1.57, 0.0, 0.0]
+
+# 发送双臂关节位置（自动检测控制器类型并添加身体关节）
+interface.send_dual_arm_joint_positions(left_positions, right_positions)
+
+# WBC 控制器会自动添加身体关节：
+# 最终发送：[body_joint1-4] + [left_joint1-7] + [right_joint1-7] = 18个关节
+# ARM 控制器只发送双臂关节：
+# 最终发送：[left_joint1-7] + [right_joint1-7] = 14个关节
+```
+
+**注意事项：**
+- ⚠️ WBC 控制器会自动添加身体关节，确保身体关节数据可用（从 `/joint_states` 获取）
+- ⚠️ 如果使用 WBC 控制器且没有身体关节数据，会使用默认值（4个零值），可能导致意外运动
 
 ---
 
@@ -655,95 +746,6 @@ interface.send_fsm_command(3)
 # 切换到 MOVEJ 状态（用于关节控制）
 interface.send_fsm_command(4)
 ```
-
----
-
-### 双臂协调控制
-
-#### `send_dual_arm_target_stamped(left_pose: Pose, right_pose: Pose, frame_id: str = "arm_base") -> None`
-
-**功能：** 发送双臂目标 pose（仅双臂模式）
-
-**参数：**
-- `left_pose` (Pose): 左臂目标 pose（在 `frame_id` 指定的坐标系下）
-- `right_pose` (Pose): 右臂目标 pose（在 `frame_id` 指定的坐标系下）
-- `frame_id` (str): 坐标系 ID，默认 "arm_base"
-
-**说明：**
-- 发布到 `/dual_target/stamped` topic（使用 `nav_msgs/Path` 消息类型，包含2个 `PoseStamped`：第一个是左臂，第二个是右臂）
-- **内部实现**：直接发布到 `/dual_target/stamped` topic，不调用 handler 的方法
-- 目标位姿会通过话题订阅获取（`/left_current_target` 和 `/right_current_target`），用于到达判断
-- 可以使用 `left_arm_handler.check_arrival()` 和 `right_arm_handler.check_arrival()` 分别检查到达状态
-
-**示例：**
-```python
-from geometry_msgs.msg import Pose
-
-left_pose = Pose()
-left_pose.position.x = 0.5
-left_pose.position.y = 0.2
-left_pose.position.z = 0.3
-left_pose.orientation.w = 1.0
-
-right_pose = Pose()
-right_pose.position.x = 0.5
-right_pose.position.y = -0.2
-right_pose.position.z = 0.3
-right_pose.orientation.w = 1.0
-
-# 发送双臂目标（pose 在 frame_id 指定的坐标系下，接收端会进行坐标转换）
-interface.send_dual_arm_target_stamped(left_pose, right_pose, frame_id="arm_base")
-
-# 检查到达状态
-left_result = interface.left_arm_handler.check_arrival()
-right_result = interface.right_arm_handler.check_arrival()
-if left_result['arrived'] and right_result['arrived']:
-    print("双臂都已到达目标位置")
-```
-
----
-
-#### `send_dual_arm_joint_positions(left_arm_positions: List[float], right_arm_positions: List[float]) -> None` ⭐ **新增**
-
-**功能：** 发送双臂关节位置命令（MoveJ 模式，统一 topic 控制）
-
-**参数：**
-- `left_arm_positions` (List[float]): 左臂关节位置列表（弧度）
-- `right_arm_positions` (List[float]): 右臂关节位置列表（弧度）
-
-**说明：**
-- 同时控制左臂和右臂的所有关节，发布到统一的 topic
-- **自动检测控制器类型**：
-  - **WBC 控制器** (`/ocs2_wbc_controller/target_joint_position`)：需要 `body_joints + left_arm_joints + right_arm_joints`（18个关节）
-    - 自动从当前关节状态获取身体关节位置
-    - 如果没有身体关节数据，使用默认值（4个零值）
-  - **ARM 控制器** (`/ocs2_arm_controller/target_joint_position`)：只需要 `left_arm_joints + right_arm_joints`（14个关节）
-- 自动切换到 MOVEJ 状态（FSM 命令 4）
-- 左臂和右臂的关节数量必须相同
-- 关节顺序：WBC 控制器为 `[body_joint1-4] + [left_joint1-7] + [right_joint1-7]`，ARM 控制器为 `[left_joint1-7] + [right_joint1-7]`
-
-**Raises:**
-- `ROS2NotConnectedError`: 如果接口未连接或发布器未初始化
-- `ValueError`: 如果双臂模式未启用、参数无效或左右臂关节数量不一致
-
-**示例：**
-```python
-# 左臂7个关节，右臂7个关节
-left_positions = [0.0, 0.5, -1.57, 0.0, 1.57, 0.0, 0.0]
-right_positions = [0.0, -0.5, 1.57, 0.0, -1.57, 0.0, 0.0]
-
-# 发送双臂关节位置（自动检测控制器类型并添加身体关节）
-interface.send_dual_arm_joint_positions(left_positions, right_positions)
-
-# WBC 控制器会自动添加身体关节：
-# 最终发送：[body_joint1-4] + [left_joint1-7] + [right_joint1-7] = 18个关节
-# ARM 控制器只发送双臂关节：
-# 最终发送：[left_joint1-7] + [right_joint1-7] = 14个关节
-```
-
-**注意事项：**
-- ⚠️ WBC 控制器会自动添加身体关节，确保身体关节数据可用（从 `/joint_states` 获取）
-- ⚠️ 如果使用 WBC 控制器且没有身体关节数据，会使用默认值（4个零值），可能导致意外运动
 
 ---
 
