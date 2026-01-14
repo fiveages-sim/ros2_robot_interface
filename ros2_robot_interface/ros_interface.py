@@ -55,7 +55,7 @@ class ROS2RobotInterface:
         self.right_hand_joint_controller_pub: Publisher | None = None
         self.arm_trajectory_pub: Publisher | None = None  # Unified trajectory publisher for both arms
         self.unified_arm_joint_controller_pub: Publisher | None = None  # Unified joint position publisher for both arms
-        
+
         self.latest_joint_state: Dict[str, Any] | None = None
         
         self.data_lock = threading.Lock()
@@ -136,7 +136,7 @@ class ROS2RobotInterface:
             self.config.end_effector_current_target_topic = "/left_current_target"
         if "/right_current_target" in topic_names:
             self.config.right_end_effector_current_target_topic = "/right_current_target"
-        
+
         # 检测位置控制话题（gripper模式）
         if "/left_gripper_joint/position_command" in topic_names:
             self.config.gripper_command_topic = "/left_gripper_joint/position_command"
@@ -172,10 +172,10 @@ class ROS2RobotInterface:
         # 检测灵巧手关节控制器 topic
         if "/left_hand_controller/target_joint_position" in topic_names:
             self.config.left_hand_joint_controller_topic = "/left_hand_controller/target_joint_position"
-        
+
         if "/right_hand_controller/target_joint_position" in topic_names:
             self.config.right_hand_joint_controller_topic = "/right_hand_controller/target_joint_position"
-        
+
         # 检测分开的左右臂 topic（优先检测，双臂模式）
         if "/ocs2_wbc_controller/target_joint_position/left" in topic_names:
             self.config.left_arm_joint_controller_topic = "/ocs2_wbc_controller/target_joint_position/left"
@@ -185,7 +185,7 @@ class ROS2RobotInterface:
             self.config.left_arm_joint_controller_topic = "/ocs2_arm_controller/target_joint_position/left"
             if is_dual_arm and "/ocs2_arm_controller/target_joint_position/right" in topic_names:
                 self.config.right_arm_joint_controller_topic = "/ocs2_arm_controller/target_joint_position/right"
-        
+
         # 检测统一的双臂关节控制器 topic（仅双臂模式，且可以与分开的 topic 同时存在）
         # 单臂模式下无后缀的 topic 应该设置为 left_arm_joint_controller_topic，而不是统一 topic
         if is_dual_arm:
@@ -315,20 +315,20 @@ class ROS2RobotInterface:
                     Float64MultiArray, self.config.left_hand_joint_controller_topic, 10
                 )
                 logger.info(f"Created left hand joint controller publisher: {self.config.left_hand_joint_controller_topic}")
-            
+
             if self.config.right_hand_joint_controller_topic:
                 self.right_hand_joint_controller_pub = self.robot_node.create_publisher(
                     Float64MultiArray, self.config.right_hand_joint_controller_topic, 10
                 )
                 logger.info(f"Created right hand joint controller publisher: {self.config.right_hand_joint_controller_topic}")
-            
+
             # Create unified arm joint position publisher (for dual-arm joint control)
             if self.config.unified_arm_joint_controller_topic:
                 self.unified_arm_joint_controller_pub = self.robot_node.create_publisher(
                     Float64MultiArray, self.config.unified_arm_joint_controller_topic, 10
                 )
                 logger.info(f"Created unified arm joint position publisher: {self.config.unified_arm_joint_controller_topic}")
-            
+
             # Create trajectory publishers for joint space multi-node trajectory planning
             # Create unified trajectory publisher for joint space multi-node trajectory planning
             # The topic is shared for both arms, controlled by joint_names in the message
@@ -440,7 +440,7 @@ class ROS2RobotInterface:
             if is_dual_arm:
                 # 检查是否是夹爪/灵巧手关节（包含 'gripper' 或 'hand'）
                 is_gripper_or_hand = 'gripper' in name_lower or 'hand' in name_lower
-                
+
                 if is_gripper_or_hand:
                     category = 'left_gripper' if name_lower.startswith('left_') else 'right_gripper' if name_lower.startswith('right_') else 'left_gripper'
                 elif name_lower.startswith('left_'):
@@ -452,7 +452,7 @@ class ROS2RobotInterface:
             else:
                 # 检查是否是夹爪/灵巧手关节（包含 'gripper' 或 'hand'）
                 is_gripper_or_hand = 'gripper' in name_lower or 'hand' in name_lower
-                
+
                 if is_gripper_or_hand:
                     category = 'gripper'
                 elif 'head' in name_lower:
@@ -662,43 +662,43 @@ class ROS2RobotInterface:
         """Send target joint positions for left hand joints."""
         if not self.is_connected:
             raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
-        
+
         if self.left_hand_joint_controller_pub is None:
             logger.warning("Left hand joint controller publisher not initialized. Set left_hand_joint_controller_topic in config.")
             return
-        
+
         msg = Float64MultiArray()
         msg.data = positions
         self.left_hand_joint_controller_pub.publish(msg)
         logger.debug(f"Published left hand joint positions: {positions}")
-    
+
     def send_right_hand_joint_positions(self, positions: List[float]) -> None:
         """Send target joint positions for right hand joints."""
         if not self.is_connected:
             raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
-        
+
         if self.right_hand_joint_controller_pub is None:
             logger.warning("Right hand joint controller publisher not initialized. Set right_hand_joint_controller_topic in config.")
             return
-        
+
         msg = Float64MultiArray()
         msg.data = positions
         self.right_hand_joint_controller_pub.publish(msg)
         logger.debug(f"Published right hand joint positions: {positions}")
-    
+
     def send_dual_arm_joint_positions(self, left_arm_positions: List[float], right_arm_positions: List[float]) -> None:
         """发送双臂关节位置命令（MoveJ 模式）
-        
+
         同时控制左臂和右臂的所有关节，发布到统一的 topic。
-        
+
         Args:
             left_arm_positions: 左臂关节位置列表（弧度）
             right_arm_positions: 右臂关节位置列表（弧度）
-            
+
         Raises:
             ROS2NotConnectedError: 如果接口未连接或发布器未初始化
             ValueError: 如果双臂模式未启用或参数无效
-            
+
         Example:
             ```python
             # 左臂7个关节，右臂7个关节
@@ -709,10 +709,10 @@ class ROS2RobotInterface:
         """
         if not self.is_connected:
             raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
-        
+
         if not self.config.right_end_effector_target_topic:
             raise ValueError("Dual-arm joint control requires dual-arm mode. Right end-effector target topic not configured.")
-        
+
         if self.unified_arm_joint_controller_pub is None:
             raise ROS2NotConnectedError(
                 "Unified arm joint controller publisher not initialized. "
@@ -720,29 +720,29 @@ class ROS2RobotInterface:
                 "Please ensure /ocs2_wbc_controller/target_joint_position or "
                 "/ocs2_arm_controller/target_joint_position topic exists."
             )
-        
+
         if not left_arm_positions or not right_arm_positions:
             raise ValueError("Both left_arm_positions and right_arm_positions must not be empty")
-        
+
         if len(left_arm_positions) != len(right_arm_positions):
             raise ValueError(
                 f"Left and right arm must have the same number of joints. "
                 f"Got {len(left_arm_positions)} and {len(right_arm_positions)}"
             )
-        
+
         # 发送 FSM 命令切换到 MOVEJ 状态
         try:
             self.send_fsm_command(4)
             logger.debug("Automatically switched to MOVEJ state for dual-arm joint control")
         except Exception as e:
             logger.warning(f"Failed to switch to MOVEJ state: {e}")
-        
+
         # 根据 topic 类型决定是否需要添加身体关节
         # ocs2_wbc_controller 需要：body_joints + left_arm_joints + right_arm_joints
         # ocs2_arm_controller 只需要：left_arm_joints + right_arm_joints
         unified_topic = self.config.unified_arm_joint_controller_topic
         is_wbc_controller = unified_topic and "ocs2_wbc_controller" in unified_topic
-        
+
         if is_wbc_controller:
             # WBC 控制器需要身体关节 + 左臂 + 右臂
             # 获取当前身体关节位置（如果可用）
@@ -750,13 +750,13 @@ class ROS2RobotInterface:
             categorized_state = self.get_joint_state(categorized=True)
             if categorized_state and categorized_state.get('body', {}).get('positions'):
                 body_positions = categorized_state['body']['positions']
-            
+
             if body_positions is None:
                 # 如果没有身体关节数据，使用零位置或默认值
                 logger.warning("Body joint positions not available, using zeros for WBC controller")
                 # 尝试从配置中获取身体关节数量（通常是4个）
                 body_positions = [0.0] * 4  # 默认4个身体关节
-            
+
             # 合并：身体关节 + 左臂 + 右臂
             combined_positions = list(body_positions) + left_arm_positions + right_arm_positions
             logger.debug(f"WBC controller: body={len(body_positions)}, left={len(left_arm_positions)}, right={len(right_arm_positions)}, total={len(combined_positions)}")
@@ -764,13 +764,13 @@ class ROS2RobotInterface:
             # ARM 控制器只需要左臂 + 右臂
             combined_positions = left_arm_positions + right_arm_positions
             logger.debug(f"ARM controller: left={len(left_arm_positions)}, right={len(right_arm_positions)}, total={len(combined_positions)}")
-        
+
         msg = Float64MultiArray()
         msg.data = combined_positions
         self.unified_arm_joint_controller_pub.publish(msg)
-        
-    
-    def send_joint_trajectory(self, 
+
+
+    def send_joint_trajectory(self,
                              joint_names: List[str],
                              waypoints: List[List[float]]) -> None:
         """Send multi-node joint trajectory for arm joints.
@@ -1150,15 +1150,15 @@ class ROS2RobotInterface:
         if self.left_hand_joint_controller_pub:
             self.left_hand_joint_controller_pub.destroy()
             self.left_hand_joint_controller_pub = None
-        
+
         if self.right_hand_joint_controller_pub:
             self.right_hand_joint_controller_pub.destroy()
             self.right_hand_joint_controller_pub = None
-        
+
         if self.unified_arm_joint_controller_pub:
             self.unified_arm_joint_controller_pub.destroy()
             self.unified_arm_joint_controller_pub = None
-        
+
         if self.robot_node:
             self.robot_node.destroy_node()
             self.robot_node = None
