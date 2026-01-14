@@ -65,6 +65,8 @@ class ROS2RobotInterfaceConfig:
     # 也可以手动配置
     head_joint_controller_topic: str | None = None  # 【可自动检测】头部关节控制器话题，例如 "/head_joint_controller/target_joint_position"
     body_joint_controller_topic: str | None = None  # 【可自动检测】身体关节控制器话题，例如 "/body_joint_controller/target_joint_position"
+    left_hand_joint_controller_topic: str | None = None  # 【可自动检测】左灵巧手关节控制器话题，例如 "/left_hand_controller/target_joint_position"
+    right_hand_joint_controller_topic: str | None = None  # 【可自动检测】右灵巧手关节控制器话题，例如 "/right_hand_controller/target_joint_position"
     
     # ============================================================================
     # 手臂关节控制器话题（自动检测，无需手动配置）

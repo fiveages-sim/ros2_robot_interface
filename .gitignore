@@ -40,3 +40,5 @@ Thumbs.db
 install/
 log/
 
+# Joint recording files (关节录制文件)
+record/joint_records/
