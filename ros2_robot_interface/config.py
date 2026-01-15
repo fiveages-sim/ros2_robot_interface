@@ -51,12 +51,22 @@ class ROS2RobotInterfaceConfig:
     right_gripper_command_topic: str | None = None  # 【可自动检测】右臂夹爪控制话题，例如 "/right_gripper_joint/position_command"
     
     # ============================================================================
+    # 目标位置订阅话题（可选，可自动检测）
+    # ============================================================================
+    # 【可自动检测】用于从话题订阅获取目标位置，而不是从内部存储获取
+    # 如果配置了这些话题，check_arrival 将从订阅的话题获取目标位置
+    end_effector_current_target_topic: str | None = None  # 【可自动检测】左臂当前目标位置话题，例如 "/left_current_target"
+    right_end_effector_current_target_topic: str | None = None  # 【可自动检测】右臂当前目标位置话题，例如 "/right_current_target"
+    
+    # ============================================================================
     # 头部和身体关节控制器话题（可选，可自动检测）
     # ============================================================================
     # 【可自动检测】系统会在 connect() 时自动检测这些话题，如果检测到会自动设置
     # 也可以手动配置
     head_joint_controller_topic: str | None = None  # 【可自动检测】头部关节控制器话题，例如 "/head_joint_controller/target_joint_position"
     body_joint_controller_topic: str | None = None  # 【可自动检测】身体关节控制器话题，例如 "/body_joint_controller/target_joint_position"
+    left_hand_joint_controller_topic: str | None = None  # 【可自动检测】左灵巧手关节控制器话题，例如 "/left_hand_controller/target_joint_position"
+    right_hand_joint_controller_topic: str | None = None  # 【可自动检测】右灵巧手关节控制器话题，例如 "/right_hand_controller/target_joint_position"
     
     # ============================================================================
     # 手臂关节控制器话题（自动检测，无需手动配置）
@@ -64,6 +74,7 @@ class ROS2RobotInterfaceConfig:
     # 【自动检测】系统会在 connect() 时自动检测这些话题，不应手动设置
     left_arm_joint_controller_topic: str | None = None  # 【自动检测】左臂关节控制器话题（根据可用话题自动检测）
     right_arm_joint_controller_topic: str | None = None  # 【自动检测】右臂关节控制器话题（双臂模式时自动检测）
+    unified_arm_joint_controller_topic: str | None = None  # 【自动检测】统一双臂关节控制器话题（如 /ocs2_wbc_controller/target_joint_position 或 /ocs2_arm_controller/target_joint_position）
     
     # ============================================================================
     # 关节配置（未使用，预留）

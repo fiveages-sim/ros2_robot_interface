@@ -76,24 +76,29 @@ class ArmHandler:
         if arm_type == ArmType.LEFT:
             self.pose_topic = config.end_effector_pose_topic
             self.target_topic = config.end_effector_target_topic
+            self.current_target_topic = config.end_effector_current_target_topic
             # 判断是否为单臂模式
             is_dual_arm = config.right_end_effector_pose_topic is not None
             self.label = "LEFT_ARM" if is_dual_arm else "ARM"
         else:  # RIGHT
             self.pose_topic = config.right_end_effector_pose_topic
             self.target_topic = config.right_end_effector_target_topic
+            self.current_target_topic = config.right_end_effector_current_target_topic
             self.label = "RIGHT_ARM"
         
         # 状态变量
         self.latest_pose: Optional[Pose] = None
-        self.target_pose: Optional[Pose] = None
+        self.latest_target_pose: Optional[Pose] = None  # 从话题订阅获取的目标位置
         
         # 时间戳和状态标志
         self.last_pose_time = 0.0
+        self.last_target_time = 0.0
         self._had_pose = False
+        self._had_target = False
         
         # Publishers 和 Subscriptions
         self.pose_sub: Optional[Subscription] = None
+        self.target_sub: Optional[Subscription] = None  # 目标位置订阅器
         self.target_pub: Optional[Publisher] = None
         self.target_stamped_pub: Optional[Publisher] = None
         self.joint_controller_pub: Optional[Publisher] = None
@@ -111,6 +116,18 @@ class ArmHandler:
             logger.debug(f"{self.label}: Created pose subscription to {self.pose_topic}")
         else:
             logger.warning(f"{self.label}: Pose topic not configured, skipping subscription")
+        
+        # 创建目标位置订阅器（用于到达判断）
+        if self.current_target_topic:
+            self.target_sub = self.node.create_subscription(
+                PoseStamped,
+                self.current_target_topic,
+                self._target_callback,
+                10
+            )
+            logger.debug(f"{self.label}: Created current target subscription to {self.current_target_topic}")
+        else:
+            logger.debug(f"{self.label}: Current target topic not configured, arrival checking will return None")
         
         # 创建 target 发布器
         if self.target_topic:
@@ -163,6 +180,31 @@ class ArmHandler:
             if was_recovering:
                 logger.info(f"{self.label} pose data recovery: Started receiving pose messages again")
     
+    def _target_callback(self, msg: PoseStamped) -> None:
+        """目标位置回调函数 - 处理接收到的目标位置消息"""
+        with self.data_lock:
+            current_time = time.time()
+            was_recovering = False
+            
+            # 检查是否是数据恢复（首次接收或超时后恢复）
+            if not self._had_target:
+                was_recovering = True
+            elif self.latest_target_pose is None:
+                was_recovering = True
+            elif self.config.end_effector_pose_timeout > 0:
+                time_since_last = current_time - self.last_target_time
+                if time_since_last > self.config.end_effector_pose_timeout:
+                    was_recovering = True
+            
+            # 更新状态
+            self.latest_target_pose = msg.pose
+            self.last_target_time = current_time
+            self._had_target = True
+            
+            # 记录恢复信息
+            if was_recovering:
+                logger.info(f"{self.label} target data recovery: Started receiving target messages again")
+    
     def get_pose(self) -> Optional[Pose]:
         """获取最新的 end effector pose
         
@@ -191,11 +233,6 @@ class ArmHandler:
             raise ROS2NotConnectedError(f"{self.label} target publisher not initialized")
         
         self.target_pub.publish(pose)
-        
-        # 更新内部 target pose 状态
-        self.target_pose = Pose()
-        self._copy_pose(pose, self.target_pose)
-        
         logger.debug(f"Published {self.label.lower()} target: {pose}")
     
     def send_target_stamped(self, frame_id: str, pose: Pose) -> None:
@@ -220,43 +257,42 @@ class ArmHandler:
         # 发布
         self.target_stamped_pub.publish(pose_stamped)
         logger.debug(f"Published {self.label.lower()} target (stamped) in frame '{frame_id}': {pose}")
-        
-        # 使用 TF 转换并更新内部 target pose
-        self._update_target_pose_with_tf(pose, frame_id)
     
     def get_target_pose(self) -> Optional[Pose]:
         """获取当前的目标 pose
         
+        从订阅的话题获取目标位置（如果配置了 current_target_topic）。
+        不再使用内部存储的 target_pose。
+        
         Returns:
-            目标 pose，如果未设置则返回 None
+            目标 pose，如果未配置话题订阅、数据不可用或数据过期则返回 None
         """
-        return self.target_pose
+        with self.data_lock:
+            # 如果配置了目标位置订阅话题，使用订阅的数据
+            if self.current_target_topic:
+                if self.latest_target_pose is None:
+                    return None
+                
+                # 检查超时
+                if self.config.end_effector_pose_timeout > 0:
+                    if (time.time() - self.last_target_time) > self.config.end_effector_pose_timeout:
+                        logger.warning(f"{self.label} target data is stale")
+                        return None
+                
+                return self.latest_target_pose
+            
+            # 如果没有配置话题订阅，返回 None
+            return None
     
-    def set_target_pose_internal(self, frame_id: str, pose: Pose) -> None:
-        """仅更新内部目标 pose（不发布到话题），用于到达判断
-        
-        此方法只更新内部的 target_pose 变量，不发布任何消息到 ROS 话题。
-        主要用于在需要到达判断但不想发布目标到话题的场景。
-        
-        Args:
-            frame_id: 坐标系 ID
-            pose: 目标 pose
-        """
-        # 使用 TF 转换并更新内部 target pose（不发布）
-        self._update_target_pose_with_tf(pose, frame_id)
-        logger.debug(f"Updated {self.label.lower()} internal target pose (not published) in frame '{frame_id}'")
-    
-    def send_joint_positions(self, positions: List[float], 
-                            fsm_command_callback: Optional[Callable[[int], None]] = None) -> None:
+    def send_joint_positions(self, positions: List[float]) -> None:
         """发送关节位置命令（MoveJ 模式）
         
         Args:
             positions: 目标关节位置列表
-            fsm_command_callback: 可选的 FSM 命令回调函数，用于切换状态（传入命令值）。
-                                 如果未提供，则使用初始化时传入的回调（如果存在）
             
         Raises:
             ROS2NotConnectedError: 如果发布器未初始化
+            ValueError: 如果初始化时未提供 FSM 命令回调函数
         """
         if self.joint_controller_pub is None:
             raise ROS2NotConnectedError(
@@ -264,17 +300,21 @@ class ArmHandler:
                 f"Joint controller topic not found."
             )
         
-        # 使用传入的回调，如果没有则使用初始化时保存的回调
-        callback = fsm_command_callback if fsm_command_callback is not None else self.fsm_command_callback
+        # 如果没有 FSM 回调，抛出异常
+        if self.fsm_command_callback is None:
+            raise ValueError(
+                f"{self.label}: FSM command callback is required for send_joint_positions(). "
+                f"Please initialize ArmHandler with fsm_command_callback."
+            )
         
-        # 发送 FSM 命令切换到 MOVEJ 状态（如果提供了回调）
-        if callback:
-            try:
-                callback(4)
-                logger.debug(f"{self.label}: Automatically switched to MOVEJ state for arm joint control")
-                time.sleep(0.5)
-            except Exception as e:
-                logger.warning(f"{self.label}: Failed to switch to MOVEJ state: {e}")
+        # 发送 FSM 命令切换到 MOVEJ 状态
+        try:
+            self.fsm_command_callback(4)
+            logger.debug(f"{self.label}: Automatically switched to MOVEJ state for arm joint control")
+            # 注意：状态切换是异步的，如果需要确保状态切换完成后再发送关节位置，
+            # 可以在调用此函数后自行等待，或确保当前已在 MOVEJ 状态
+        except Exception as e:
+            logger.warning(f"{self.label}: Failed to switch to MOVEJ state: {e}")
         
         msg = Float64MultiArray()
         msg.data = positions
@@ -348,46 +388,16 @@ class ArmHandler:
         dst.orientation.z = src.orientation.z
         dst.orientation.w = src.orientation.w
     
-    def _update_target_pose_with_tf(self, pose: Pose, frame_id: str) -> None:
-        """使用 TF 转换更新目标 pose
-        
-        如果 frame_id 与 base_frame 不同，则进行坐标转换。
-        
-        Args:
-            pose: 源 pose
-            frame_id: 源坐标系 ID
-        """
-        if self.tf_buffer is None:
-            # 如果没有 TF buffer，直接使用原始 pose
-            target_pose = Pose()
-            self._copy_pose(pose, target_pose)
-            self.target_pose = target_pose
-            return
-        
-        try:
-            if frame_id == self.base_frame:
-                # 如果已经在目标坐标系，直接复制
-                target_pose = Pose()
-                self._copy_pose(pose, target_pose)
-                self.target_pose = target_pose
-            else:
-                # 需要坐标转换
-                transform = self.tf_buffer.lookup_transform(
-                    self.base_frame, frame_id, rclpy.time.Time()
-                )
-                transformed_pose = do_transform_pose(pose, transform)
-                target_pose = Pose()
-                self._copy_pose(transformed_pose, target_pose)
-                self.target_pose = target_pose
-        except TransformException as ex:
-            logger.warning(f"Failed to transform pose from '{frame_id}' to '{self.base_frame}': {ex}")
-            self.target_pose = None
     
     def cleanup(self) -> None:
         """清理资源"""
         if self.pose_sub:
             self.pose_sub.destroy()
             self.pose_sub = None
+        
+        if self.target_sub:
+            self.target_sub.destroy()
+            self.target_sub = None
         
         if self.target_pub:
             self.target_pub.destroy()
