@@ -440,6 +440,73 @@ class ROS2RobotInterface:
             
             return categories
     
+
+    def get_end_effector_pose(self) -> Optional[Pose]:
+        """Get the latest left end-effector pose."""
+        if not self.is_connected:
+            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+
+        if self.left_arm_handler is None:
+            logger.warning("Left arm handler not initialized")
+            return None
+
+        return self.left_arm_handler.get_pose()
+
+    def get_right_end_effector_pose(self) -> Optional[Pose]:
+        """Get the latest right end-effector pose (dual-arm only)."""
+        if not self.is_connected:
+            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+
+        if self.right_arm_handler is None:
+            logger.warning("Right arm handler not initialized")
+            return None
+
+        return self.right_arm_handler.get_pose()
+
+    def send_end_effector_target(self, pose: Pose) -> None:
+        """Send a target pose for the left arm end-effector."""
+        if not self.is_connected:
+            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+
+        if self.left_arm_handler is None or self.left_arm_handler.target_pub is None:
+            logger.warning("Left arm target publisher not initialized")
+            return
+
+        self.left_arm_handler.send_target(pose)
+
+    def send_right_end_effector_target(self, pose: Pose) -> None:
+        """Send a target pose for the right arm end-effector (dual-arm only)."""
+        if not self.is_connected:
+            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+
+        if self.right_arm_handler is None or self.right_arm_handler.target_pub is None:
+            logger.warning("Right arm target publisher not initialized")
+            return
+
+        self.right_arm_handler.send_target(pose)
+
+    def send_gripper_command(self, position: float) -> None:
+        """Send a target position for the left gripper."""
+        if not self.is_connected:
+            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+
+        if self.left_gripper_handler is None:
+            logger.warning("Left gripper handler not initialized")
+            return
+
+        self.left_gripper_handler.send_joint_positions(position)
+
+    def send_right_gripper_command(self, position: float) -> None:
+        """Send a target position for the right gripper (dual-arm only)."""
+        if not self.is_connected:
+            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+
+        if self.right_gripper_handler is None:
+            logger.warning("Right gripper handler not initialized")
+            return
+
+        self.right_gripper_handler.send_joint_positions(position)
+
     def _copy_pose(self, src: Pose, dst: Pose) -> None:
         """Copy pose data from src to dst."""
         dst.position.x = src.position.x
