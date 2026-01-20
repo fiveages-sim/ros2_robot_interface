@@ -85,7 +85,15 @@ class ROS2RobotInterface:
         return self._connected and self.robot_node is not None
     
     def _discover_topics(self) -> List[str]:
-        """Discover available ROS 2 topics."""
+        """Discover available ROS 2 topics.
+        
+        Note: This method waits for topic list to stabilize to avoid detecting
+        stale topics from previous connections. It may take a few seconds.
+        """
+        # Ensure rclpy is initialized
+        if not rclpy.ok():
+            rclpy.init()
+        
         temp_node = Node(
             "ros2_robot_interface_temp",
             namespace=self.config.namespace if self.config.namespace else ""
@@ -97,6 +105,9 @@ class ROS2RobotInterface:
         topic_names = []
         stable_count = 0
         last_count = 0
+        
+        # Initial wait to let stale topics from previous connections disappear
+        time.sleep(0.5)
         
         for attempt in range(max_attempts):
             for _ in range(5):
@@ -147,21 +158,25 @@ class ROS2RobotInterface:
         # 左夹爪控制器检测
         if "/left_hand_controller/target_command" in topic_names:
             self.config.left_gripper_controller_name = "left_hand_controller"
+            logger.info("Detected left gripper controller: left_hand_controller")
         elif "/left_gripper_controller/target_command" in topic_names:
             self.config.left_gripper_controller_name = "left_gripper_controller"
+            logger.info("Detected left gripper controller: left_gripper_controller")
         elif "/hand_controller/target_command" in topic_names:
             # 单臂模式 - 灵巧手
             self.config.left_gripper_controller_name = "hand_controller"
+            logger.info("Detected left gripper controller: hand_controller (single-arm mode)")
         elif "/gripper_controller/target_command" in topic_names:
             # 单臂模式 - 夹爪
             self.config.left_gripper_controller_name = "gripper_controller"
-        
-        # 右夹爪控制器检测（仅双臂模式）
-        if is_dual_arm:
-            if "/right_hand_controller/target_command" in topic_names:
-                self.config.right_gripper_controller_name = "right_hand_controller"
-            elif "/right_gripper_controller/target_command" in topic_names:
-                self.config.right_gripper_controller_name = "right_gripper_controller"
+            logger.info("Detected left gripper controller: gripper_controller (single-arm mode)")
+
+        if "/right_hand_controller/target_command" in topic_names:
+            self.config.right_gripper_controller_name = "right_hand_controller"
+            logger.info("Detected right gripper controller: right_hand_controller")
+        elif "/right_gripper_controller/target_command" in topic_names:
+            self.config.right_gripper_controller_name = "right_gripper_controller"
+            logger.info("Detected right gripper controller: right_gripper_controller")
         
         if "/head_joint_controller/target_joint_position" in topic_names:
             self.config.head_joint_controller_topic = "/head_joint_controller/target_joint_position"
@@ -276,9 +291,8 @@ class ROS2RobotInterface:
                 self.target_path_pub = self.robot_node.create_publisher(Path, "/target_path", 10)
                 self.dual_target_stamped_pub = self.robot_node.create_publisher(Path, "/dual_target/stamped", 10)
             
-            # Create left gripper handler (if enabled)
-            # 检查是否有位置控制topic或target_command控制器（灵巧手或夹爪）
-            if self.config.gripper_enabled and (self.config.gripper_command_topic or self.config.left_gripper_controller_name):
+            # Create left gripper handler (if enabled and controller detected)
+            if self.config.gripper_enabled and self.config.left_gripper_controller_name:
                 self.left_gripper_handler = GripperHandler(
                     self.robot_node,
                     GripperType.LEFT,
@@ -286,10 +300,14 @@ class ROS2RobotInterface:
                     self.data_lock
                 )
                 self.left_gripper_handler.initialize()
+                logger.info("Created left gripper handler")
+            elif self.config.gripper_enabled:
+                logger.debug("Left gripper handler not created: no controller detected")
+            else:
+                logger.debug("Left gripper handler not created: gripper_enabled=False")
             
-            # Create right gripper handler (if dual-arm mode)
-            # 检查是否有位置控制topic或target_command控制器（灵巧手或夹爪）
-            if is_dual_arm_detected and (self.config.right_gripper_command_topic or self.config.right_gripper_controller_name):
+            # Create right gripper handler
+            if self.config.gripper_enabled and self.config.right_gripper_controller_name:
                 self.right_gripper_handler = GripperHandler(
                     self.robot_node,
                     GripperType.RIGHT,
@@ -297,6 +315,11 @@ class ROS2RobotInterface:
                     self.data_lock
                 )
                 self.right_gripper_handler.initialize()
+                logger.info("Created right gripper handler")
+            elif self.config.gripper_enabled:
+                logger.debug("Right gripper handler not created: no controller detected")
+            else:
+                logger.debug("Right gripper handler not created: gripper_enabled=False")
             
             self.fsm_command_pub = self.robot_node.create_publisher(Int32, "/fsm_command", 10)
             
@@ -1237,11 +1260,7 @@ class ROS2RobotInterface:
         
         with self.data_lock:
             self.latest_joint_state = None
-        
-        try:
-            rclpy.shutdown()
-        except Exception as e:
-            logger.warning(f"Error during rclpy shutdown: {e}")
+
         
         logger.info("Disconnected from ROS 2 robot interface")
 
