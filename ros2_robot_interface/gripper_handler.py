@@ -10,7 +10,6 @@ import threading
 from enum import Enum
 from typing import Optional, Dict, Any
 
-import rclpy
 from rclpy.node import Node
 from rclpy.publisher import Publisher
 from rclpy.subscription import Subscription

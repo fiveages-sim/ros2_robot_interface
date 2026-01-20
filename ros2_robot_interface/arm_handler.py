@@ -6,20 +6,15 @@ Arm Handler - 单臂处理器
 """
 
 import logging
-import threading
 import time
 from enum import Enum
 from typing import Optional, Dict, Any, List, Callable
 
-import rclpy
 from geometry_msgs.msg import Pose, PoseStamped
 from rclpy.node import Node
 from rclpy.publisher import Publisher
 from rclpy.subscription import Subscription
 from std_msgs.msg import Float64MultiArray
-import tf2_ros
-from tf2_ros import TransformException
-from tf2_geometry_msgs import do_transform_pose
 
 from .exceptions import ROS2NotConnectedError
 
@@ -38,7 +33,6 @@ class ArmHandler:
     负责管理单臂的：
     - Pose 订阅和状态管理
     - Target pose 发布（普通和 stamped）
-    - TF 坐标转换
     - 时间戳和超时检查
     """
     
@@ -47,9 +41,6 @@ class ArmHandler:
         node: Node,
         arm_type: ArmType,
         config: 'ROS2RobotInterfaceConfig',
-        data_lock: threading.Lock,
-        tf_buffer: Optional[tf2_ros.Buffer] = None,
-        base_frame: str = "arm_base",
         fsm_command_callback: Optional[Callable[[int], None]] = None
     ):
         """
@@ -59,17 +50,11 @@ class ArmHandler:
             node: ROS 2 节点
             arm_type: 手臂类型（LEFT 或 RIGHT）
             config: ROS2RobotInterfaceConfig 配置对象
-            data_lock: 数据锁（用于线程安全）
-            tf_buffer: TF 缓冲区（可选，用于坐标转换）
-            base_frame: 基坐标系名称
             fsm_command_callback: 可选的 FSM 命令回调函数，用于切换状态（传入命令值）
         """
         self.node = node
         self.arm_type = arm_type
         self.config = config
-        self.data_lock = data_lock
-        self.tf_buffer = tf_buffer
-        self.base_frame = base_frame
         self.fsm_command_callback = fsm_command_callback
         
         # 根据手臂类型确定 topic 名称和标签
@@ -89,6 +74,7 @@ class ArmHandler:
         # 状态变量
         self.latest_pose: Optional[Pose] = None
         self.latest_target_pose: Optional[Pose] = None  # 从话题订阅获取的目标位置
+        self.latest_target_frame_id: Optional[str] = None  # 从话题订阅获取的目标位置 frame_id
         
         # 时间戳和状态标志
         self.last_pose_time = 0.0
@@ -157,68 +143,25 @@ class ArmHandler:
     
     def _pose_callback(self, msg: PoseStamped) -> None:
         """Pose 回调函数 - 处理接收到的 pose 消息"""
-        with self.data_lock:
-            current_time = time.time()
-            was_recovering = False
-            
-            # 检查是否是数据恢复（首次接收或超时后恢复）
-            if not self._had_pose:
-                was_recovering = True
-            elif self.latest_pose is None:
-                was_recovering = True
-            elif self.config.end_effector_pose_timeout > 0:
-                time_since_last = current_time - self.last_pose_time
-                if time_since_last > self.config.end_effector_pose_timeout:
-                    was_recovering = True
-            
-            # 更新状态
-            self.latest_pose = msg.pose
-            self.last_pose_time = current_time
-            self._had_pose = True
-            
-            # 记录恢复信息
-            if was_recovering:
-                logger.info(f"{self.label} pose data recovery: Started receiving pose messages again")
+        current_time = time.time()
+        
+        # 更新状态
+        self.latest_pose = msg.pose
+        self.last_pose_time = current_time
+        self._had_pose = True
     
     def _target_callback(self, msg: PoseStamped) -> None:
         """目标位置回调函数 - 处理接收到的目标位置消息"""
-        with self.data_lock:
-            current_time = time.time()
-            was_recovering = False
-            
-            # 检查是否是数据恢复（首次接收或超时后恢复）
-            if not self._had_target:
-                was_recovering = True
-            elif self.latest_target_pose is None:
-                was_recovering = True
-            elif self.config.end_effector_pose_timeout > 0:
-                time_since_last = current_time - self.last_target_time
-                if time_since_last > self.config.end_effector_pose_timeout:
-                    was_recovering = True
-            
-            # 更新状态
-            self.latest_target_pose = msg.pose
-            self.last_target_time = current_time
-            self._had_target = True
-            
-            # 记录恢复信息
-            if was_recovering:
-                logger.info(f"{self.label} target data recovery: Started receiving target messages again")
+        current_time = time.time()
+        
+        # 更新状态
+        self.latest_target_pose = msg.pose
+        self.latest_target_frame_id = msg.header.frame_id
+        self.last_target_time = current_time
+        self._had_target = True
     
     def get_pose(self) -> Optional[Pose]:
-        """获取最新的 end effector pose
-        
-        Returns:
-            最新的 pose，如果数据过期或不存在则返回 None
-        """
-        with self.data_lock:
-            # 检查超时
-            if self.config.end_effector_pose_timeout > 0:
-                if (time.time() - self.last_pose_time) > self.config.end_effector_pose_timeout:
-                    logger.warning(f"{self.label} pose data is stale")
-                    return None
-            
-            return self.latest_pose
+        return self.latest_pose
     
     def send_target(self, pose: Pose) -> None:
         """发送目标 pose（不带坐标系）
@@ -259,30 +202,19 @@ class ArmHandler:
         logger.debug(f"Published {self.label.lower()} target (stamped) in frame '{frame_id}': {pose}")
     
     def get_target_pose(self) -> Optional[Pose]:
-        """获取当前的目标 pose
-        
-        从订阅的话题获取目标位置（如果配置了 current_target_topic）。
-        不再使用内部存储的 target_pose。
-        
-        Returns:
-            目标 pose，如果未配置话题订阅、数据不可用或数据过期则返回 None
-        """
-        with self.data_lock:
-            # 如果配置了目标位置订阅话题，使用订阅的数据
-            if self.current_target_topic:
-                if self.latest_target_pose is None:
-                    return None
-                
-                # 检查超时
-                if self.config.end_effector_pose_timeout > 0:
-                    if (time.time() - self.last_target_time) > self.config.end_effector_pose_timeout:
-                        logger.warning(f"{self.label} target data is stale")
-                        return None
-                
-                return self.latest_target_pose
-            
-            # 如果没有配置话题订阅，返回 None
+        if not self.current_target_topic:
             return None
+        
+        # 直接返回 latest_target_pose，在 Python 中单个对象引用读取是原子的
+        return self.latest_target_pose
+    
+    def get_target_frame_id(self) -> Optional[str]:
+        # 如果未配置话题订阅，返回 None
+        if not self.current_target_topic:
+            return None
+        
+        # 直接返回 latest_target_frame_id，在 Python 中单个对象引用读取是原子的
+        return self.latest_target_frame_id
     
     def send_joint_positions(self, positions: List[float]) -> None:
         """发送关节位置命令（MoveJ 模式）

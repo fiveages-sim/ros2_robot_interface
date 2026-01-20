@@ -22,7 +22,7 @@ from rclpy.publisher import Publisher
 from rclpy.subscription import Subscription
 from rclpy.time import Time
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Float64, Float64MultiArray, Int32
+from std_msgs.msg import Float64, Float64MultiArray, Int32, String
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 import tf2_ros
 from tf2_ros import TransformException
@@ -46,6 +46,8 @@ class ROS2RobotInterface:
         self.executor_thread: threading.Thread | None = None
         
         self.joint_state_sub: Subscription | None = None
+        self.fsm_command_sub: Subscription | None = None
+        self.robot_description_sub: Subscription | None = None
         self.target_path_pub: Publisher | None = None
         self.dual_target_stamped_pub: Publisher | None = None
         self.fsm_command_pub: Publisher | None = None
@@ -57,6 +59,16 @@ class ROS2RobotInterface:
         self.unified_arm_joint_controller_pub: Publisher | None = None  # Unified joint position publisher for both arms
 
         self.latest_joint_state: Dict[str, Any] | None = None
+        self.latest_categorized_joint_state: Dict[str, Any] | None = None  # Cached categorized state
+        
+        # FSM state tracking
+        self._current_fsm_command: int = 2  # Default to HOLD
+        self._fsm_state_lock = threading.Lock()
+        
+        # Robot description tracking
+        self.latest_robot_description: Optional[str] = None
+        self._robot_description_lock = threading.Lock()
+        self._robot_description_received = False
         
         self.data_lock = threading.Lock()
         self._connected = False
@@ -260,6 +272,31 @@ class ROS2RobotInterface:
                 10
             )
             
+            # Subscribe to FSM command for state tracking
+            self.fsm_command_sub = self.robot_node.create_subscription(
+                Int32,
+                "/fsm_command",
+                self._fsm_command_callback,
+                10
+            )
+            logger.info("✅ Subscribed to /fsm_command for FSM state tracking")
+            
+            # Subscribe to robot description for URDF tracking
+            from rclpy.qos import QoSProfile, DurabilityPolicy, HistoryPolicy, ReliabilityPolicy
+            robot_desc_qos = QoSProfile(
+                depth=10,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,  # Receive latched messages
+                reliability=ReliabilityPolicy.RELIABLE,
+                history=HistoryPolicy.KEEP_LAST
+            )
+            self.robot_description_sub = self.robot_node.create_subscription(
+                String,
+                "/robot_description",
+                self._robot_description_callback,
+                robot_desc_qos
+            )
+            logger.info("✅ Subscribed to /robot_description for URDF tracking")
+            
             # Initialize TF buffer first (needed by ArmHandler)
             self.tf_buffer = tf2_ros.Buffer()
             self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self.robot_node)
@@ -269,9 +306,6 @@ class ROS2RobotInterface:
                 self.robot_node,
                 ArmType.LEFT,
                 self.config,
-                self.data_lock,
-                self.tf_buffer,
-                self.config.base_frame,
                 self.send_fsm_command
             )
             self.left_arm_handler.initialize()
@@ -282,9 +316,6 @@ class ROS2RobotInterface:
                     self.robot_node,
                     ArmType.RIGHT,
                     self.config,
-                    self.data_lock,
-                    self.tf_buffer,
-                    self.config.base_frame,
                     self.send_fsm_command
                 )
                 self.right_arm_handler.initialize()
@@ -386,6 +417,36 @@ class ROS2RobotInterface:
             self.disconnect()
             raise
     
+    def _fsm_command_callback(self, msg: Int32) -> None:
+        """Callback for FSM command messages to track current state.
+        
+        Only updates internal state for valid state commands (1-4).
+        Special commands (0, 100, etc.) are published but do not change the displayed state.
+        """
+        try:
+            command = msg.data
+            # Only update internal state for valid state commands (1-4)
+            # Special commands (0, 100, etc.) should not change the displayed state
+            valid_state_commands = {1, 2, 3, 4}
+            if command in valid_state_commands:
+                with self._fsm_state_lock:
+                    self._current_fsm_command = command
+                logger.debug(f"FSM command received: {command} (state updated)")
+            else:
+                logger.debug(f"FSM command received: {command} (special command, state not updated)")
+        except Exception as e:
+            logger.error(f"Error in FSM command callback: {e}", exc_info=True)
+    
+    def _robot_description_callback(self, msg: String) -> None:
+        """Callback for robot description (URDF) messages."""
+        try:
+            with self._robot_description_lock:
+                self.latest_robot_description = msg.data
+                self._robot_description_received = True
+                logger.debug(f"Robot description received (length: {len(msg.data) if msg.data else 0})")
+        except Exception as e:
+            logger.error(f"Error in robot description callback: {e}", exc_info=True)
+    
     def _joint_state_callback(self, msg: JointState) -> None:
         """Callback for joint state messages."""
         with self.data_lock:
@@ -401,6 +462,7 @@ class ROS2RobotInterface:
                 if time_since_last > self.config.joint_state_timeout:
                     was_recovering = True
             
+            # Store raw joint state (quick operation)
             self.latest_joint_state = {
                 "names": list(msg.name),
                 "positions": list(msg.position),
@@ -410,11 +472,29 @@ class ROS2RobotInterface:
             }
             self.last_joint_state_time = current_time
             self._had_joint_state = True
+        
+        # Update gripper position history OUTSIDE lock to avoid blocking
+        self._update_gripper_position_history_from_joint_state(msg.name, msg.position)
+        
+        # Categorize joints OUTSIDE lock to avoid blocking (this is expensive)
+        # Cache the result for get_joint_state(categorized=True)
+        try:
+            categorized = self._categorize_joints(
+                msg.name,
+                msg.position,
+                msg.velocity,
+                msg.effort
+            )
+            categorized['timestamp'] = current_time
             
-            self._update_gripper_position_history_from_joint_state(msg.name, msg.position)
-            
-            if was_recovering:
-                logger.info("Joint state data recovery: Started receiving joint state messages again")
+            # Update cached categorized state (quick operation, minimal lock time)
+            with self.data_lock:
+                self.latest_categorized_joint_state = categorized
+        except Exception as e:
+            logger.debug(f"Error categorizing joints: {e}")
+        
+        if was_recovering:
+            logger.info("Joint state data recovery: Started receiving joint state messages again")
     
     
     def _update_gripper_position_history_from_joint_state(self, joint_names: List[str], positions: List[float]) -> None:
@@ -497,13 +577,24 @@ class ROS2RobotInterface:
         return categories
     
     def get_joint_state(self, categorized: bool = False) -> Dict[str, Any] | None:
-        """Get the latest joint state."""
+        """Get the latest joint state.
+        
+        Args:
+            categorized: If True, returns joints categorized by body part.
+                        Uses cached categorized state for better performance.
+        
+        Returns:
+            Joint state dictionary, or None if not available or stale.
+        """
         if not self.is_connected:
             raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
         
+        # Quick check outside lock
+        current_time = time.time()
+        
         with self.data_lock:
             if self.config.joint_state_timeout > 0:
-                if (time.time() - self.last_joint_state_time) > self.config.joint_state_timeout:
+                if (current_time - self.last_joint_state_time) > self.config.joint_state_timeout:
                     logger.warning("Joint state data is stale")
                     return None
             
@@ -511,17 +602,24 @@ class ROS2RobotInterface:
                 return None
             
             if not categorized:
+                # Return copy of raw joint state (quick operation)
                 return self.latest_joint_state.copy()
             
+            # Return cached categorized state (already computed in callback)
+            if self.latest_categorized_joint_state is not None:
+                # Return a copy to avoid external modifications
+                return self.latest_categorized_joint_state.copy()
+            
+            # Fallback: categorize on demand if cache is not available
+            # (should not happen in normal operation)
+            logger.debug("Categorized joint state cache not available, categorizing on demand")
             categories = self._categorize_joints(
                 self.latest_joint_state['names'],
                 self.latest_joint_state['positions'],
                 self.latest_joint_state['velocities'],
                 self.latest_joint_state.get('efforts', [])
             )
-            
             categories['timestamp'] = self.latest_joint_state.get('timestamp', 0.0)
-            
             return categories
     
 
@@ -703,7 +801,16 @@ class ROS2RobotInterface:
     
     
     def send_fsm_command(self, command: int) -> None:
-        """Send FSM command for state switching."""
+        """Send FSM command for state switching.
+        
+        Args:
+            command: FSM command value
+                - 1: HOME
+                - 2: HOLD
+                - 3: OCS2
+                - 4: MOVEJ
+                - 0, 100, etc.: Special commands (do not update internal state)
+        """
         if not self.is_connected:
             raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
         
@@ -715,6 +822,63 @@ class ROS2RobotInterface:
         fsm_msg.data = command
         self.fsm_command_pub.publish(fsm_msg)
         logger.info(f"Published FSM command: {command}")
+        
+        # Only update internal state for valid state commands (1-4)
+        # Special commands (0, 100, etc.) should not change the displayed state
+        valid_state_commands = {1, 2, 3, 4}
+        if command in valid_state_commands:
+            with self._fsm_state_lock:
+                self._current_fsm_command = command
+        else:
+            logger.debug(f"FSM command {command} is a special command, not updating internal state")
+    
+    def get_fsm_command(self) -> int:
+        """Get current FSM command.
+        
+        Returns:
+            Current FSM command value:
+            - 1: HOME
+            - 2: HOLD
+            - 3: OCS2
+            - 4: MOVEJ
+        """
+        with self._fsm_state_lock:
+            return self._current_fsm_command
+    
+    def get_fsm_state(self) -> str:
+        """Get current FSM state name.
+        
+        Returns:
+            Current FSM state name: "HOME", "HOLD", "OCS2", or "MOVEJ"
+        """
+        with self._fsm_state_lock:
+            command = self._current_fsm_command
+        
+        state_map = {
+            1: "HOME",
+            2: "HOLD",
+            3: "OCS2",
+            4: "MOVEJ",
+        }
+        return state_map.get(command, "HOLD")
+    
+    def get_robot_description(self) -> Optional[str]:
+        """Get the latest robot description (URDF).
+        
+        Returns:
+            Robot description string (URDF XML), or None if not received yet.
+        """
+        with self._robot_description_lock:
+            return self.latest_robot_description
+    
+    def has_robot_description(self) -> bool:
+        """Check if robot description has been received.
+        
+        Returns:
+            True if robot description has been received, False otherwise.
+        """
+        with self._robot_description_lock:
+            return self._robot_description_received
     
     def send_head_joint_positions(self, positions: List[float]) -> None:
         """Send target joint positions for head joints."""
@@ -1199,6 +1363,14 @@ class ROS2RobotInterface:
             self.joint_state_sub.destroy()
             self.joint_state_sub = None
         
+        if self.fsm_command_sub:
+            self.fsm_command_sub.destroy()
+            self.fsm_command_sub = None
+        
+        if self.robot_description_sub:
+            self.robot_description_sub.destroy()
+            self.robot_description_sub = None
+        
         # Cleanup arm handlers
         if self.left_arm_handler:
             self.left_arm_handler.cleanup()
@@ -1260,6 +1432,7 @@ class ROS2RobotInterface:
         
         with self.data_lock:
             self.latest_joint_state = None
+            self.latest_categorized_joint_state = None
 
         
         logger.info("Disconnected from ROS 2 robot interface")
