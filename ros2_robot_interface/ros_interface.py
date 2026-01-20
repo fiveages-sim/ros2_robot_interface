@@ -742,34 +742,15 @@ class ROS2RobotInterface:
         for pose in right_poses:
             path_msg.poses.append(to_pose_stamped(pose, default_frame_id))
         
+        # 清除旧的 current target，避免在收到新目标前误判为已到达
+        if left_poses and self.left_arm_handler:
+            self.left_arm_handler.latest_target_pose = None
+        if right_poses and self.right_arm_handler:
+            self.right_arm_handler.latest_target_pose = None
+        
         self.target_path_pub.publish(path_msg)
         logger.info(f"Published target path with {len(left_poses)} left arm waypoints and {len(right_poses)} right arm waypoints (total: {len(path_msg.poses)})")
         logger.debug(f"Path frame_id: {path_msg.header.frame_id}")
-        
-        # Update target poses in handlers internally with the last waypoint of each path (for check_arrival, without publishing to target/stamped topics)
-        if left_poses and self.left_arm_handler:
-            last_left_pose = left_poses[-1]
-            # Extract Pose and frame_id from PoseStamped if needed
-            if isinstance(last_left_pose, PoseStamped):
-                left_target_pose = last_left_pose.pose
-                left_frame_id = frame_id if frame_id is not None else last_left_pose.header.frame_id
-            else:
-                left_target_pose = last_left_pose
-                left_frame_id = frame_id if frame_id is not None else default_frame_id
-            # 不再需要 set_target_pose_internal，到达判断完全依赖话题订阅
-            logger.debug(f"Updated left arm target pose to last waypoint for arrival checking")
-        
-        if right_poses and self.right_arm_handler:
-            last_right_pose = right_poses[-1]
-            # Extract Pose and frame_id from PoseStamped if needed
-            if isinstance(last_right_pose, PoseStamped):
-                right_target_pose = last_right_pose.pose
-                right_frame_id = frame_id if frame_id is not None else last_right_pose.header.frame_id
-            else:
-                right_target_pose = last_right_pose
-                right_frame_id = frame_id if frame_id is not None else default_frame_id
-            # 不再需要 set_target_pose_internal，到达判断完全依赖话题订阅
-            logger.debug(f"Updated right arm target pose to last waypoint for arrival checking")
     
     def send_dual_arm_target_stamped(self, left_pose: Pose, right_pose: Pose, frame_id: str = "arm_base") -> None:
         """Send dual-arm target poses to /dual_target/stamped topic."""
@@ -792,12 +773,16 @@ class ROS2RobotInterface:
             pose_stamped.pose = pose
             path_msg.poses.append(pose_stamped)
         
+        # 清除旧的 current target，避免在收到新目标前误判为已到达
+        if self.left_arm_handler:
+            self.left_arm_handler.latest_target_pose = None
+        if self.right_arm_handler:
+            self.right_arm_handler.latest_target_pose = None
+        
         self.dual_target_stamped_pub.publish(path_msg)
         logger.info(f"Published dual arm target to /dual_target/stamped (frame_id: {frame_id})")
         logger.debug(f"Left arm pose: ({left_pose.position.x:.4f}, {left_pose.position.y:.4f}, {left_pose.position.z:.4f})")
         logger.debug(f"Right arm pose: ({right_pose.position.x:.4f}, {right_pose.position.y:.4f}, {right_pose.position.z:.4f})")
-        
-        # 不再需要 set_target_pose_internal，到达判断完全依赖话题订阅（/left_current_target 或 /right_current_target）
     
     
     def send_fsm_command(self, command: int) -> None:

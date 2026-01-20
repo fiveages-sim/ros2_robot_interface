@@ -6,7 +6,6 @@ Arm Handler - 单臂处理器
 """
 
 import logging
-import time
 from enum import Enum
 from typing import Optional, Dict, Any, List, Callable
 
@@ -33,7 +32,6 @@ class ArmHandler:
     负责管理单臂的：
     - Pose 订阅和状态管理
     - Target pose 发布（普通和 stamped）
-    - 时间戳和超时检查
     """
     
     def __init__(
@@ -74,11 +72,9 @@ class ArmHandler:
         # 状态变量
         self.latest_pose: Optional[Pose] = None
         self.latest_target_pose: Optional[Pose] = None  # 从话题订阅获取的目标位置
-        self.latest_target_frame_id: Optional[str] = None  # 从话题订阅获取的目标位置 frame_id
+        self.frame_id: Optional[str] = None  # 从 pose 订阅获取的 frame_id（只在第一次收到时更新）
         
-        # 时间戳和状态标志
-        self.last_pose_time = 0.0
-        self.last_target_time = 0.0
+        # 状态标志
         self._had_pose = False
         self._had_target = False
         
@@ -143,21 +139,16 @@ class ArmHandler:
     
     def _pose_callback(self, msg: PoseStamped) -> None:
         """Pose 回调函数 - 处理接收到的 pose 消息"""
-        current_time = time.time()
-        
         # 更新状态
         self.latest_pose = msg.pose
-        self.last_pose_time = current_time
+        if self.frame_id is None:
+            self.frame_id = msg.header.frame_id
         self._had_pose = True
     
     def _target_callback(self, msg: PoseStamped) -> None:
         """目标位置回调函数 - 处理接收到的目标位置消息"""
-        current_time = time.time()
-        
         # 更新状态
         self.latest_target_pose = msg.pose
-        self.latest_target_frame_id = msg.header.frame_id
-        self.last_target_time = current_time
         self._had_target = True
     
     def get_pose(self) -> Optional[Pose]:
@@ -175,6 +166,9 @@ class ArmHandler:
         if self.target_pub is None:
             raise ROS2NotConnectedError(f"{self.label} target publisher not initialized")
         
+        # 清除旧的 current target，避免在收到新目标前误判为已到达
+        self.latest_target_pose = None
+        
         self.target_pub.publish(pose)
         logger.debug(f"Published {self.label.lower()} target: {pose}")
     
@@ -190,6 +184,9 @@ class ArmHandler:
         """
         if self.target_stamped_pub is None:
             raise ROS2NotConnectedError(f"{self.label} target stamped publisher not initialized")
+        
+        # 清除旧的 current target，避免在收到新目标前误判为已到达
+        self.latest_target_pose = None
         
         # 创建 PoseStamped 消息
         pose_stamped = PoseStamped()
@@ -213,8 +210,8 @@ class ArmHandler:
         if not self.current_target_topic:
             return None
         
-        # 直接返回 latest_target_frame_id，在 Python 中单个对象引用读取是原子的
-        return self.latest_target_frame_id
+        # 直接返回 frame_id，在 Python 中单个对象引用读取是原子的
+        return self.frame_id
     
     def send_joint_positions(self, positions: List[float]) -> None:
         """发送关节位置命令（MoveJ 模式）

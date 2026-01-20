@@ -26,6 +26,40 @@ def print_pose(pose, label="Pose"):
           f"{pose.orientation.z:6.3f}, {pose.orientation.w:6.3f})")
 
 
+def wait_for_arrival(interface, max_wait_time=30.0, check_interval=0.5, pose_threshold=0.005):
+    """等待双臂到达目标位置
+    
+    Args:
+        interface: ROS2RobotInterface 实例
+        max_wait_time: 最大等待时间（秒）
+        check_interval: 检查间隔（秒）
+        pose_threshold: 位置距离阈值（米），默认0.005m
+    
+    Returns:
+        bool: True 如果双臂都已到达，False 如果超时
+    """
+    start_time = time.time()
+    
+    while time.time() - start_time < max_wait_time:
+        left_result = interface.left_arm_handler.check_arrival(pose_threshold=pose_threshold)
+        right_result = interface.right_arm_handler.check_arrival(pose_threshold=pose_threshold)
+        
+        if left_result['arrived'] and right_result['arrived']:
+            elapsed_time = time.time() - start_time
+            print(f"  ✓ 双臂均已到达目标位置（耗时 {elapsed_time:.1f} 秒）")
+            return True
+        
+        time.sleep(check_interval)
+    
+    elapsed_time = time.time() - start_time
+    print(f"  ⚠ 超时：{elapsed_time:.1f} 秒内未到达目标位置")
+    left_result = interface.left_arm_handler.check_arrival(pose_threshold=pose_threshold)
+    right_result = interface.right_arm_handler.check_arrival(pose_threshold=pose_threshold)
+    print(f"    左臂到达状态: {'✓ 已到达' if left_result['arrived'] else '✗ 未到达'}")
+    print(f"    右臂到达状态: {'✓ 已到达' if right_result['arrived'] else '✗ 未到达'}")
+    return False
+
+
 def main():
     """测试 send_dual_arm_target_stamped() 功能"""
     
@@ -106,10 +140,17 @@ def main():
     print("  ✓ 已切换到OCS2状态\n")
     
     # ========================================================================
-    # 第四部分：每隔2秒下降0.05m测试
+    # 第四部分：配置参数
+    # ========================================================================
+    MAX_WAIT_TIME = 30.0  # 最大等待时间（秒）
+    CHECK_INTERVAL = 0.5  # 检查间隔（秒）
+    POSE_THRESHOLD = 0.005  # 位置距离阈值（米）
+    
+    # ========================================================================
+    # 第五部分：上升两次，下降两次测试（等待到位后继续）
     # ========================================================================
     print("=" * 70)
-    print("[7] 每隔2秒双臂末端下降0.05m测试")
+    print("[7] 双臂末端上升两次，下降两次测试（等待到位后继续）")
     print("=" * 70)
     
     # 记录初始Z位置
@@ -119,90 +160,78 @@ def main():
     print(f"\n  初始位置:")
     print(f"    左臂Z: {initial_left_z:.3f}m")
     print(f"    右臂Z: {initial_right_z:.3f}m")
-    print(f"  每次下降: 0.05m")
-    print(f"  发送间隔: 2秒")
-    print(f"  按 Ctrl+C 停止测试\n")
+    print(f"  每次移动: 0.05m")
+    print(f"  最大等待时间: {MAX_WAIT_TIME}秒")
+    print(f"  到达阈值: {POSE_THRESHOLD}m")
+    print(f"  测试序列: 上升2次 → 下降2次\n")
     
-    # 下降次数计数器
-    step_count = 0
-    interval = 2.0  # 2秒间隔
+    # 执行4次移动：上升2次，下降2次
+    step_size = 0.05
+    total_steps = 4
     
-    try:
-        while True:
-            step_count += 1
-            current_left_z = initial_left_z - (step_count * 0.05)
-            current_right_z = initial_right_z - (step_count * 0.05)
-            
-            print(f"[7.{step_count}] 下降 {step_count * 0.05:.2f}m")
-            print("-" * 70)
-            print(f"  目标Z位置: 左臂={current_left_z:.3f}m, 右臂={current_right_z:.3f}m")
-            
-            # 创建目标位姿（只改变Z坐标，其他保持不变）
-            left_target_pose = create_pose(
-                x=left_current_pose.position.x,
-                y=left_current_pose.position.y,
-                z=current_left_z,
-                qx=left_current_pose.orientation.x,
-                qy=left_current_pose.orientation.y,
-                qz=left_current_pose.orientation.z,
-                qw=left_current_pose.orientation.w
+    for step_count in range(1, total_steps + 1):
+        # 前2次是上升（z增加），后2次是下降（z减小）
+        if step_count <= 2:
+            # 上升
+            z_offset = step_count * step_size
+            action = "上升"
+            offset_str = f"{step_count * step_size:.2f}m"
+        else:
+            # 下降（从上升2次的位置开始下降）
+            z_offset = (2 * step_size) - (step_count - 2) * step_size
+            action = "下降"
+            offset_str = f"{(step_count - 2) * step_size:.2f}m"
+        
+        current_left_z = initial_left_z + z_offset
+        current_right_z = initial_right_z + z_offset
+        
+        print(f"[7.{step_count}] {action} {offset_str}")
+        print("-" * 70)
+        print(f"  目标Z位置: 左臂={current_left_z:.3f}m, 右臂={current_right_z:.3f}m")
+        
+        # 创建目标位姿（只改变Z坐标，其他保持不变）
+        left_target_pose = create_pose(
+            x=left_current_pose.position.x,
+            y=left_current_pose.position.y,
+            z=current_left_z,
+            qx=left_current_pose.orientation.x,
+            qy=left_current_pose.orientation.y,
+            qz=left_current_pose.orientation.z,
+            qw=left_current_pose.orientation.w
+        )
+        
+        right_target_pose = create_pose(
+            x=right_current_pose.position.x,
+            y=right_current_pose.position.y,
+            z=current_right_z,
+            qx=right_current_pose.orientation.x,
+            qy=right_current_pose.orientation.y,
+            qz=right_current_pose.orientation.z,
+            qw=right_current_pose.orientation.w
+        )
+        
+        # 发送目标位姿
+        try:
+            interface.send_dual_arm_target_stamped(
+                left_target_pose,
+                right_target_pose,
+                frame_id="arm_base"
             )
-            
-            right_target_pose = create_pose(
-                x=right_current_pose.position.x,
-                y=right_current_pose.position.y,
-                z=current_right_z,
-                qx=right_current_pose.orientation.x,
-                qy=right_current_pose.orientation.y,
-                qz=right_current_pose.orientation.z,
-                qw=right_current_pose.orientation.w
-            )
-            
-            # 发送目标位姿
-            try:
-                interface.send_dual_arm_target_stamped(
-                    left_target_pose,
-                    right_target_pose,
-                    frame_id="arm_base"
-                )
-                print(f"  ✓ 目标位姿已发送")
-            except Exception as e:
-                print(f"  ✗ 发送失败: {e}")
-                break
-            
-            # 等待到达目标位置
-            print(f"  → 等待到达目标位置...")
-            max_wait_time = 30.0  # 最大等待时间（秒）
-            check_interval = 0.5  # 检查间隔（秒）
-            start_wait_time = time.time()
-            arrived = False
-            
-            while time.time() - start_wait_time < max_wait_time:
-                # 检查左臂到达状态
-                left_result = interface.left_arm_handler.check_arrival()
-                right_result = interface.right_arm_handler.check_arrival()
-                
-                if left_result['arrived'] and right_result['arrived']:
-                    elapsed_time = time.time() - start_wait_time
-                    print(f"  ✓ 双臂均已到达目标位置（耗时 {elapsed_time:.1f} 秒）")
-                    arrived = True
-                    break
-                
-                time.sleep(check_interval)
-            
-            if not arrived:
-                elapsed_time = time.time() - start_wait_time
-                print(f"  ⚠ 超时：{elapsed_time:.1f} 秒内未到达目标位置，继续下一步...")
-            
-            # 到达后等待一小段时间再发送下一个目标
-            print(f"  → 等待 {interval} 秒后发送下一个目标...")
-            time.sleep(interval)
-            
-    except KeyboardInterrupt:
-        print(f"\n\n  ⚠ 用户中断测试（已执行 {step_count} 次下降）")
+            print(f"  ✓ 目标位姿已发送")
+        except Exception as e:
+            print(f"  ✗ 发送失败: {e}")
+            break
+        
+        # 等待到达目标位置
+        print(f"  → 等待到达目标位置（最大等待 {MAX_WAIT_TIME} 秒，阈值 {POSE_THRESHOLD}m）...")
+        arrived = wait_for_arrival(interface, MAX_WAIT_TIME, CHECK_INTERVAL, POSE_THRESHOLD)
+        
+        if not arrived:
+            print(f"  ⚠ 超时，继续下一步...")
+        print()
     
     # ========================================================================
-    # 第五部分：清理和断开连接
+    # 第六部分：清理和断开连接
     # ========================================================================
     print("\n" + "=" * 70)
     print("[8] 测试完成，断开连接")

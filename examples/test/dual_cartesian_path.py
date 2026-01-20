@@ -35,13 +35,47 @@ def vectors_to_poses(vectors, frame_id="arm_base"):
     return poses
 
 
+def wait_for_arrival(interface, max_wait_time=30.0, check_interval=0.5):
+    """等待双臂到达目标位置
+    
+    Args:
+        interface: ROS2RobotInterface 实例
+        max_wait_time: 最大等待时间（秒）
+        check_interval: 检查间隔（秒）
+    
+    Returns:
+        bool: True 如果双臂都已到达，False 如果超时
+    """
+    start_time = time.time()
+    
+    while time.time() - start_time < max_wait_time:
+        left_result = interface.left_arm_handler.check_arrival()
+        right_result = interface.right_arm_handler.check_arrival()
+        
+        if left_result['arrived'] and right_result['arrived']:
+            elapsed_time = time.time() - start_time
+            print(f"  ✓ 双臂均已到达目标位置（耗时 {elapsed_time:.1f} 秒）")
+            return True
+        
+        time.sleep(check_interval)
+    
+    elapsed_time = time.time() - start_time
+    print(f"  ⚠ 超时：{elapsed_time:.1f} 秒内未到达目标位置")
+    left_result = interface.left_arm_handler.check_arrival()
+    right_result = interface.right_arm_handler.check_arrival()
+    print(f"    左臂到达状态: {'✓ 已到达' if left_result['arrived'] else '✗ 未到达'}")
+    print(f"    右臂到达状态: {'✓ 已到达' if right_result['arrived'] else '✗ 未到达'}")
+    return False
+
+
 def main():
     """测试W2机器人的路径接口"""
     
     # ========================================================================
     # 配置参数
     # ========================================================================
-    TRAJECTORY_EXECUTION_WAIT_TIME = 2.0  # 轨迹执行完成后的等待时间（秒）
+    MAX_WAIT_TIME = 30.0  # 最大等待时间（秒）
+    CHECK_INTERVAL = 0.5  # 检查间隔（秒）
     
     print("\n" + "=" * 70)
     print(" " * 20 + "W2 Robot Path Test")
@@ -190,13 +224,10 @@ def main():
         
         interface.send_target_path(a_left_initial_poses, a_right_initial_poses, frame_id="arm_base")
         print("  ✓ A点initial路径已发送")
-        print(f"  → 等待轨迹执行完成（约{TRAJECTORY_EXECUTION_WAIT_TIME}秒）...")
-        time.sleep(TRAJECTORY_EXECUTION_WAIT_TIME)
+        print(f"  → 等待轨迹执行完成（最大等待 {MAX_WAIT_TIME} 秒）...")
         
-        # 检查到达状态
-        left_result = interface.left_arm_handler.check_arrival()
-        right_result = interface.right_arm_handler.check_arrival()
-        if left_result['arrived'] and right_result['arrived']:
+        arrived = wait_for_arrival(interface, MAX_WAIT_TIME, CHECK_INTERVAL)
+        if arrived:
             print("  ✓ A点initial轨迹执行完成（左右臂均已到达）\n")
         else:
             print("  ⚠ A点initial轨迹执行完成（部分或全部未到达）\n")
@@ -221,13 +252,10 @@ def main():
         
         interface.send_target_path(a_left_end_poses, a_right_end_poses, frame_id="arm_base")
         print("  ✓ A点end路径已发送")
-        print(f"  → 等待轨迹执行完成（约{TRAJECTORY_EXECUTION_WAIT_TIME}秒）...")
-        time.sleep(TRAJECTORY_EXECUTION_WAIT_TIME)
+        print(f"  → 等待轨迹执行完成（最大等待 {MAX_WAIT_TIME} 秒）...")
         
-        # 检查到达状态
-        left_result = interface.left_arm_handler.check_arrival()
-        right_result = interface.right_arm_handler.check_arrival()
-        if left_result['arrived'] and right_result['arrived']:
+        arrived = wait_for_arrival(interface, MAX_WAIT_TIME, CHECK_INTERVAL)
+        if arrived:
             print("  ✓ A点end轨迹执行完成（左右臂均已到达）\n")
         else:
             print("  ⚠ A点end轨迹执行完成（部分或全部未到达）\n")
@@ -254,13 +282,10 @@ def main():
         
         interface.send_target_path(b_left_initial_poses, b_right_initial_poses, frame_id="arm_base")
         print("  ✓ B点initial路径已发送")
-        print(f"  → 等待轨迹执行完成（约{TRAJECTORY_EXECUTION_WAIT_TIME}秒）...")
-        time.sleep(TRAJECTORY_EXECUTION_WAIT_TIME)
+        print(f"  → 等待轨迹执行完成（最大等待 {MAX_WAIT_TIME} 秒）...")
         
-        # 检查到达状态
-        left_result = interface.left_arm_handler.check_arrival()
-        right_result = interface.right_arm_handler.check_arrival()
-        if left_result['arrived'] and right_result['arrived']:
+        arrived = wait_for_arrival(interface, MAX_WAIT_TIME, CHECK_INTERVAL)
+        if arrived:
             print("  ✓ B点initial轨迹执行完成（左右臂均已到达）\n")
         else:
             print("  ⚠ B点initial轨迹执行完成（部分或全部未到达）\n")
@@ -285,13 +310,10 @@ def main():
         
         interface.send_target_path(b_left_end_poses, b_right_end_poses, frame_id="arm_base")
         print("  ✓ B点end路径已发送")
-        print(f"  → 等待轨迹执行完成（约{TRAJECTORY_EXECUTION_WAIT_TIME}秒）...")
-        time.sleep(TRAJECTORY_EXECUTION_WAIT_TIME)
+        print(f"  → 等待轨迹执行完成（最大等待 {MAX_WAIT_TIME} 秒）...")
         
-        # 检查到达状态
-        left_result = interface.left_arm_handler.check_arrival()
-        right_result = interface.right_arm_handler.check_arrival()
-        if left_result['arrived'] and right_result['arrived']:
+        arrived = wait_for_arrival(interface, MAX_WAIT_TIME, CHECK_INTERVAL)
+        if arrived:
             print("  ✓ B点end轨迹执行完成（左右臂均已到达）\n")
         else:
             print("  ⚠ B点end轨迹执行完成（部分或全部未到达）\n")
@@ -322,13 +344,10 @@ def main():
         
         interface.send_target_path(a_left_initial_first_poses, a_right_initial_first_poses, frame_id="arm_base")
         print("  ✓ A点initial第一个点路径已发送")
-        print(f"  → 等待轨迹执行完成（约{TRAJECTORY_EXECUTION_WAIT_TIME}秒）...")
-        time.sleep(TRAJECTORY_EXECUTION_WAIT_TIME)
+        print(f"  → 等待轨迹执行完成（最大等待 {MAX_WAIT_TIME} 秒）...")
         
-        # 检查到达状态
-        left_result = interface.left_arm_handler.check_arrival()
-        right_result = interface.right_arm_handler.check_arrival()
-        if left_result['arrived'] and right_result['arrived']:
+        arrived = wait_for_arrival(interface, MAX_WAIT_TIME, CHECK_INTERVAL)
+        if arrived:
             print("  ✓ A点initial第一个点轨迹执行完成（左右臂均已到达）\n")
         else:
             print("  ⚠ A点initial第一个点轨迹执行完成（部分或全部未到达）\n")
