@@ -63,14 +63,10 @@ class ROS2RobotInterface:
         
         # FSM state tracking
         self._current_fsm_command: int = 2  # Default to HOLD
-        self._fsm_state_lock = threading.Lock()
         
         # Robot description tracking
         self.latest_robot_description: Optional[str] = None
-        self._robot_description_lock = threading.Lock()
         self._robot_description_received = False
-        
-        self.data_lock = threading.Lock()
         self._connected = False
         
         self.last_joint_state_time = 0.0
@@ -327,8 +323,7 @@ class ROS2RobotInterface:
                 self.left_gripper_handler = GripperHandler(
                     self.robot_node,
                     GripperType.LEFT,
-                    self.config,
-                    self.data_lock
+                    self.config
                 )
                 self.left_gripper_handler.initialize()
                 logger.info("Created left gripper handler")
@@ -342,8 +337,7 @@ class ROS2RobotInterface:
                 self.right_gripper_handler = GripperHandler(
                     self.robot_node,
                     GripperType.RIGHT,
-                    self.config,
-                    self.data_lock
+                    self.config
                 )
                 self.right_gripper_handler.initialize()
                 logger.info("Created right gripper handler")
@@ -429,8 +423,7 @@ class ROS2RobotInterface:
             # Special commands (0, 100, etc.) should not change the displayed state
             valid_state_commands = {1, 2, 3, 4}
             if command in valid_state_commands:
-                with self._fsm_state_lock:
-                    self._current_fsm_command = command
+                self._current_fsm_command = command
                 logger.debug(f"FSM command received: {command} (state updated)")
             else:
                 logger.debug(f"FSM command received: {command} (special command, state not updated)")
@@ -440,38 +433,36 @@ class ROS2RobotInterface:
     def _robot_description_callback(self, msg: String) -> None:
         """Callback for robot description (URDF) messages."""
         try:
-            with self._robot_description_lock:
-                self.latest_robot_description = msg.data
-                self._robot_description_received = True
-                logger.debug(f"Robot description received (length: {len(msg.data) if msg.data else 0})")
+            self.latest_robot_description = msg.data
+            self._robot_description_received = True
+            logger.debug(f"Robot description received (length: {len(msg.data) if msg.data else 0})")
         except Exception as e:
             logger.error(f"Error in robot description callback: {e}", exc_info=True)
     
     def _joint_state_callback(self, msg: JointState) -> None:
         """Callback for joint state messages."""
-        with self.data_lock:
-            current_time = time.time()
-            was_recovering = False
-            
-            if not self._had_joint_state:
+        current_time = time.time()
+        was_recovering = False
+        
+        if not self._had_joint_state:
+            was_recovering = True
+        elif self.latest_joint_state is None:
+            was_recovering = True
+        elif self.config.joint_state_timeout > 0:
+            time_since_last = current_time - self.last_joint_state_time
+            if time_since_last > self.config.joint_state_timeout:
                 was_recovering = True
-            elif self.latest_joint_state is None:
-                was_recovering = True
-            elif self.config.joint_state_timeout > 0:
-                time_since_last = current_time - self.last_joint_state_time
-                if time_since_last > self.config.joint_state_timeout:
-                    was_recovering = True
-            
-            # Store raw joint state (quick operation)
-            self.latest_joint_state = {
-                "names": list(msg.name),
-                "positions": list(msg.position),
-                "velocities": list(msg.velocity),
-                "efforts": list(msg.effort),
-                "timestamp": current_time
-            }
-            self.last_joint_state_time = current_time
-            self._had_joint_state = True
+        
+        # Store raw joint state (quick operation)
+        self.latest_joint_state = {
+            "names": list(msg.name),
+            "positions": list(msg.position),
+            "velocities": list(msg.velocity),
+            "efforts": list(msg.effort),
+            "timestamp": current_time
+        }
+        self.last_joint_state_time = current_time
+        self._had_joint_state = True
         
         # Update gripper position history OUTSIDE lock to avoid blocking
         self._update_gripper_position_history_from_joint_state(msg.name, msg.position)
@@ -487,9 +478,8 @@ class ROS2RobotInterface:
             )
             categorized['timestamp'] = current_time
             
-            # Update cached categorized state (quick operation, minimal lock time)
-            with self.data_lock:
-                self.latest_categorized_joint_state = categorized
+            # Update cached categorized state (quick operation)
+            self.latest_categorized_joint_state = categorized
         except Exception as e:
             logger.debug(f"Error categorizing joints: {e}")
         
@@ -589,38 +579,36 @@ class ROS2RobotInterface:
         if not self.is_connected:
             raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
         
-        # Quick check outside lock
-        current_time = time.time()
+        if self.latest_joint_state is None:
+            return None
         
-        with self.data_lock:
-            if self.config.joint_state_timeout > 0:
-                if (current_time - self.last_joint_state_time) > self.config.joint_state_timeout:
-                    logger.warning("Joint state data is stale")
-                    return None
-            
-            if self.latest_joint_state is None:
+        # Check timeout if enabled
+        if self.config.joint_state_timeout > 0:
+            current_time = time.time()
+            if (current_time - self.last_joint_state_time) > self.config.joint_state_timeout:
+                logger.warning("Joint state data is stale")
                 return None
-            
-            if not categorized:
-                # Return copy of raw joint state (quick operation)
-                return self.latest_joint_state.copy()
-            
-            # Return cached categorized state (already computed in callback)
-            if self.latest_categorized_joint_state is not None:
-                # Return a copy to avoid external modifications
-                return self.latest_categorized_joint_state.copy()
-            
-            # Fallback: categorize on demand if cache is not available
-            # (should not happen in normal operation)
-            logger.debug("Categorized joint state cache not available, categorizing on demand")
-            categories = self._categorize_joints(
-                self.latest_joint_state['names'],
-                self.latest_joint_state['positions'],
-                self.latest_joint_state['velocities'],
-                self.latest_joint_state.get('efforts', [])
-            )
-            categories['timestamp'] = self.latest_joint_state.get('timestamp', 0.0)
-            return categories
+        
+        if not categorized:
+            # Return copy of raw joint state (quick operation)
+            return self.latest_joint_state.copy()
+        
+        # Return cached categorized state (already computed in callback)
+        if self.latest_categorized_joint_state is not None:
+            # Return a copy to avoid external modifications
+            return self.latest_categorized_joint_state.copy()
+        
+        # Fallback: categorize on demand if cache is not available
+        # (should not happen in normal operation)
+        logger.debug("Categorized joint state cache not available, categorizing on demand")
+        categories = self._categorize_joints(
+            self.latest_joint_state['names'],
+            self.latest_joint_state['positions'],
+            self.latest_joint_state['velocities'],
+            self.latest_joint_state.get('efforts', [])
+        )
+        categories['timestamp'] = self.latest_joint_state.get('timestamp', 0.0)
+        return categories
     
 
     def get_end_effector_pose(self) -> Optional[Pose]:
@@ -812,8 +800,7 @@ class ROS2RobotInterface:
         # Special commands (0, 100, etc.) should not change the displayed state
         valid_state_commands = {1, 2, 3, 4}
         if command in valid_state_commands:
-            with self._fsm_state_lock:
-                self._current_fsm_command = command
+            self._current_fsm_command = command
         else:
             logger.debug(f"FSM command {command} is a special command, not updating internal state")
     
@@ -827,8 +814,7 @@ class ROS2RobotInterface:
             - 3: OCS2
             - 4: MOVEJ
         """
-        with self._fsm_state_lock:
-            return self._current_fsm_command
+        return self._current_fsm_command
     
     def get_fsm_state(self) -> str:
         """Get current FSM state name.
@@ -836,8 +822,7 @@ class ROS2RobotInterface:
         Returns:
             Current FSM state name: "HOME", "HOLD", "OCS2", or "MOVEJ"
         """
-        with self._fsm_state_lock:
-            command = self._current_fsm_command
+        command = self._current_fsm_command
         
         state_map = {
             1: "HOME",
@@ -853,8 +838,7 @@ class ROS2RobotInterface:
         Returns:
             Robot description string (URDF XML), or None if not received yet.
         """
-        with self._robot_description_lock:
-            return self.latest_robot_description
+        return self.latest_robot_description
     
     def has_robot_description(self) -> bool:
         """Check if robot description has been received.
@@ -862,8 +846,7 @@ class ROS2RobotInterface:
         Returns:
             True if robot description has been received, False otherwise.
         """
-        with self._robot_description_lock:
-            return self._robot_description_received
+        return self._robot_description_received
     
     def send_head_joint_positions(self, positions: List[float]) -> None:
         """Send target joint positions for head joints."""
@@ -1415,9 +1398,8 @@ class ROS2RobotInterface:
         if self.tf_buffer is not None:
             self.tf_buffer = None
         
-        with self.data_lock:
-            self.latest_joint_state = None
-            self.latest_categorized_joint_state = None
+        self.latest_joint_state = None
+        self.latest_categorized_joint_state = None
 
         
         logger.info("Disconnected from ROS 2 robot interface")

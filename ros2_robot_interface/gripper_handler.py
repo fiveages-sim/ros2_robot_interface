@@ -6,7 +6,6 @@ Gripper Handler - 单夹爪处理器
 """
 
 import logging
-import threading
 from enum import Enum
 from typing import Optional, Dict, Any
 
@@ -42,8 +41,7 @@ class GripperHandler:
         self,
         node: Node,
         gripper_type: GripperType,
-        config: 'ROS2RobotInterfaceConfig',
-        data_lock: threading.Lock
+        config: 'ROS2RobotInterfaceConfig'
     ):
         """
         初始化单夹爪处理器
@@ -52,12 +50,10 @@ class GripperHandler:
             node: ROS 2 节点
             gripper_type: 夹爪类型（LEFT 或 RIGHT）
             config: ROS2RobotInterfaceConfig 配置对象
-            data_lock: 数据锁（用于线程安全）
         """
         self.node = node
         self.gripper_type = gripper_type
         self.config = config
-        self.data_lock = data_lock
         
         # 根据夹爪类型确定 topic 名称和标签
         if gripper_type == GripperType.LEFT:
@@ -90,28 +86,13 @@ class GripperHandler:
             )
             logger.debug(f"{self.label}: Created position command publisher for {self.command_topic}")
         
-        # 创建target_command发布器和订阅器（新功能）
-        # 根据配置中的控制器名称构建topic
+        # 注意：只有在 controller_name 存在时才会创建 GripperHandler，所以这里一定不为 None
         if self.gripper_type == GripperType.LEFT:
-            # 使用配置中检测到的控制器名称
             controller_name = self.config.left_gripper_controller_name
-            if controller_name:
-                target_command_topic = f"/{controller_name}/target_command"
-            else:
-                # 如果没有配置，使用默认值（向后兼容）
-                is_dual_arm = self.config.right_end_effector_pose_topic is not None
-                if is_dual_arm:
-                    target_command_topic = "/left_hand_controller/target_command"
-                else:
-                    target_command_topic = "/gripper_controller/target_command"
+            target_command_topic = f"/{controller_name}/target_command"
         else:  # RIGHT
-            # 使用配置中检测到的控制器名称
             controller_name = self.config.right_gripper_controller_name
-            if controller_name:
-                target_command_topic = f"/{controller_name}/target_command"
-            else:
-                # 如果没有配置，使用默认值（向后兼容）
-                target_command_topic = "/right_hand_controller/target_command"
+            target_command_topic = f"/{controller_name}/target_command"
         
         self.target_command_pub = self.node.create_publisher(
             Int32, target_command_topic, 10
@@ -135,15 +116,10 @@ class GripperHandler:
             position: 目标关节位置（夹爪只有一个关节）
             
         Raises:
-            ROS2NotConnectedError: 如果发布器未初始化或夹爪未启用
+            ROS2NotConnectedError: 如果发布器未初始化
         """
-        if not self.config.gripper_enabled:
-            logger.warning(f"{self.label} is not enabled in configuration")
-            return
-        
         if self.command_pub is None:
-            logger.warning(f"{self.label} command publisher not initialized")
-            return
+            raise ROS2NotConnectedError(f"{self.label} command publisher not initialized (command_topic not configured)")
         
         # 位置限制
         clamped_position = max(
@@ -152,9 +128,8 @@ class GripperHandler:
         )
         
         # 更新目标位置并清空历史记录
-        with self.data_lock:
-            self.target_position = clamped_position
-            self.position_history.clear()
+        self.target_position = clamped_position
+        self.position_history.clear()
         
         # 发布消息（位置控制方式）
         gripper_msg = Float64()
@@ -171,26 +146,17 @@ class GripperHandler:
             target_value: 目标值，0=关闭, 1=打开
             
         Raises:
-            ROS2NotConnectedError: 如果发布器未初始化或夹爪未启用
+            ValueError: 如果 target_value 不是 0 或 1
         """
-        if not self.config.gripper_enabled:
-            logger.warning(f"{self.label} is not enabled in configuration")
-            return
-        
-        if self.target_command_pub is None:
-            logger.warning(f"{self.label} target_command publisher not initialized")
-            return
-        
-        # 验证参数值
         if target_value not in [0, 1]:
-            logger.warning(f"{self.label}: Invalid target_value {target_value}, must be 0 or 1")
-            return
+            raise ValueError(f"{self.label}: Invalid target_value {target_value}, must be 0 or 1")
         
         # 创建 Int32 消息
         target_msg = Int32()
         target_msg.data = target_value
         
         # 发布到 target_command 话题
+        # 注意：target_command_pub 在 initialize() 中总是会被创建（因为 controller_name 一定存在）
         self.target_command_pub.publish(target_msg)
         
         # 不立即更新状态，等待订阅器回调来更新（与VR/joystick逻辑一致）
@@ -206,13 +172,12 @@ class GripperHandler:
         Args:
             msg: Int32 消息，data=1 表示打开，data=0 表示关闭
         """
-        with self.data_lock:
-            self.is_open = (msg.data == 1)
-            # 同时更新 target_position 用于兼容性
-            if msg.data == 1:
-                self.target_position = self.config.gripper_max_position
-            else:
-                self.target_position = self.config.gripper_min_position
+        self.is_open = (msg.data == 1)
+        # 同时更新 target_position 用于兼容性
+        if msg.data == 1:
+            self.target_position = self.config.gripper_max_position
+        else:
+            self.target_position = self.config.gripper_min_position
         
         action = "打开" if self.is_open else "关闭"
         logger.debug(f"{self.label}: 状态同步更新 (target_command): {action}")
@@ -221,12 +186,10 @@ class GripperHandler:
         """更新位置历史记录
         
         从 joint_state 回调中调用，用于维护位置历史记录。
-        注意：调用者必须已经持有 data_lock，此方法不会再次获取锁。
         
         Args:
             position: 当前位置
         """
-        # 注意：调用者已经持有 data_lock，这里不再获取锁以避免死锁
         self.position_history.append(position)
         if len(self.position_history) > self.config.gripper_stability_history_size:
             self.position_history.pop(0)
@@ -257,12 +220,11 @@ class GripperHandler:
             # 计算稳定性
             is_stable = False
             position_variance = float('inf')
-            with self.data_lock:
-                history_size = self.config.gripper_stability_history_size
-                if len(self.position_history) == history_size:
-                    recent_positions = self.position_history[-history_size:]
-                    position_variance = max(recent_positions) - min(recent_positions)
-                    is_stable = position_variance < self.config.gripper_stability_threshold
+            history_size = self.config.gripper_stability_history_size
+            if len(self.position_history) == history_size:
+                recent_positions = self.position_history[-history_size:]
+                position_variance = max(recent_positions) - min(recent_positions)
+                is_stable = position_variance < self.config.gripper_stability_threshold
             
             # 判断是否在关闭过程中
             is_closing = current_position > self.target_position
@@ -278,13 +240,12 @@ class GripperHandler:
             print(f"  [位置检查-{self.label}] 目标位置: {self.target_position:.4f}")
             print(f"  [位置检查-{self.label}] 距离: {distance:.4f} (阈值: {threshold:.4f})")
             
-            with self.data_lock:
-                if len(self.position_history) > 0:
-                    history_str = ", ".join([f"{p:.4f}" for p in self.position_history])
-                    print(f"  [位置检查-{self.label}] 位置历史 ({len(self.position_history)}个值): [{history_str}]")
-                history_size = self.config.gripper_stability_history_size
-                if len(self.position_history) == history_size:
-                    print(f"  [位置检查-{self.label}] 位置稳定性: {is_stable} (变化: {position_variance:.4f}, 阈值: {self.config.gripper_stability_threshold:.4f})")
+            if len(self.position_history) > 0:
+                history_str = ", ".join([f"{p:.4f}" for p in self.position_history])
+                print(f"  [位置检查-{self.label}] 位置历史 ({len(self.position_history)}个值): [{history_str}]")
+            history_size = self.config.gripper_stability_history_size
+            if len(self.position_history) == history_size:
+                print(f"  [位置检查-{self.label}] 位置稳定性: {is_stable} (变化: {position_variance:.4f}, 阈值: {self.config.gripper_stability_threshold:.4f})")
             
             if arrived:
                 if is_stable and is_closing and distance >= threshold:
@@ -303,8 +264,7 @@ class GripperHandler:
         Returns:
             目标位置，如果未设置则返回 None
         """
-        with self.data_lock:
-            return self.target_position
+        return self.target_position
     
     def cleanup(self) -> None:
         """清理资源"""

@@ -210,12 +210,22 @@ def main():
             qw=right_current_pose.orientation.w
         )
         
+        # 获取 frame_id（优先使用左臂的 frame_id，如果不可用则使用右臂的）
+        frame_id = interface.left_arm_handler.get_frame_id()
+        if frame_id is None:
+            frame_id = interface.right_arm_handler.get_frame_id()
+        if frame_id is None:
+            print(f"  ⚠ frame_id 尚未设置（可能还未收到 pose 消息），使用默认值 'arm_base'")
+            frame_id = "arm_base"
+        else:
+            print(f"  → 使用 frame_id: {frame_id}")
+        
         # 发送目标位姿
         try:
             interface.send_dual_arm_target_stamped(
                 left_target_pose,
                 right_target_pose,
-                frame_id="arm_base"
+                frame_id=frame_id
             )
             print(f"  ✓ 目标位姿已发送")
         except Exception as e:

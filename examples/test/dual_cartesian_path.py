@@ -206,6 +206,16 @@ def main():
     print(f"    B点: 左臂 {len(b_left_initial)} 个initial点, {len(b_left_end)} 个end点")
     print(f"    B点: 右臂 {len(b_right_initial)} 个initial点, {len(b_right_end)} 个end点\n")
     
+    # 获取 frame_id（优先使用左臂的 frame_id，如果不可用则使用右臂的）
+    frame_id = interface.left_arm_handler.get_frame_id()
+    if frame_id is None:
+        frame_id = interface.right_arm_handler.get_frame_id()
+    if frame_id is None:
+        print("  ⚠ frame_id 尚未设置（可能还未收到 pose 消息），使用默认值 'arm_base'")
+        frame_id = "arm_base"
+    else:
+        print(f"  → 使用 frame_id: {frame_id}\n")
+    
     # ========================================================================
     # 第四部分：测试A点轨迹
     # ========================================================================
@@ -215,14 +225,14 @@ def main():
     
     try:
         # 转换A点initial轨迹
-        a_left_initial_poses = vectors_to_poses(a_left_initial, frame_id="arm_base")
-        a_right_initial_poses = vectors_to_poses(a_right_initial, frame_id="arm_base")
+        a_left_initial_poses = vectors_to_poses(a_left_initial, frame_id=frame_id)
+        a_right_initial_poses = vectors_to_poses(a_right_initial, frame_id=frame_id)
         
         print(f"  → 发送A点initial路径...")
         print(f"    左臂: {len(a_left_initial_poses)} 个路径点")
         print(f"    右臂: {len(a_right_initial_poses)} 个路径点")
         
-        interface.send_target_path(a_left_initial_poses, a_right_initial_poses, frame_id="arm_base")
+        interface.send_target_path(a_left_initial_poses, a_right_initial_poses, frame_id=frame_id)
         print("  ✓ A点initial路径已发送")
         print(f"  → 等待轨迹执行完成（最大等待 {MAX_WAIT_TIME} 秒）...")
         
@@ -243,14 +253,14 @@ def main():
     
     try:
         # 转换A点end轨迹
-        a_left_end_poses = vectors_to_poses(a_left_end, frame_id="arm_base")
-        a_right_end_poses = vectors_to_poses(a_right_end, frame_id="arm_base")
+        a_left_end_poses = vectors_to_poses(a_left_end, frame_id=frame_id)
+        a_right_end_poses = vectors_to_poses(a_right_end, frame_id=frame_id)
         
         print(f"  → 发送A点end路径...")
         print(f"    左臂: {len(a_left_end_poses)} 个路径点")
         print(f"    右臂: {len(a_right_end_poses)} 个路径点")
         
-        interface.send_target_path(a_left_end_poses, a_right_end_poses, frame_id="arm_base")
+        interface.send_target_path(a_left_end_poses, a_right_end_poses, frame_id=frame_id)
         print("  ✓ A点end路径已发送")
         print(f"  → 等待轨迹执行完成（最大等待 {MAX_WAIT_TIME} 秒）...")
         
@@ -273,14 +283,14 @@ def main():
     
     try:
         # 转换B点initial轨迹
-        b_left_initial_poses = vectors_to_poses(b_left_initial, frame_id="arm_base")
-        b_right_initial_poses = vectors_to_poses(b_right_initial, frame_id="arm_base")
+        b_left_initial_poses = vectors_to_poses(b_left_initial, frame_id=frame_id)
+        b_right_initial_poses = vectors_to_poses(b_right_initial, frame_id=frame_id)
         
         print(f"  → 发送B点initial路径...")
         print(f"    左臂: {len(b_left_initial_poses)} 个路径点")
         print(f"    右臂: {len(b_right_initial_poses)} 个路径点")
         
-        interface.send_target_path(b_left_initial_poses, b_right_initial_poses, frame_id="arm_base")
+        interface.send_target_path(b_left_initial_poses, b_right_initial_poses, frame_id=frame_id)
         print("  ✓ B点initial路径已发送")
         print(f"  → 等待轨迹执行完成（最大等待 {MAX_WAIT_TIME} 秒）...")
         
@@ -301,14 +311,14 @@ def main():
     
     try:
         # 转换B点end轨迹
-        b_left_end_poses = vectors_to_poses(b_left_end, frame_id="arm_base")
-        b_right_end_poses = vectors_to_poses(b_right_end, frame_id="arm_base")
+        b_left_end_poses = vectors_to_poses(b_left_end, frame_id=frame_id)
+        b_right_end_poses = vectors_to_poses(b_right_end, frame_id=frame_id)
         
         print(f"  → 发送B点end路径...")
         print(f"    左臂: {len(b_left_end_poses)} 个路径点")
         print(f"    右臂: {len(b_right_end_poses)} 个路径点")
         
-        interface.send_target_path(b_left_end_poses, b_right_end_poses, frame_id="arm_base")
+        interface.send_target_path(b_left_end_poses, b_right_end_poses, frame_id=frame_id)
         print("  ✓ B点end路径已发送")
         print(f"  → 等待轨迹执行完成（最大等待 {MAX_WAIT_TIME} 秒）...")
         
@@ -335,14 +345,14 @@ def main():
         a_right_initial_first = [a_right_initial[0]]  # 只取第一个点
         
         # 转换为PoseStamped
-        a_left_initial_first_poses = vectors_to_poses(a_left_initial_first, frame_id="arm_base")
-        a_right_initial_first_poses = vectors_to_poses(a_right_initial_first, frame_id="arm_base")
+        a_left_initial_first_poses = vectors_to_poses(a_left_initial_first, frame_id=frame_id)
+        a_right_initial_first_poses = vectors_to_poses(a_right_initial_first, frame_id=frame_id)
         
         print(f"  → 发送A点initial第一个点路径...")
         print(f"    左臂: {len(a_left_initial_first_poses)} 个路径点")
         print(f"    右臂: {len(a_right_initial_first_poses)} 个路径点")
         
-        interface.send_target_path(a_left_initial_first_poses, a_right_initial_first_poses, frame_id="arm_base")
+        interface.send_target_path(a_left_initial_first_poses, a_right_initial_first_poses, frame_id=frame_id)
         print("  ✓ A点initial第一个点路径已发送")
         print(f"  → 等待轨迹执行完成（最大等待 {MAX_WAIT_TIME} 秒）...")
         

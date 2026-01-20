@@ -36,11 +36,11 @@ def test_send_target_clear_behavior(interface, arm_handler, label):
     
     # 步骤2: 获取 frame_id 并发送新目标
     print(f"\n  [步骤2] 获取 frame_id 并发送新目标...")
-    frame_id = arm_handler.get_target_frame_id()
+    frame_id = arm_handler.get_frame_id()
     if frame_id is None:
         print(f"    ⚠ frame_id 尚未设置（可能还未收到 pose 消息），等待中...")
         time.sleep(1.0)
-        frame_id = arm_handler.get_target_frame_id()
+        frame_id = arm_handler.get_frame_id()
         if frame_id is None:
             print(f"    ✗ 无法获取 frame_id，跳过测试")
             return False

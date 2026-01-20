@@ -205,7 +205,7 @@ class ArmHandler:
         # 直接返回 latest_target_pose，在 Python 中单个对象引用读取是原子的
         return self.latest_target_pose
     
-    def get_target_frame_id(self) -> Optional[str]:
+    def get_frame_id(self) -> Optional[str]:
         # 如果未配置话题订阅，返回 None
         if not self.current_target_topic:
             return None
