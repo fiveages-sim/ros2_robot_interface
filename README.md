@@ -124,6 +124,7 @@ config = ROS2RobotInterfaceConfig(
 - `send_body_joint_positions(positions)` - 发送身体关节位置
 - `send_dual_arm_target_stamped(left_pose, right_pose, frame_id)` - 发送双臂目标 pose
 - `check_arrive(part, ...)` - 统一检查到达状态
+- `list_nodes()` - 查询当前运行的 ROS 2 节点列表
 
 #### 属性
 

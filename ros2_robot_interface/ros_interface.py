@@ -28,9 +28,14 @@ import tf2_ros
 from tf2_ros import TransformException
 from tf2_geometry_msgs import do_transform_pose
 from .config import ControlType, ROS2RobotInterfaceConfig
-from .exceptions import ROS2AlreadyConnectedError, ROS2NotConnectedError
-from .arm_handler import ArmHandler, ArmType
-from .gripper_handler import GripperHandler, GripperType
+from .utils.exceptions import ROS2AlreadyConnectedError, ROS2NotConnectedError
+from .handler import ArmHandler, ArmType, GripperHandler, GripperType
+from .utils.discovery import (
+    discover_topics as _discover_topics,
+    list_nodes as _list_nodes,
+    list_node_parameters as _list_node_parameters,
+    set_node_parameters as _set_node_parameters,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -92,52 +97,36 @@ class ROS2RobotInterface:
         """Check if the interface is connected."""
         return self._connected and self.robot_node is not None
     
-    def _discover_topics(self) -> List[str]:
-        """Discover available ROS 2 topics.
-        
-        Note: This method waits for topic list to stabilize to avoid detecting
-        stale topics from previous connections. It may take a few seconds.
-        """
-        # Ensure rclpy is initialized
-        if not rclpy.ok():
-            rclpy.init()
-        
-        temp_node = Node(
-            "ros2_robot_interface_temp",
-            namespace=self.config.namespace if self.config.namespace else ""
+    def list_nodes(self) -> List[Dict[str, str]]:
+        """查询当前运行的 ROS 2 节点列表。详见 utils.discovery.list_nodes() 的文档。"""
+        # 如果已连接，使用现有节点；否则传递 None 让函数创建临时节点
+        node = self.robot_node if self.is_connected else None
+        # 不传 namespace，保持使用空命名空间创建临时节点
+        return _list_nodes(node=node)
+    
+    def list_node_parameters(self, full_node_name: str) -> List[Dict[str, Any]]:
+        """查询指定节点的可动态配置参数。详见 utils.discovery.list_node_parameters() 的文档。"""
+        # 如果已连接，使用现有节点；否则传递 None 让函数创建临时节点
+        node = self.robot_node if self.is_connected else None
+        return _list_node_parameters(
+            full_node_name=full_node_name,
+            node=node,
         )
-        temp_executor = SingleThreadedExecutor()
-        temp_executor.add_node(temp_node)
-        
-        max_attempts = 30
-        topic_names = []
-        stable_count = 0
-        last_count = 0
-        
-        # Initial wait to let stale topics from previous connections disappear
-        time.sleep(0.5)
-        
-        for attempt in range(max_attempts):
-            for _ in range(5):
-                temp_executor.spin_once(timeout_sec=0.05)
-            time.sleep(0.3)
-            
-            topic_names_and_types = temp_node.get_topic_names_and_types()
-            topic_names = [name for name, _ in topic_names_and_types]
-            current_count = len(topic_names)
-            
-            if current_count == last_count and current_count > 2:
-                stable_count += 1
-                if stable_count >= 3:
-                    break
-            else:
-                stable_count = 0
-            
-            last_count = current_count
-        
-        temp_executor.shutdown()
-        temp_node.destroy_node()
-        return topic_names
+    
+    def set_node_parameters(
+        self,
+        full_node_name: str,
+        parameters: Dict[str, Any]
+    ) -> bool:
+        """设置指定节点的参数值。详见 utils.discovery.set_node_parameters() 的文档。"""
+        # 如果已连接，使用现有节点；否则传递 None 让函数创建临时节点
+        node = self.robot_node if self.is_connected else None
+        return _set_node_parameters(
+            full_node_name=full_node_name,
+            parameters=parameters,
+            node=node,
+            namespace=""
+        )
     
     def _auto_detect_configuration(self, topic_names: List[str]) -> bool:
         """Auto-detect robot configuration from topics. Returns True if dual-arm detected."""
@@ -241,7 +230,7 @@ class ROS2RobotInterface:
             
             is_dual_arm_detected = False
             try:
-                topic_names = self._discover_topics()
+                topic_names = _discover_topics()
                 is_dual_arm_detected = self._auto_detect_configuration(topic_names)
             except Exception as e:
                 logger.warning(f"Failed to auto-detect configuration: {e}")

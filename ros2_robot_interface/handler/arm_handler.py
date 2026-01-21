@@ -15,7 +15,7 @@ from rclpy.publisher import Publisher
 from rclpy.subscription import Subscription
 from std_msgs.msg import Float64MultiArray
 
-from .exceptions import ROS2NotConnectedError
+from ..utils.exceptions import ROS2NotConnectedError
 
 logger = logging.getLogger(__name__)
 

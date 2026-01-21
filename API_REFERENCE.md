@@ -960,6 +960,42 @@ if pose_in_base:
 
 ---
 
+### 系统信息查询
+
+#### `list_nodes() -> List[Dict[str, str]]`
+
+**功能：** 查询当前运行的 ROS 2 节点列表
+
+**说明：**
+- 此方法可以在连接或未连接状态下使用
+- 如果接口已连接，会使用现有节点进行查询
+- 如果未连接，会创建一个临时节点来查询
+
+**返回值：**
+- `List[Dict[str, str]]`: 节点信息列表，每个字典包含：
+  - `'name'`: 节点名称（不含命名空间）
+  - `'namespace'`: 节点命名空间
+  - `'full_name'`: 完整节点名称（命名空间 + 名称）
+
+**示例：**
+```python
+# 查询节点列表
+nodes = interface.list_nodes()
+print(f"当前运行的节点数量: {len(nodes)}")
+for node in nodes:
+    print(f"节点: {node['full_name']}")
+    print(f"  名称: {node['name']}")
+    print(f"  命名空间: {node['namespace']}")
+
+# 查找特定节点
+target_node = "ros2_robot_interface"
+matching_nodes = [n for n in nodes if target_node in n['name']]
+if matching_nodes:
+    print(f"找到节点: {matching_nodes[0]['full_name']}")
+```
+
+---
+
 ## 快速参考表
 
 | 部分 | Handler 访问 | 发送命令 | 获取状态 | 检查到达 |

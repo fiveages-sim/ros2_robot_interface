@@ -6,7 +6,7 @@ This package is independent of LeRobot and can be used in any ROS 2 environment.
 """
 
 from .config import ControlType, ROS2RobotInterfaceConfig
-from .exceptions import (
+from .utils.exceptions import (
     ROS2InterfaceError,
     ROS2NotConnectedError,
     ROS2AlreadyConnectedError,
