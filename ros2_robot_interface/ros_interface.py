@@ -442,16 +442,27 @@ class ROS2RobotInterface:
             if time_since_last > self.config.joint_state_timeout:
                 was_recovering = True
         
+        if msg.header.stamp.sec > 0 or msg.header.stamp.nanosec > 0:
+            msg_timestamp = msg.header.stamp.sec + msg.header.stamp.nanosec / 1e9
+        else:
+            msg_timestamp = current_time
+            logger.debug("JointState message has invalid timestamp, using system time as fallback")
+        
         # Store raw joint state (quick operation)
         self.latest_joint_state = {
             "names": list(msg.name),
             "positions": list(msg.position),
             "velocities": list(msg.velocity),
             "efforts": list(msg.effort),
-            "timestamp": current_time
+            "timestamp": msg_timestamp
         }
         self.last_joint_state_time = current_time
         self._had_joint_state = True
+        
+        # If we were disconnected due to timeout, restore connection when new data arrives
+        if not self._connected and self.robot_node is not None:
+            self._connected = True
+            logger.info("Joint state data recovered - connection restored")
         
         # Update gripper position history OUTSIDE lock to avoid blocking
         self._update_gripper_position_history_from_joint_state(msg.name, msg.position)
@@ -465,7 +476,7 @@ class ROS2RobotInterface:
                 msg.velocity,
                 msg.effort
             )
-            categorized['timestamp'] = current_time
+            categorized['timestamp'] = msg_timestamp
             
             # Update cached categorized state (quick operation)
             self.latest_categorized_joint_state = categorized
@@ -575,7 +586,10 @@ class ROS2RobotInterface:
         if self.config.joint_state_timeout > 0:
             current_time = time.time()
             if (current_time - self.last_joint_state_time) > self.config.joint_state_timeout:
-                logger.warning("Joint state data is stale")
+                # Set connected to False when timeout detected
+                if self._connected:
+                    logger.warning("Joint state data is stale - setting connected to False")
+                    self._connected = False
                 return None
         
         if not categorized:
@@ -599,6 +613,19 @@ class ROS2RobotInterface:
         categories['timestamp'] = self.latest_joint_state.get('timestamp', 0.0)
         return categories
     
+    def get_last_joint_state_time(self) -> float:
+        """Get the timestamp of when the last joint state message was received.
+        
+        This is the system time when the last message was received (not the message timestamp).
+        Useful for detecting if joint state data has been updated, even when timeout is disabled.
+        
+        Returns:
+            Timestamp in seconds (system time), or 0.0 if no joint state has been received yet.
+        """
+        if not self.is_connected:
+            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+        
+        return self.last_joint_state_time
 
     def get_end_effector_pose(self) -> Optional[Pose]:
         """Get the latest left end-effector pose."""
