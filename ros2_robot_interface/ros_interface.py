@@ -576,10 +576,7 @@ class ROS2RobotInterface:
         Returns:
             Joint state dictionary, or None if not available or stale.
         """
-        if not self.is_connected:
-            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
-        
-        if self.latest_joint_state is None:
+        if not self.is_connected or self.latest_joint_state is None:
             return None
         
         # Check timeout if enabled
