@@ -610,24 +610,24 @@ class ROS2RobotInterface:
         categories['timestamp'] = self.latest_joint_state.get('timestamp', 0.0)
         return categories
     
-    def get_last_joint_state_time(self) -> float:
+    def get_last_joint_state_time(self) -> Optional[float]:
         """Get the timestamp of when the last joint state message was received.
         
         This is the system time when the last message was received (not the message timestamp).
         Useful for detecting if joint state data has been updated, even when timeout is disabled.
         
         Returns:
-            Timestamp in seconds (system time), or 0.0 if no joint state has been received yet.
+            Timestamp in seconds (system time), or None if not connected or no joint state has been received yet.
         """
         if not self.is_connected:
-            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+            return None
         
-        return self.last_joint_state_time
+        return self.last_joint_state_time if self.last_joint_state_time > 0.0 else None
 
     def get_end_effector_pose(self) -> Optional[Pose]:
         """Get the latest left end-effector pose."""
         if not self.is_connected:
-            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+            return None
 
         if self.left_arm_handler is None:
             logger.warning("Left arm handler not initialized")
@@ -638,7 +638,7 @@ class ROS2RobotInterface:
     def get_right_end_effector_pose(self) -> Optional[Pose]:
         """Get the latest right end-effector pose (dual-arm only)."""
         if not self.is_connected:
-            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+            return None
 
         if self.right_arm_handler is None:
             logger.warning("Right arm handler not initialized")
@@ -1099,7 +1099,7 @@ class ROS2RobotInterface:
         
         return {'arrived': arrived, 'distance': distance}
     
-    def check_arrive(self, part: Optional[str] = None, position_threshold: Optional[float] = None) -> Dict[str, Any]:
+    def check_arrive(self, part: Optional[str] = None, position_threshold: Optional[float] = None) -> Optional[Dict[str, Any]]:
         """Check if head, body joints, arm poses, or grippers have arrived at target positions/poses.
         
         Args:
@@ -1108,10 +1108,10 @@ class ROS2RobotInterface:
             position_threshold: 关节位置阈值（仅用于 head 和 body），如果为 None 则使用默认值
         
         Returns:
-            包含到达状态和距离信息的字典
+            包含到达状态和距离信息的字典，如果未连接则返回 None
         """
         if not self.is_connected:
-            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+            return None
         
         is_dual_arm = self.config.right_end_effector_pose_topic is not None
         

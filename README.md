@@ -46,10 +46,12 @@ joint_state = interface.get_joint_state()
 if joint_state:
     print(f"Joint positions: {joint_state['positions']}")
 
-# Get end-effector pose
+# Get end-effector pose (returns None if not connected)
 pose = interface.get_end_effector_pose()
 if pose:
     print(f"End-effector position: ({pose.position.x}, {pose.position.y}, {pose.position.z})")
+else:
+    print("Interface not connected or pose not available")
 
 # Send target pose
 target_pose = Pose()

@@ -254,11 +254,11 @@ def main():
                 except Exception as e:
                     print(f"  [夹爪] ✗ 控制左臂夹爪失败: {e}")
             else:
-                try:
-                    left_res = interface.check_arrive('left_gripper' if is_dual_arm else 'gripper')
+                left_res = interface.check_arrive('left_gripper' if is_dual_arm else 'gripper')
+                if left_res:
                     left_gripper_arrived = left_res.get('arrived', False)
-                except Exception:
-                    left_gripper_arrived = True
+                else:
+                    left_gripper_arrived = True  # 未连接时假设已到达
                 if left_gripper_arrived:
                     left_gripper_is_open = left_gripper_target_open
                     left_gripper_command_sent = False
@@ -278,11 +278,11 @@ def main():
                     except Exception as e:
                         print(f"  [夹爪] ✗ 控制右臂夹爪失败: {e}")
                 else:
-                    try:
-                        right_res = interface.check_arrive('right_gripper')
+                    right_res = interface.check_arrive('right_gripper')
+                    if right_res:
                         right_gripper_arrived = right_res.get('arrived', False)
-                    except Exception:
-                        right_gripper_arrived = True
+                    else:
+                        right_gripper_arrived = True  # 未连接时假设已到达
                     if right_gripper_arrived:
                         right_gripper_is_open = right_gripper_target_open
                         right_gripper_command_sent = False
@@ -479,7 +479,7 @@ def main():
                 elif head_body_movement_state == "head_moving_left":
                     # 检查是否到达目标位置，或超时后切换
                     head_check = interface.check_arrive('head')
-                    if head_check['arrived'] or (current_time - head_body_movement_start_time >= movement_duration):
+                    if (head_check and head_check.get('arrived', False)) or (current_time - head_body_movement_start_time >= movement_duration):
                         head_body_movement_state = "head_moving_right"
                         head_body_movement_start_time = current_time
                         # 头部向右摆动：head_joint1（索引0）减少0.3弧度
@@ -498,7 +498,7 @@ def main():
                 elif head_body_movement_state == "head_moving_right":
                     # 检查是否到达目标位置，或超时后切换
                     head_check = interface.check_arrive('head')
-                    if head_check['arrived'] or (current_time - head_body_movement_start_time >= movement_duration):
+                    if (head_check and head_check.get('arrived', False)) or (current_time - head_body_movement_start_time >= movement_duration):
                         head_body_movement_state = "head_moving_up"
                         head_body_movement_start_time = current_time
                         # 头部向上摆动：head_joint2（索引1）控制上下（pitch），减少0.3弧度（pitch减少=向上）
@@ -517,7 +517,7 @@ def main():
                 elif head_body_movement_state == "head_moving_up":
                     # 检查是否到达目标位置，或超时后切换
                     head_check = interface.check_arrive('head')
-                    if head_check['arrived'] or (current_time - head_body_movement_start_time >= movement_duration):
+                    if (head_check and head_check.get('arrived', False)) or (current_time - head_body_movement_start_time >= movement_duration):
                         head_body_movement_state = "head_moving_down"
                         head_body_movement_start_time = current_time
                         # 头部向下摆动：head_joint2（索引1）增加0.3弧度（pitch增加=向下）
@@ -536,7 +536,7 @@ def main():
                 elif head_body_movement_state == "head_moving_down":
                     # 检查是否到达目标位置，或超时后切换
                     head_check = interface.check_arrive('head')
-                    if head_check['arrived'] or (current_time - head_body_movement_start_time >= movement_duration):
+                    if (head_check and head_check.get('arrived', False)) or (current_time - head_body_movement_start_time >= movement_duration):
                         head_body_movement_state = "body_moving_to_target"
                         head_body_movement_start_time = current_time
                         # 头部回到初始位置
@@ -573,7 +573,7 @@ def main():
                 elif head_body_movement_state == "body_moving_to_target":
                     # 检查是否到达目标位置，或超时后切换
                     body_check = interface.check_arrive('body')
-                    if body_check['arrived'] or (current_time - head_body_movement_start_time >= movement_duration):
+                    if (body_check and body_check.get('arrived', False)) or (current_time - head_body_movement_start_time >= movement_duration):
                         head_body_movement_state = "body_moving_back"
                         head_body_movement_start_time = current_time
                         # 身体回到初始位置
@@ -589,7 +589,7 @@ def main():
                 elif head_body_movement_state == "body_moving_back":
                     # 检查是否到达目标位置，或超时后切换
                     body_check = interface.check_arrive('body')
-                    if body_check['arrived'] or (current_time - head_body_movement_start_time >= movement_duration):
+                    if (body_check and body_check.get('arrived', False)) or (current_time - head_body_movement_start_time >= movement_duration):
                         head_body_movement_state = "completed"  # 标记为完成，准备切换状态
                         head_body_movement_start_time = None
                         head_initial_positions = None
@@ -688,7 +688,8 @@ def main():
             # HOLD状态：1秒后切换
             # 其他状态：每5秒切换一次，但如果OCS2/MOVEJ状态下的动作未完成，则等待动作完成
             # 动作完成后立即切换（不等待5秒周期）
-            interface.check_arrive()
+            # 注意：check_arrive() 在未连接时返回 None，这里只调用用于更新内部状态
+            _ = interface.check_arrive()
             should_switch_state = False
             switch_reason = ""
             

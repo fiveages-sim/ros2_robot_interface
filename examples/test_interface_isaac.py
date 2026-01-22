@@ -234,45 +234,46 @@ def main():
                     print(f"[{i:3d}s] ✗ 控制夹爪失败: {e}")
             else:
                 # 检查是否到达
-                try:
-                    result = interface.check_arrive(gripper_part)
+                result = interface.check_arrive(gripper_part)
+                if result:
                     arrived = result.get('arrived', False)
                     distance = result.get('distance', float('inf'))
+                else:
+                    arrived = True  # 未连接时假设已到达
+                    distance = 0.0
                     
-                    if arrived:
-                        # 检查是否在关闭时检测到物体（位置稳定且不在0）
-                        if not gripper_target_open:  # 正在关闭
-                            if gripper_current_position is not None and gripper_current_position > 0.0:
-                                # 位置不在0，说明可能夹住物体了
-                                # 检查位置历史是否稳定（单臂和双臂模式都使用 left_gripper_position_history）
-                                history = interface.left_gripper_position_history
+                if arrived:
+                    # 检查是否在关闭时检测到物体（位置稳定且不在0）
+                    if not gripper_target_open:  # 正在关闭
+                        if gripper_current_position is not None and gripper_current_position > 0.0:
+                            # 位置不在0，说明可能夹住物体了
+                            # 检查位置历史是否稳定（单臂和双臂模式都使用 left_gripper_position_history）
+                            history = interface.left_gripper_position_history
+                            
+                            history_size = interface.config.gripper_stability_history_size
+                            stability_threshold = interface.config.gripper_stability_threshold
+                            if len(history) >= history_size:
+                                recent_positions = history[-history_size:]
+                                max_pos = max(recent_positions)
+                                min_pos = min(recent_positions)
+                                variance = max_pos - min_pos
                                 
-                                history_size = interface.config.gripper_stability_history_size
-                                stability_threshold = interface.config.gripper_stability_threshold
-                                if len(history) >= history_size:
-                                    recent_positions = history[-history_size:]
-                                    max_pos = max(recent_positions)
-                                    min_pos = min(recent_positions)
-                                    variance = max_pos - min_pos
-                                    
-                                    if variance < stability_threshold:
-                                        # 位置稳定且不在0，说明抓到物体了
-                                        object_detected = True
-                                        print(f"[{i:3d}s] ✓ 夹爪已到达关闭状态")
-                                        print(f"  ⚠ 检测到物体！当前位置: {gripper_current_position:.4f} (不在0)")
-                                        print(f"  → 位置稳定性: {variance:.4f} < {stability_threshold:.4f}")
-                                        print(f"  → 停止打开操作")
-                                        print()
-                                        continue
-                        
-                        # 正常到达
-                        gripper_is_open = gripper_target_open
-                        gripper_command_sent = False
-                        print(f"[{i:3d}s] ✓ 夹爪已到达，下一步将切换状态")
-                    else:
-                        print(f"[{i:3d}s] ✗ 夹爪未到达 (距离: {distance:.4f})")
-                except Exception as e:
-                    print(f"[{i:3d}s] ⚠ 检查失败: {e}")
+                                if variance < stability_threshold:
+                                    # 位置稳定且不在0，说明抓到物体了
+                                    object_detected = True
+                                    print(f"[{i:3d}s] ✓ 夹爪已到达关闭状态")
+                                    print(f"  ⚠ 检测到物体！当前位置: {gripper_current_position:.4f} (不在0)")
+                                    print(f"  → 位置稳定性: {variance:.4f} < {stability_threshold:.4f}")
+                                    print(f"  → 停止打开操作")
+                                    print()
+                                    continue
+                    
+                    # 正常到达
+                    gripper_is_open = gripper_target_open
+                    gripper_command_sent = False
+                    print(f"[{i:3d}s] ✓ 夹爪已到达，下一步将切换状态")
+                else:
+                    print(f"[{i:3d}s] ✗ 夹爪未到达 (距离: {distance:.4f})")
             
             print()
                 

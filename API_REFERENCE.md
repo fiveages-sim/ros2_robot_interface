@@ -24,6 +24,7 @@
 - [统一接口方法](#统一接口方法)
   - [FSM状态切换](#fsm状态切换)
   - [关节状态获取](#关节状态获取)
+  - [末端执行器位姿获取](#末端执行器位姿获取)
   - [统一到达检查](#统一到达检查)
   - [坐标转换](#坐标转换)
 - [快速参考表](#快速参考表)
@@ -810,9 +811,91 @@ if categorized_state:
 
 ---
 
+### 末端执行器位姿获取
+
+#### `get_end_effector_pose() -> Optional[Pose]`
+
+**功能：** 获取左臂末端执行器的当前位姿（便捷方法）
+
+**返回值：**
+- `Pose` 对象：左臂末端执行器的当前位置和姿态（在 `base_frame` 坐标系下）
+- `None`：如果未连接或位姿不可用
+
+**说明：**
+- 这是 `left_arm_handler.get_pose()` 的便捷方法
+- 如果接口未连接，返回 `None` 而不是抛出异常
+- 返回的位姿在 `base_frame` 坐标系下
+
+**示例：**
+```python
+# 获取左臂末端执行器位姿
+pose = interface.get_end_effector_pose()
+if pose:
+    print(f"位置: ({pose.position.x}, {pose.position.y}, {pose.position.z})")
+    print(f"姿态: ({pose.orientation.x}, {pose.orientation.y}, {pose.orientation.z}, {pose.orientation.w})")
+else:
+    print("未连接或位姿不可用")
+```
+
+---
+
+#### `get_right_end_effector_pose() -> Optional[Pose]`
+
+**功能：** 获取右臂末端执行器的当前位姿（双臂模式）
+
+**返回值：**
+- `Pose` 对象：右臂末端执行器的当前位置和姿态（在 `base_frame` 坐标系下）
+- `None`：如果未连接、非双臂模式或位姿不可用
+
+**说明：**
+- 这是 `right_arm_handler.get_pose()` 的便捷方法
+- 仅在双臂模式下可用
+- 如果接口未连接，返回 `None` 而不是抛出异常
+- 返回的位姿在 `base_frame` 坐标系下
+
+**示例：**
+```python
+# 获取右臂末端执行器位姿（双臂模式）
+pose = interface.get_right_end_effector_pose()
+if pose:
+    print(f"位置: ({pose.position.x}, {pose.position.y}, {pose.position.z})")
+else:
+    print("未连接、非双臂模式或位姿不可用")
+```
+
+---
+
+#### `get_last_joint_state_time() -> Optional[float]`
+
+**功能：** 获取最后一次接收到关节状态消息的时间戳
+
+**返回值：**
+- `float`：时间戳（秒，系统时间）
+- `None`：如果未连接或尚未接收到关节状态消息
+
+**说明：**
+- 返回的是系统时间（不是消息中的时间戳）
+- 用于检测关节状态数据是否已更新（即使超时检查被禁用）
+- 如果接口未连接，返回 `None` 而不是抛出异常
+
+**示例：**
+```python
+# 获取最后接收关节状态的时间
+last_time = interface.get_last_joint_state_time()
+if last_time:
+    print(f"最后接收时间: {last_time}")
+    current_time = time.time()
+    time_since_last = current_time - last_time
+    print(f"距离上次接收: {time_since_last:.2f} 秒")
+else:
+    print("未连接或尚未接收到关节状态")
+```
+
+---
+
 ### 统一到达检查
 
-#### `check_arrive(part: Optional[str] = None, position_threshold: Optional[float] = None) -> Dict[str, Any]`
+#### `check_arrive(part: Optional[str] = None, position_threshold: Optional[float] = None) -> Optional[Dict[str, Any]]`
 
 **功能：** 统一检查多个部分的到达状态
 
@@ -832,8 +915,10 @@ if categorized_state:
 **说明：**
 - 手臂和夹爪使用各自 handler 的默认阈值（可通过直接调用 handler 的方法来自定义）
 - 头部和身体使用 `position_threshold` 参数或默认的 `self.position_threshold`
+- 如果接口未连接，返回 `None` 而不是抛出异常
 
 **返回值：**
+- `None`：如果接口未连接
 
 **检查单个部分：**
 ```python
@@ -874,13 +959,16 @@ if categorized_state:
 ```python
 # 检查单个部分
 result = interface.check_arrive('left_arm')
-if result['arrived']:
+if result and result['arrived']:
     print("左臂已到达")
 
 # 检查所有部分
 results = interface.check_arrive()
-print(f"左臂到达: {results.get('left_arm', {}).get('arrived', False)}")
-print(f"夹爪到达: {results.get('gripper', {}).get('arrived', False)}")
+if results:
+    print(f"左臂到达: {results.get('left_arm', {}).get('arrived', False)}")
+    print(f"夹爪到达: {results.get('gripper', {}).get('arrived', False)}")
+else:
+    print("接口未连接")
 
 # 使用自定义阈值（仅用于 head/body）
 results = interface.check_arrive(
@@ -1013,10 +1101,13 @@ if matching_nodes:
 
 1. **线程安全**：所有方法都是线程安全的，可以在多线程环境中使用。
 
-2. **连接检查**：使用前确保接口已连接（`interface.is_connected == True`）。
+2. **连接检查**：
+   - **状态获取方法**（如 `get_end_effector_pose()`, `get_joint_state()`, `check_arrive()` 等）：如果接口未连接，会返回 `None` 而不是抛出异常，调用者需要检查返回值
+   - **命令发送方法**（如 `send_end_effector_target()`, `send_fsm_command()` 等）：如果接口未连接，会抛出 `ROS2NotConnectedError` 异常
 
 3. **数据可用性**：
-   - `get_pose()` 和 `get_joint_state()` 可能返回 `None`（数据未到达或过期）
+   - `get_pose()`, `get_end_effector_pose()`, `get_joint_state()` 等状态获取方法可能返回 `None`（未连接、数据未到达或过期）
+   - `check_arrive()` 在未连接时返回 `None`，需要检查返回值
    - 夹爪的 `check_arrival()` 需要手动传入当前位置
    - 手臂的 `get_target_pose()` 需要配置目标位置话题（`/left_current_target` 或 `/right_current_target`）
 
