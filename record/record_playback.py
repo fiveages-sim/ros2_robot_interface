@@ -2,8 +2,8 @@
 关节录制和回放脚本
 
 功能：
-1. 录制模式：录制当前所有关节状态（左右灵巧手/夹爪、左右臂、腰部、头部），按Enter记录一次节点，可随时保存为JSON
-2. 回放模式：加载JSON文件，机器人进入movej模式，按Enter发送一次movej指令
+1. 录制模式：录制当前所有关节状态和末端pose（左右灵巧手/夹爪、左右臂、腰部、头部），按Enter记录一次节点，可随时保存为JSON
+2. 回放模式：加载JSON文件，可选择MOVEJ模式（关节控制）或OCS2模式（pose控制），按Enter发送一次指令
 
 使用方法：
     python joint_record_playback.py [record|playback] [--file <json_file>]
@@ -128,6 +128,44 @@ class JointRecorder:
                 'positions': body_data.get('positions', [])
             }
         
+        # 获取并保存末端执行器pose
+        left_pose = self.interface.get_end_effector_pose()
+        if left_pose and self.interface.left_arm_handler:
+            left_frame_id = self.interface.left_arm_handler.get_frame_id()
+            node_data['left_end_effector_pose'] = {
+                'position': {
+                    'x': left_pose.position.x,
+                    'y': left_pose.position.y,
+                    'z': left_pose.position.z
+                },
+                'orientation': {
+                    'x': left_pose.orientation.x,
+                    'y': left_pose.orientation.y,
+                    'z': left_pose.orientation.z,
+                    'w': left_pose.orientation.w
+                },
+                'frame_id': left_frame_id if left_frame_id else 'arm_base'  # 如果没有frame_id，使用默认值
+            }
+        
+        if self.is_dual_arm:
+            right_pose = self.interface.get_right_end_effector_pose()
+            if right_pose and self.interface.right_arm_handler:
+                right_frame_id = self.interface.right_arm_handler.get_frame_id()
+                node_data['right_end_effector_pose'] = {
+                    'position': {
+                        'x': right_pose.position.x,
+                        'y': right_pose.position.y,
+                        'z': right_pose.position.z
+                    },
+                    'orientation': {
+                        'x': right_pose.orientation.x,
+                        'y': right_pose.orientation.y,
+                        'z': right_pose.orientation.z,
+                        'w': right_pose.orientation.w
+                    },
+                    'frame_id': right_frame_id if right_frame_id else 'arm_base'  # 如果没有frame_id，使用默认值
+                }
+        
         # 保存节点
         self.recorded_nodes.append(node_data)
         
@@ -145,6 +183,10 @@ class JointRecorder:
             print(f"    头部: {len(node_data['head']['positions'])} 个关节")
         if 'body' in node_data:
             print(f"    腰部: {len(node_data['body']['positions'])} 个关节")
+        if 'left_end_effector_pose' in node_data:
+            print(f"    左臂末端pose: 已记录")
+        if 'right_end_effector_pose' in node_data:
+            print(f"    右臂末端pose: 已记录")
         
         return True
     
@@ -367,6 +409,189 @@ class JointPlayer:
             import traceback
             traceback.print_exc()
             return False
+    
+    def play_next_node_ocs2(self) -> bool:
+        """使用OCS2模式播放下一个节点（通过pose控制）
+        
+        Returns:
+            True if successfully played, False if no more nodes
+        """
+        if self.current_index >= len(self.nodes):
+            print("  ✗ 已到达最后一个节点")
+            return False
+        
+        node = self.nodes[self.current_index]
+        self.current_index += 1
+        
+        print(f"\n  → 播放节点 #{self.current_index}/{len(self.nodes)} (OCS2模式)")
+        
+        try:
+            # 切换到OCS2状态
+            self.interface.send_fsm_command(3)  # OCS2状态
+            time.sleep(0.3)  # 等待状态切换
+            
+            # 检查是否有pose数据
+            has_left_pose = 'left_end_effector_pose' in node
+            has_right_pose = self.is_dual_arm and 'right_end_effector_pose' in node
+            
+            if not has_left_pose and not has_right_pose:
+                print("  ⚠ 警告: 节点中没有末端pose数据，无法使用OCS2模式")
+                print("  请使用MOVEJ模式回放，或重新录制包含pose数据的节点")
+                return False
+            
+            from geometry_msgs.msg import Pose
+            
+            # 如果是双臂模式且左右臂都有pose数据，使用双臂接口一次发送
+            if self.is_dual_arm and has_left_pose and has_right_pose:
+                # 构建左臂pose
+                left_pose = Pose()
+                left_pose_data = node['left_end_effector_pose']
+                left_pose.position.x = left_pose_data['position']['x']
+                left_pose.position.y = left_pose_data['position']['y']
+                left_pose.position.z = left_pose_data['position']['z']
+                left_pose.orientation.x = left_pose_data['orientation']['x']
+                left_pose.orientation.y = left_pose_data['orientation']['y']
+                left_pose.orientation.z = left_pose_data['orientation']['z']
+                left_pose.orientation.w = left_pose_data['orientation']['w']
+                
+                # 构建右臂pose
+                right_pose = Pose()
+                right_pose_data = node['right_end_effector_pose']
+                right_pose.position.x = right_pose_data['position']['x']
+                right_pose.position.y = right_pose_data['position']['y']
+                right_pose.position.z = right_pose_data['position']['z']
+                right_pose.orientation.x = right_pose_data['orientation']['x']
+                right_pose.orientation.y = right_pose_data['orientation']['y']
+                right_pose.orientation.z = right_pose_data['orientation']['z']
+                right_pose.orientation.w = right_pose_data['orientation']['w']
+                
+                # 获取frame_id（优先使用左臂的frame_id，如果不同则警告）
+                left_frame_id = left_pose_data.get('frame_id', 'arm_base')
+                right_frame_id = right_pose_data.get('frame_id', 'arm_base')
+                frame_id = left_frame_id
+                
+                if left_frame_id != right_frame_id:
+                    print(f"    ⚠ 警告: 左右臂frame_id不同 (左: {left_frame_id}, 右: {right_frame_id})，使用左臂的frame_id")
+                
+                # 使用send_dual_arm_target_stamped一次发送双臂pose到/dual_target/stamped topic
+                try:
+                    self.interface.send_dual_arm_target_stamped(left_pose, right_pose, frame_id)
+                    print(f"    ✓ 双臂: 已发送目标pose到/dual_target/stamped (frame: {frame_id})")
+                except Exception as e:
+                    print(f"    ✗ 双臂发送失败: {e}")
+                    # 降级到分别发送
+                    if self.interface.left_arm_handler:
+                        self.interface.left_arm_handler.send_target_stamped(left_frame_id, left_pose)
+                        print(f"    ✓ 左臂: 已发送目标pose (frame: {left_frame_id})（降级模式）")
+                    if self.interface.right_arm_handler:
+                        self.interface.right_arm_handler.send_target_stamped(right_frame_id, right_pose)
+                        print(f"    ✓ 右臂: 已发送目标pose (frame: {right_frame_id})（降级模式）")
+            else:
+                # 单臂模式或只有一侧有数据，分别发送
+                # 发送左臂目标pose（使用stamped版本）
+                if has_left_pose and self.interface.left_arm_handler:
+                    left_pose = Pose()
+                    pose_data = node['left_end_effector_pose']
+                    left_pose.position.x = pose_data['position']['x']
+                    left_pose.position.y = pose_data['position']['y']
+                    left_pose.position.z = pose_data['position']['z']
+                    left_pose.orientation.x = pose_data['orientation']['x']
+                    left_pose.orientation.y = pose_data['orientation']['y']
+                    left_pose.orientation.z = pose_data['orientation']['z']
+                    left_pose.orientation.w = pose_data['orientation']['w']
+                    
+                    # 获取frame_id，如果没有则使用默认值
+                    frame_id = pose_data.get('frame_id', 'arm_base')
+                    
+                    # 使用send_target_stamped发送到/left_target/stamped topic
+                    self.interface.left_arm_handler.send_target_stamped(frame_id, left_pose)
+                    print(f"    ✓ 左臂: 已发送目标pose (frame: {frame_id})")
+                
+                # 发送右臂目标pose（使用stamped版本）
+                if has_right_pose and self.interface.right_arm_handler:
+                    right_pose = Pose()
+                    pose_data = node['right_end_effector_pose']
+                    right_pose.position.x = pose_data['position']['x']
+                    right_pose.position.y = pose_data['position']['y']
+                    right_pose.position.z = pose_data['position']['z']
+                    right_pose.orientation.x = pose_data['orientation']['x']
+                    right_pose.orientation.y = pose_data['orientation']['y']
+                    right_pose.orientation.z = pose_data['orientation']['z']
+                    right_pose.orientation.w = pose_data['orientation']['w']
+                    
+                    # 获取frame_id，如果没有则使用默认值
+                    frame_id = pose_data.get('frame_id', 'arm_base')
+                    
+                    # 使用send_target_stamped发送到/right_target/stamped topic
+                    self.interface.right_arm_handler.send_target_stamped(frame_id, right_pose)
+                    print(f"    ✓ 右臂: 已发送目标pose (frame: {frame_id})")
+            
+            # 发送左夹爪/灵巧手关节位置
+            if 'left_gripper' in node and node['left_gripper'].get('positions'):
+                positions = node['left_gripper']['positions']
+                # 判断是单关节夹爪还是多关节灵巧手
+                if len(positions) == 1:
+                    # 单关节夹爪，使用 gripper_handler
+                    if self.interface.left_gripper_handler:
+                        self.interface.left_gripper_handler.send_joint_positions(positions[0])
+                        print(f"    ✓ 左夹爪: 1 个关节")
+                else:
+                    # 多关节灵巧手，使用关节控制器
+                    if self.interface.config.left_hand_joint_controller_topic:
+                        self.interface.send_left_hand_joint_positions(positions)
+                        print(f"    ✓ 左灵巧手: {len(positions)} 个关节")
+                    elif self.interface.left_gripper_handler:
+                        # 如果没有关节控制器，尝试使用 gripper_handler（可能会失败）
+                        logger.warning("Left hand joint controller not available, trying gripper handler (may fail)")
+                        try:
+                            self.interface.left_gripper_handler.send_joint_positions(positions[0])
+                            print(f"    ⚠ 左灵巧手: 仅发送第一个关节（{len(positions)} 个关节可用）")
+                        except Exception as e:
+                            print(f"    ✗ 左灵巧手发送失败: {e}")
+            
+            # 发送右夹爪/灵巧手关节位置（双臂模式）
+            if self.is_dual_arm and 'right_gripper' in node and node['right_gripper'].get('positions'):
+                positions = node['right_gripper']['positions']
+                # 判断是单关节夹爪还是多关节灵巧手
+                if len(positions) == 1:
+                    # 单关节夹爪，使用 gripper_handler
+                    if self.interface.right_gripper_handler:
+                        self.interface.right_gripper_handler.send_joint_positions(positions[0])
+                        print(f"    ✓ 右夹爪: 1 个关节")
+                else:
+                    # 多关节灵巧手，使用关节控制器
+                    if self.interface.config.right_hand_joint_controller_topic:
+                        self.interface.send_right_hand_joint_positions(positions)
+                        print(f"    ✓ 右灵巧手: {len(positions)} 个关节")
+                    elif self.interface.right_gripper_handler:
+                        # 如果没有关节控制器，尝试使用 gripper_handler（可能会失败）
+                        logger.warning("Right hand joint controller not available, trying gripper handler (may fail)")
+                        try:
+                            self.interface.right_gripper_handler.send_joint_positions(positions[0])
+                            print(f"    ⚠ 右灵巧手: 仅发送第一个关节（{len(positions)} 个关节可用）")
+                        except Exception as e:
+                            print(f"    ✗ 右灵巧手发送失败: {e}")
+            
+            # 发送头部关节位置
+            if 'head' in node and node['head'].get('positions'):
+                positions = node['head']['positions']
+                self.interface.send_head_joint_positions(positions)
+                print(f"    ✓ 头部: {len(positions)} 个关节")
+            
+            # 发送腰部关节位置
+            if 'body' in node and node['body'].get('positions'):
+                positions = node['body']['positions']
+                self.interface.send_body_joint_positions(positions)
+                print(f"    ✓ 腰部: {len(positions)} 个关节")
+            
+            print(f"  ✓ 节点 #{self.current_index} 已发送 (OCS2模式)")
+            return True
+            
+        except Exception as e:
+            print(f"  ✗ 播放节点失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
 
 
 def record_mode(interface: ROS2RobotInterface):
@@ -511,28 +736,72 @@ def playback_mode(interface: ROS2RobotInterface, input_file: Optional[str] = Non
         interface.disconnect()
         return 1
     
-    print("\n操作说明:")
-    print("  - 按 Enter 键：发送下一个节点的movej指令")
-    print("  - 输入 'q' 或 'quit' 后按 Enter：退出")
-    print("  - 按 Ctrl+C：强制退出\n")
+    # 选择回放模式
+    print("\n请选择回放模式:")
+    print("  [1] MOVEJ模式 - 使用关节角度控制（默认）")
+    print("  [2] OCS2模式 - 使用末端pose控制（需要节点中包含pose数据）")
     
-    # 先切换到HOLD状态，然后再切换到MOVEJ状态
-    print("\n准备切换到MOVEJ状态...")
-    try:
-        # 先切换到HOLD状态
-        print("  → 先切换到HOLD状态...")
-        interface.send_fsm_command(2)  # HOLD状态
-        time.sleep(0.3)  # 等待状态切换完成
-        print("  ✓ 已切换到HOLD状态")
+    while True:
+        mode_choice = input("\n请选择模式 (1/2，默认1): ").strip()
+        if not mode_choice:
+            mode_choice = '1'
+        if mode_choice in ['1', '2']:
+            use_ocs2 = (mode_choice == '2')
+            break
+        else:
+            print("  ⚠ 无效选择，请输入 1 或 2")
+    
+    if use_ocs2:
+        print("\n  → 使用OCS2模式回放")
+        print("\n操作说明:")
+        print("  - 按 Enter 键：发送下一个节点的OCS2 pose指令")
+        print("  - 输入 'q' 或 'quit' 后按 Enter：退出")
+        print("  - 按 Ctrl+C：强制退出\n")
         
-        # 再切换到MOVEJ状态
-        print("  → 再切换到MOVEJ状态...")
-        interface.send_fsm_command(4)  # MOVEJ状态
-        time.sleep(0.3)  # 等待状态切换完成
-        print("  ✓ 已切换到MOVEJ状态\n")
-    except Exception as e:
-        print(f"  ⚠ 切换状态失败: {e}")
-        print("  将继续尝试发送关节位置（send_joint_positions会自动切换状态）\n")
+        # 切换到OCS2状态
+        print("\n准备切换到OCS2状态...")
+        try:
+            # 先切换到HOLD状态
+            print("  → 先切换到HOLD状态...")
+            interface.send_fsm_command(2)  # HOLD状态
+            time.sleep(0.3)  # 等待状态切换完成
+            print("  ✓ 已切换到HOLD状态")
+            
+            # 再切换到OCS2状态
+            print("  → 再切换到OCS2状态...")
+            interface.send_fsm_command(3)  # OCS2状态
+            time.sleep(0.3)  # 等待状态切换完成
+            print("  ✓ 已切换到OCS2状态\n")
+        except Exception as e:
+            print(f"  ⚠ 切换状态失败: {e}\n")
+        
+        play_func = player.play_next_node_ocs2
+    else:
+        print("\n  → 使用MOVEJ模式回放")
+        print("\n操作说明:")
+        print("  - 按 Enter 键：发送下一个节点的movej指令")
+        print("  - 输入 'q' 或 'quit' 后按 Enter：退出")
+        print("  - 按 Ctrl+C：强制退出\n")
+        
+        # 先切换到HOLD状态，然后再切换到MOVEJ状态
+        print("\n准备切换到MOVEJ状态...")
+        try:
+            # 先切换到HOLD状态
+            print("  → 先切换到HOLD状态...")
+            interface.send_fsm_command(2)  # HOLD状态
+            time.sleep(0.3)  # 等待状态切换完成
+            print("  ✓ 已切换到HOLD状态")
+            
+            # 再切换到MOVEJ状态
+            print("  → 再切换到MOVEJ状态...")
+            interface.send_fsm_command(4)  # MOVEJ状态
+            time.sleep(0.3)  # 等待状态切换完成
+            print("  ✓ 已切换到MOVEJ状态\n")
+        except Exception as e:
+            print(f"  ⚠ 切换状态失败: {e}")
+            print("  将继续尝试发送关节位置（send_joint_positions会自动切换状态）\n")
+        
+        play_func = player.play_next_node
     
     try:
         while True:
@@ -540,7 +809,7 @@ def playback_mode(interface: ROS2RobotInterface, input_file: Optional[str] = Non
             
             if user_input == '':
                 # 按Enter播放下一个节点
-                if not player.play_next_node():
+                if not play_func():
                     print("\n  ✓ 所有节点已播放完成")
                     break
             elif user_input in ['q', 'quit']:
