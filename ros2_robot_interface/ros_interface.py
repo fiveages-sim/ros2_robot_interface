@@ -807,7 +807,6 @@ class ROS2RobotInterface:
         fsm_msg = Int32()
         fsm_msg.data = command
         self.fsm_command_pub.publish(fsm_msg)
-        logger.info(f"Published FSM command: {command}")
         
         # Only update internal state for valid state commands (1-4)
         # Special commands (0, 100, etc.) should not change the displayed state
