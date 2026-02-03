@@ -26,11 +26,17 @@ class CircleMessagePublisher(Node):
             reliability=ReliabilityPolicy.RELIABLE,  # 可靠传输
             history=HistoryPolicy.KEEP_LAST  # 保留最后几条消息
         )
-        
-        # 创建Publisher
-        self.publisher_ = self.create_publisher(
-            CircleMessage, 
-            '/left_circle', 
+
+        # 创建Publisher - 左手和右手
+        self.left_publisher_ = self.create_publisher(
+            CircleMessage,
+            '/left_circle',
+            qos_profile
+        )
+
+        self.right_publisher_ = self.create_publisher(
+            CircleMessage,
+            '/right_circle',
             qos_profile
         )
         
@@ -40,7 +46,7 @@ class CircleMessagePublisher(Node):
         
         self.get_logger().info('CircleMessage发布器已启动，准备发送消息')
 
-    def publish_three_point_method(self):
+    def publish_three_point_method(self, arm='left'):
         """使用三点法发送圆形轨迹"""
         msg = CircleMessage()
         
@@ -51,14 +57,21 @@ class CircleMessagePublisher(Node):
         msg.frame_id = "arm_base"  # 重要：必须与控制器期望的坐标系一致
         
         # ====== 三点法参数 ======
-        # 中间点
-        msg.midpoint.position = Point(x=0.28393430066, y=0.59148, z=-0.4104)
-        msg.midpoint.orientation = Quaternion(x=0.722056434171141, y=0.0004850863832760574, z=0.6918018220298489, w=-0.0046058688989129674)
-        
-        # 终点
-        msg.endpoint.position = Point(x=0.3214, y=0.478193, z=-0.266509)
-        msg.endpoint.orientation = Quaternion(x=0.7038671000308367, y=-0.16254370163904164, z=0.6716754422266904, w=-0.1643251376425349)
-        
+        if arm == 'left':
+            # 中间点
+            msg.midpoint.position = Point(x=0.28393430066, y=0.59148, z=-0.4104)
+            msg.midpoint.orientation = Quaternion(x=0.722056434171141, y=0.0004850863832760574, z=0.6918018220298489, w=-0.0046058688989129674)
+            # 终点
+            msg.endpoint.position = Point(x=0.3214, y=0.478193, z=-0.266509)
+            msg.endpoint.orientation = Quaternion(x=0.7038671000308367, y=-0.16254370163904164, z=0.6716754422266904, w=-0.1643251376425349)
+        else:
+            # 中间点
+            msg.midpoint.position = Point(x=0.3493365631921655, y=-0.4326887909346237, z=-0.32280639115778664)
+            msg.midpoint.orientation = Quaternion(x=0.7173140317302329, y=0.00044917295973826674, z=0.696740329472883, w=0.003645738963392133)
+            # 终点
+            msg.endpoint.position = Point(x=0.2915487956491204, y=-0.24741728462466908, z=-0.3613774881724011)
+            msg.endpoint.orientation = Quaternion(x=0.8191870835047175, y=0.005400286913509702, z=0.5735009385543433, w=0.00018054798318916146)
+
         # ====== 运动参数 ======
         msg.max_linear_velocity = 0.5
         msg.max_linear_acceleration = 1.0
@@ -69,13 +82,18 @@ class CircleMessagePublisher(Node):
         msg.duration = 5.0  # 运动持续5秒
         
         # 发布消息
-        self.publisher_.publish(msg)
-        self.get_logger().info('已发送三点法圆形轨迹指令')
-        self.print_message_summary(msg, "三点法")
+        if arm=='left':
+            self.left_publisher_.publish(msg)
+            self.get_logger().info('已发送左臂三点法圆形轨迹指令')
+        else:
+            self.right_publisher_.publish(msg)
+            self.get_logger().info('已发送右臂三点法圆形轨迹指令')
+
+        self.print_message_summary(msg, f"{arm}臂三点法")
         
         return msg
 
-    def publish_parametric_method(self):
+    def publish_parametric_method(self, arm='left'):
         """使用参数法发送圆形轨迹"""
         msg = CircleMessage()
         
@@ -84,21 +102,30 @@ class CircleMessagePublisher(Node):
         msg.use_slerp_for_orientation = True
         msg.time_mode = True
         msg.frame_id = "arm_base"
-        # 终点
-        msg.endpoint.position = Point(x=0.3214, y=0.478193, z=-0.266509)
-        msg.endpoint.orientation = Quaternion(x=0.7038671000308367, y=-0.16254370163904164, z=0.6716754422266904, w=-0.1643251376425349)
-
-        
+        if arm=='left':
+            # 终点
+            msg.endpoint.position = Point(x=0.3214, y=0.478193, z=-0.266509)
+            msg.endpoint.orientation = Quaternion(x=0.7038671000308367, y=-0.16254370163904164, z=0.6716754422266904, w=-0.1643251376425349)
+        else:
+            # 终点
+            msg.endpoint.position = Point(x=0.2915487956491204, y=-0.24741728462466908, z=-0.3613774881724011)
+            msg.endpoint.orientation = Quaternion(x=0.8191870835047175, y=0.005400286913509702, z=0.5735009385543433, w=0.00018054798318916146)
         # ====== 参数法参数 ======
-        # 圆心
-        msg.center = Point(x=0.327903, y=0.487114, z=-0.382598)
-        
-        # 旋转轴（绕Z轴）
-        msg.axis = Vector3(x=0.910422, y=0.405441, z=0.0821571)
-        
-        # 旋转角度（90度 = π/2 ≈ 1.57弧度）
-        msg.rotate_angle = 3.9551
-        
+        if arm=='left':
+
+            # 圆心
+            msg.center = Point(x=0.327903, y=0.487114, z=-0.382598)
+            # 旋转轴（绕Z轴）
+            msg.axis = Vector3(x=0.910422, y=0.405441, z=0.0821571)
+            # 旋转角度（90度 = π/2 ≈ 1.57弧度）
+            msg.rotate_angle = 3.9551
+        else:
+            # 圆心
+            msg.center = Point(x=0.330178, y=-0.346668, z= -0.38845)
+            # 旋转轴（绕Z轴）
+            msg.axis = Vector3(x=-0.934493, y=-0.322745, z=-0.150195)
+            # 旋转角度（90度 = π/2 ≈ 1.57弧度）
+            msg.rotate_angle = 3.69845
         # ====== 运动参数（与三点法相同）======
         msg.max_linear_velocity = 0.5
         msg.max_linear_acceleration = 1.0
@@ -107,11 +134,16 @@ class CircleMessagePublisher(Node):
         msg.max_angular_acceleration = 4.0
         msg.max_angular_jerk = 10.0
         msg.duration = 5.0  # 运动持续5秒
-        
+
         # 发布消息
-        self.publisher_.publish(msg)
-        self.get_logger().info('已发送参数法圆形轨迹指令')
-        self.print_message_summary(msg, "参数法")
+        if arm == 'left':
+            self.left_publisher_.publish(msg)
+            self.get_logger().info('已发送左臂参数法圆形轨迹指令')
+        else:
+            self.right_publisher_.publish(msg)
+            self.get_logger().info('已发送右臂参数法圆形轨迹指令')
+
+        self.print_message_summary(msg, f"{arm}臂参数法")
         
         return msg
 
@@ -144,30 +176,25 @@ class CircleMessagePublisher(Node):
         self.get_logger().info('\n' + '='*50)
         self.get_logger().info('CircleMessage 发布器 - 交互模式')
         self.get_logger().info('='*50)
-        self.get_logger().info('1. 使用三点法发送')
-        self.get_logger().info('2. 使用参数法发送')
-        self.get_logger().info('3. 连续发送测试')
-        self.get_logger().info('4. 退出')
+        self.get_logger().info('1. 左臂-三点法')
+        self.get_logger().info('2. 左臂-参数法')
+        self.get_logger().info('3. 右臂-三点法')
+        self.get_logger().info('4. 右臂-参数法')
+        self.get_logger().info('5. 退出')
         
         while rclpy.ok():
             try:
-                choice = input('\n请选择操作 (1-4): ').strip()
-                
+                choice = input('\n请选择操作 (1-5): ').strip()
+
                 if choice == '1':
-                    self.publish_three_point_method()
+                    self.publish_three_point_method('left')
                 elif choice == '2':
-                    self.publish_parametric_method()
+                    self.publish_parametric_method('left')
                 elif choice == '3':
-                    # 连续发送5次测试
-                    count = int(input('输入发送次数: ') or '5')
-                    interval = float(input('发送间隔(秒): ') or '1.0')
-                    
-                    for i in range(count):
-                        self.get_logger().info(f'发送第 {i+1}/{count} 次')
-                        self.publish_three_point_method()
-                        rclpy.spin_once(self, timeout_sec=interval)
-                        
+                    self.publish_three_point_method('right')
                 elif choice == '4':
+                    self.publish_parametric_method('right')
+                elif choice == '5':
                     self.get_logger().info('退出程序')
                     break
                 else:
@@ -259,18 +286,41 @@ def main(args=None):
     try:
         publisher=CircleMessagePublisher()
 
-        #方式1：直接发送一次（三点法）
-        # publisher.publish_three_point_method()
-        
+        # 测试选项（选择其中一个运行）
+        test_option = input("\n选择测试模式:\n1. 左臂测试\n2. 右臂测试\n请选择(1-2): ").strip()
 
-        # 方式2: 直接发送一次（参数法）
-        publisher.publish_parametric_method()
+        if test_option == '1':
+            print("\n[左臂测试]")
+            print("1. 左臂-三点法")
+            print("2. 左臂-参数法")
+            choice = input("请选择: ").strip()
 
-        # 方式3: 交互式发送（推荐）
-        # publisher.run_interactive()
-        time.sleep(6)
+            if choice == '1':
+                publisher.publish_three_point_method('left')
+            else:
+                publisher.publish_parametric_method('left')
+            time.sleep(6)
+
+        elif test_option == '2':
+            print("\n[右臂测试]")
+            print("1. 右臂-三点法")
+            print("2. 右臂-参数法")
+            choice = input("请选择: ").strip()
+
+            if choice == '1':
+                publisher.publish_three_point_method('right')
+            else:
+                publisher.publish_parametric_method('right')
+            time.sleep(6)
+        else:
+            # 默认测试：左臂参数法
+            print("\n[默认测试：左臂参数法]")
+            publisher.publish_parametric_method('left')
+            time.sleep(6)
     except Exception as e:
         print(f"程序异常: {e}")
+        import traceback
+        traceback.print_exc()
     finally:
         #清理资源
         if 'publisher' in locals():
