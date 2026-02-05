@@ -31,18 +31,59 @@ def format_parameter_value(value, max_length=80):
     return value_str
 
 
+def get_user_choice():
+    """获取用户选择：查看hardware还是controller的参数"""
+    print("\n" + "=" * 70)
+    print(" " * 15 + "ROS2 参数查询工具")
+    print("=" * 70 + "\n")
+    print("  请选择要查询的参数类型：")
+    print("  1. Hardware 参数")
+    print("  2. Controller 参数")
+    print("  3. 退出")
+    print()
+    
+    while True:
+        try:
+            choice = input("  请输入选项 (1/2/3): ").strip()
+            if choice == '1':
+                return 'hardware'
+            elif choice == '2':
+                return 'controller'
+            elif choice == '3':
+                return 'exit'
+            else:
+                print("  ⚠ 无效选项，请输入 1、2 或 3")
+        except (EOFError, KeyboardInterrupt):
+            print("\n  用户取消操作")
+            return 'exit'
+
+
 def main():
     """测试 ROS2 硬件系统参数查询功能"""
     
+    # 获取用户选择
+    param_type = get_user_choice()
+    if param_type == 'exit':
+        print("\n  已退出\n")
+        return 0
+    
+    # 根据选择设置显示标题和筛选关键词
+    if param_type == 'hardware':
+        title = "ROS2 Hardware Parameters Test"
+        keyword = 'system'  # hardware system 使用 'system' 作为查询关键词
+    else:  # controller
+        title = "ROS2 Controller Parameters Test"
+        keyword = 'controller'
+    
     print("\n" + "=" * 70)
-    print(" " * 15 + "ROS2 Hardware System Parameters Test")
+    print(" " * (35 - len(title) // 2) + title)
     print("=" * 70 + "\n")
     
     # ========================================================================
     # 第一部分：创建接口并查询节点
     # ========================================================================
     print("-" * 70)
-    print("[1] 查询包含 'system' 的节点")
+    print(f"[1] 查询包含 '{keyword}' 的节点")
     print("-" * 70)
     
     # 创建配置对象
@@ -63,19 +104,21 @@ def main():
         traceback.print_exc()
         return 1
     
-    # 筛选包含 "system" 的节点（不区分大小写）
-    system_nodes = [
+    # 筛选包含关键词的节点（不区分大小写）
+    filtered_nodes = [
         node for node in nodes 
-        if 'system' in node['name'].lower() or 'system' in node['full_name'].lower()
+        if keyword in node['name'].lower() or keyword in node['full_name'].lower()
     ]
     
+    system_nodes = filtered_nodes
+    
     if not system_nodes:
-        print("  ⚠ 未发现包含 'system' 的节点")
+        print(f"  ⚠ 未发现包含 '{keyword}' 的节点")
         print("\n" + "=" * 70)
         print("\n  测试完成（未找到相关节点）\n")
         return 0
     
-    print(f"  ✓ 找到 {len(system_nodes)} 个包含 'system' 的节点:\n")
+    print(f"  ✓ 找到 {len(system_nodes)} 个包含 '{keyword}' 的节点:\n")
     for i, node in enumerate(system_nodes, 1):
         print(f"  {i}. {node['full_name']}")
         print(f"     名称: {node['name']}, 命名空间: {node['namespace']}")
