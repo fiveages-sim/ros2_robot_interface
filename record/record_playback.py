@@ -3,10 +3,12 @@
 
 功能：
 1. 录制模式：录制当前所有关节状态和末端pose（左右灵巧手/夹爪、左右臂、腰部、头部），按Enter记录一次节点，可随时保存为JSON
-2. 回放模式：加载JSON文件，可选择MOVEJ模式（关节控制）或OCS2模式（pose控制），按Enter发送一次指令
+2. 回放模式：加载JSON文件，可选择MOVEJ或OCS2模式，以及单步回放或循环回放。
+   - 单步回放：按 Enter 发送下一个节点
+   - 循环回放：选择后输入每个点之间的间隔时间（秒），第一次按 Enter 开始播放，再次按 Enter 暂停
 
 使用方法：
-    python joint_record_playback.py [record|playback] [--file <json_file>]
+    python record_playback.py [record|playback] [--file <json_file>]
 """
 
 import json
@@ -15,6 +17,7 @@ import time
 import argparse
 import os
 import logging
+import threading
 from typing import Dict, List, Optional, Any
 from pathlib import Path
 
@@ -751,11 +754,46 @@ def playback_mode(interface: ROS2RobotInterface, input_file: Optional[str] = Non
         else:
             print("  ⚠ 无效选择，请输入 1 或 2")
     
+    # 选择回放方式：单步 或 循环
+    print("\n请选择回放方式:")
+    print("  [1] 单步回放 - 按 Enter 发送下一个节点")
+    print("  [2] 循环回放 - 按 Enter 开始播放，再次按 Enter 暂停，每个点之间按间隔时间循环")
+    
+    while True:
+        step_choice = input("\n请选择回放方式 (1/2，默认1): ").strip()
+        if not step_choice:
+            step_choice = '1'
+        if step_choice in ['1', '2']:
+            loop_playback = (step_choice == '2')
+            break
+        else:
+            print("  ⚠ 无效选择，请输入 1 或 2")
+    
+    loop_interval = 2.0
+    if loop_playback:
+        while True:
+            interval_input = input("请输入每个点之间的间隔时间（秒，默认 2.0）: ").strip()
+            if not interval_input:
+                loop_interval = 2.0
+                break
+            try:
+                loop_interval = float(interval_input)
+                if loop_interval <= 0:
+                    print("  ⚠ 间隔时间需大于 0，请重新输入")
+                    continue
+                break
+            except ValueError:
+                print("  ⚠ 请输入有效的数字")
+    
     if use_ocs2:
         print("\n  → 使用OCS2模式回放")
-        print("\n操作说明:")
-        print("  - 按 Enter 键：发送下一个节点的OCS2 pose指令")
-        print("  - 输入 'q' 或 'quit' 后按 Enter：退出")
+        print("\n操作说明:" if not loop_playback else f"\n操作说明（循环回放，间隔 {loop_interval} 秒）:")
+        if loop_playback:
+            print("  - 按 Enter 键：开始播放（再次按 Enter 暂停）")
+            print("  - 输入 'q' 或 'quit' 后按 Enter：退出")
+        else:
+            print("  - 按 Enter 键：发送下一个节点的OCS2 pose指令")
+            print("  - 输入 'q' 或 'quit' 后按 Enter：退出")
         print("  - 按 Ctrl+C：强制退出\n")
         
         # 切换到OCS2状态
@@ -778,9 +816,13 @@ def playback_mode(interface: ROS2RobotInterface, input_file: Optional[str] = Non
         play_func = player.play_next_node_ocs2
     else:
         print("\n  → 使用MOVEJ模式回放")
-        print("\n操作说明:")
-        print("  - 按 Enter 键：发送下一个节点的movej指令")
-        print("  - 输入 'q' 或 'quit' 后按 Enter：退出")
+        print("\n操作说明:" if not loop_playback else f"\n操作说明（循环回放，间隔 {loop_interval} 秒）:")
+        if loop_playback:
+            print("  - 按 Enter 键：开始播放（再次按 Enter 暂停）")
+            print("  - 输入 'q' 或 'quit' 后按 Enter：退出")
+        else:
+            print("  - 按 Enter 键：发送下一个节点的movej指令")
+            print("  - 输入 'q' 或 'quit' 后按 Enter：退出")
         print("  - 按 Ctrl+C：强制退出\n")
         
         # 先切换到HOLD状态，然后再切换到MOVEJ状态
@@ -804,18 +846,68 @@ def playback_mode(interface: ROS2RobotInterface, input_file: Optional[str] = Non
         play_func = player.play_next_node
     
     try:
-        while True:
-            user_input = input("按 Enter 发送下一个节点，输入 'q' 退出: ").strip().lower()
-            
-            if user_input == '':
-                # 按Enter播放下一个节点
-                if not play_func():
-                    print("\n  ✓ 所有节点已播放完成")
+        if loop_playback:
+            # 循环回放：Enter 开始/暂停，q 退出
+            quit_flag = threading.Event()
+            playing = threading.Event()  # 首次 Enter 开始，再次 Enter 暂停
+
+            def input_thread_fn():
+                while not quit_flag.is_set():
+                    try:
+                        line = input()
+                    except (EOFError, KeyboardInterrupt):
+                        break
+                    line = line.strip().lower()
+                    if line in ['q', 'quit']:
+                        quit_flag.set()
+                        break
+                    # Enter：切换 开始/暂停
+                    if playing.is_set():
+                        playing.clear()
+                        print("  → 已暂停")
+                    else:
+                        playing.set()
+                        print("  → 开始播放")
+
+            t = threading.Thread(target=input_thread_fn, daemon=True)
+            t.start()
+
+            print("按 Enter 开始播放，再次按 Enter 暂停，输入 'q' 退出\n")
+            # 等待第一次 Enter 才开始
+            while not playing.is_set() and not quit_flag.is_set():
+                time.sleep(0.05)
+            while not quit_flag.is_set():
+                if not playing.is_set():
+                    time.sleep(0.05)
+                    continue
+                success = play_func()
+                if not success:
+                    # 播完一轮，循环：重置索引
+                    player.current_index = 0
+                    if not player.nodes:
+                        break
+                    continue
+                # 间隔时间内可被暂停或退出打断
+                steps = max(1, int(loop_interval / 0.1))
+                for _ in range(steps):
+                    if quit_flag.is_set():
+                        break
+                    if not playing.is_set():
+                        break
+                    time.sleep(0.1)
+        else:
+            # 单步回放
+            while True:
+                user_input = input("按 Enter 发送下一个节点，输入 'q' 退出: ").strip().lower()
+                
+                if user_input == '':
+                    if not play_func():
+                        print("\n  ✓ 所有节点已播放完成")
+                        break
+                elif user_input in ['q', 'quit']:
                     break
-            elif user_input in ['q', 'quit']:
-                break
-            else:
-                print("  ⚠ 无效输入，请重试")
+                else:
+                    print("  ⚠ 无效输入，请重试")
     
     except KeyboardInterrupt:
         print("\n\n  ⚠ 用户中断")
