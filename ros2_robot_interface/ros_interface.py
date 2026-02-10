@@ -817,7 +817,7 @@ class ROS2RobotInterface:
             logger.debug(f"FSM command {command} is a special command, not updating internal state")
         
         # 等待状态机完成切换，避免后续指令在旧状态下执行
-        time.sleep(0.1)
+        time.sleep(0.3)
     
     def get_fsm_command(self) -> int:
         """Get current FSM command.
