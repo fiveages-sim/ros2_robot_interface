@@ -220,7 +220,7 @@ class CircleServiceClient(Node):
         circle.use_slerp_for_orientation = True
         circle.time_mode = True
         circle.frame_id = "arm_base"
-        circle.duration = 5.0
+        circle.duration = 10.0
         
         # 运动参数
         circle.max_linear_velocity = 0.5
@@ -256,7 +256,7 @@ class CircleServiceClient(Node):
         circle.use_slerp_for_orientation = True
         circle.time_mode = True
         circle.frame_id = "arm_base"
-        circle.duration = 5.0
+        circle.duration = 10.0
         
         # 运动参数
         circle.max_linear_velocity = 0.5
