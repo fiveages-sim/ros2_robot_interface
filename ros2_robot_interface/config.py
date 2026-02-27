@@ -6,7 +6,7 @@ ROS 2 机器人接口的配置类。
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, Sequence
 
 
 class ControlType(Enum):
@@ -145,5 +145,63 @@ class ROS2RobotInterfaceConfig:
     pose_orientation_threshold: float = 0.1  # 【可选】位姿姿态阈值（单位：四元数距离），用于 arm_handler.check_arrival 检查末端执行器姿态是否到达目标
     gripper_stability_history_size: int = 20  # 【可选】夹爪位置历史记录数量，用于夹爪稳定性检查
     gripper_stability_threshold: float = 0.0001  # 【可选】夹爪位置稳定性阈值，用于判断夹爪位置是否稳定
+
+    @classmethod
+    def default_single_arm(
+        cls,
+        *,
+        joint_states_topic: str = "/joint_states",
+        current_pose_topic: str = "/left_current_pose",
+        target_pose_topic: str = "/left_target",
+        current_target_topic: str | None = "/left_current_target",
+        joint_names: Sequence[str] | None = None,
+        gripper_joint_name: str = "left_gripper_joint",
+        gripper_command_topic: str = "/left_gripper_joint/position_command",
+    ) -> "ROS2RobotInterfaceConfig":
+        """Create a practical default preset for single-arm robots."""
+        return cls(
+            joint_states_topic=joint_states_topic,
+            end_effector_pose_topic=current_pose_topic,
+            end_effector_target_topic=target_pose_topic,
+            end_effector_current_target_topic=current_target_topic,
+            joint_names=list(joint_names) if joint_names is not None else [],
+            gripper_enabled=True,
+            gripper_joint_name=gripper_joint_name,
+            gripper_command_topic=gripper_command_topic,
+            control_type=ControlType.CARTESIAN_POSE,
+        )
+
+    @classmethod
+    def default_bimanual(
+        cls,
+        *,
+        joint_states_topic: str = "/joint_states",
+        left_current_pose_topic: str = "/left_current_pose",
+        right_current_pose_topic: str = "/right_current_pose",
+        left_target_topic: str = "/left_target",
+        right_target_topic: str = "/right_target",
+        left_current_target_topic: str | None = "/left_current_target",
+        right_current_target_topic: str | None = "/right_current_target",
+        joint_names: Sequence[str] | None = None,
+        left_gripper_joint_name: str = "left_gripper_joint",
+        left_gripper_command_topic: str = "/left_gripper_joint/position_command",
+        right_gripper_command_topic: str = "/right_gripper_joint/position_command",
+    ) -> "ROS2RobotInterfaceConfig":
+        """Create a practical default preset for bimanual robots."""
+        return cls(
+            joint_states_topic=joint_states_topic,
+            end_effector_pose_topic=left_current_pose_topic,
+            end_effector_target_topic=left_target_topic,
+            right_end_effector_pose_topic=right_current_pose_topic,
+            right_end_effector_target_topic=right_target_topic,
+            end_effector_current_target_topic=left_current_target_topic,
+            right_end_effector_current_target_topic=right_current_target_topic,
+            joint_names=list(joint_names) if joint_names is not None else [],
+            gripper_enabled=True,
+            gripper_joint_name=left_gripper_joint_name,
+            gripper_command_topic=left_gripper_command_topic,
+            right_gripper_command_topic=right_gripper_command_topic,
+            control_type=ControlType.CARTESIAN_POSE,
+        )
     
 
