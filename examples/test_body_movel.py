@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import Pose
 import time
 import sys
 from ros2_robot_interface import ROS2RobotInterface, ROS2RobotInterfaceConfig
@@ -56,34 +56,32 @@ def main(args=None):
         return 1
 
     # 创建PoseStamped目标信息
-    msg = PoseStamped()
-    msg.header.stamp = node.get_clock().now().to_msg()
-    msg.header.frame_id = 'base_footprint'  
+    msg = Pose()
     
     # ✅ 确保使用float类型（显式转换）
-    msg.pose.position.x = float(0.3547)
-    msg.pose.position.y = float(0.0)
-    msg.pose.position.z = float(0.993962)
+    msg.position.x = float(0.3547)
+    msg.position.y = float(0.0)
+    msg.position.z = float(0.993962)
     
     # 设置姿态（四元数）- 也确保是float类型
-    msg.pose.orientation.w = float(0.897997)
-    msg.pose.orientation.x = float(-0.0588049)
-    msg.pose.orientation.y = float(0.126547)
-    msg.pose.orientation.z = float(-0.417287)
+    msg.orientation.w = float(0.897997)
+    msg.orientation.x = float(-0.0588049)
+    msg.orientation.y = float(0.126547)
+    msg.orientation.z = float(-0.417287)
 
     # 创建发布者
-    publisher = node.create_publisher(PoseStamped, '/body_movel_target', 10)
+    publisher = node.create_publisher(Pose, '/body_joint_controller/body_movel_target', 10)
     
     # 发布前检查所有值类型
     print("[3] 检查数据类型...")
-    print(f"  position.x: {msg.pose.position.x}, type: {type(msg.pose.position.x)}")
-    print(f"  position.y: {msg.pose.position.y}, type: {type(msg.pose.position.y)}")
-    print(f"  position.z: {msg.pose.position.z}, type: {type(msg.pose.position.z)}")
+    print(f"  position.x: {msg.position.x}, type: {type(msg.position.x)}")
+    print(f"  position.y: {msg.position.y}, type: {type(msg.position.y)}")
+    print(f"  position.z: {msg.position.z}, type: {type(msg.position.z)}")
     
     # 发布消息
     print("[4] 发布movel目标位置...")
     publisher.publish(msg)
-    print(f"✓ 已发布目标位置: ({msg.pose.position.x}, {msg.pose.position.y}, {msg.pose.position.z})")
+    print(f"✓ 已发布目标位置: ({msg.position.x}, {msg.position.y}, {msg.position.z})")
     
     # 等待运动完成
     time.sleep(5)
