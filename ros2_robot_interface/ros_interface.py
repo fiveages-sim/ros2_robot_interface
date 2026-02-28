@@ -1193,6 +1193,7 @@ class ROS2RobotInterface:
         time_now_fn: Optional[Callable[[], float]] = None,
         sleep_fn: Optional[Callable[[float], None]] = None,
         wall_timeout_guard: Optional[float] = None,
+        on_poll: Optional[Callable[[Optional[Dict[str, Any]], float], None]] = None,
     ) -> Dict[str, Any]:
         """Wait until the specified part arrives at target.
 
@@ -1232,12 +1233,22 @@ class ROS2RobotInterface:
             result = self.check_arrive(part=part, position_threshold=position_threshold)
             if isinstance(result, dict):
                 last_result = result
+                if on_poll is not None:
+                    try:
+                        on_poll(result, now_fn() - start)
+                    except Exception:
+                        pass
                 if result.get("arrived", False):
                     return {
                         "arrived": True,
                         "elapsed": now_fn() - start,
                         "result": result,
                     }
+            elif on_poll is not None:
+                try:
+                    on_poll(None, now_fn() - start)
+                except Exception:
+                    pass
             if wall_timeout_guard is not None and (time.monotonic() - wall_start) > wall_timeout_guard:
                 break
             wait_fn(max(0.0, poll_period))
