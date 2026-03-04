@@ -13,6 +13,21 @@ from .utils.exceptions import (
     ROS2AlreadyConnectedError,
 )
 from .ros_interface import ROS2RobotInterface
+from .motion_generation import (
+    ArmSide,
+    ArmStage,
+    ArmTarget,
+    GripperMode,
+    SendMode,
+    StageTarget,
+    assign_to_arm,
+    build_handover_sequence,
+    build_single_arm_pick_sequence,
+    build_single_arm_place_sequence,
+    build_single_arm_return_home_sequence,
+    compose_bimanual_synchronized_sequence,
+    execute_stage_sequence,
+)
 
 __version__ = "0.1.0"
 
@@ -27,5 +42,19 @@ __all__ = [
     "ROS2InterfaceError",
     "ROS2NotConnectedError",
     "ROS2AlreadyConnectedError",
+    # Motion generation
+    "ArmSide",
+    "ArmStage",
+    "ArmTarget",
+    "GripperMode",
+    "SendMode",
+    "StageTarget",
+    "assign_to_arm",
+    "build_handover_sequence",
+    "build_single_arm_pick_sequence",
+    "build_single_arm_place_sequence",
+    "build_single_arm_return_home_sequence",
+    "compose_bimanual_synchronized_sequence",
+    "execute_stage_sequence",
 ]
 

@@ -157,8 +157,13 @@ class ROS2RobotInterfaceConfig:
         joint_names: Sequence[str] | None = None,
         gripper_joint_name: str = "left_gripper_joint",
         gripper_command_topic: str = "/left_gripper_joint/position_command",
+        **kwargs: object,
     ) -> "ROS2RobotInterfaceConfig":
-        """Create a practical default preset for single-arm robots."""
+        """Create a practical default preset for single-arm robots.
+
+        Extra keyword arguments are forwarded to the dataclass constructor,
+        allowing overrides such as ``pose_position_threshold``.
+        """
         return cls(
             joint_states_topic=joint_states_topic,
             end_effector_pose_topic=current_pose_topic,
@@ -169,6 +174,7 @@ class ROS2RobotInterfaceConfig:
             gripper_joint_name=gripper_joint_name,
             gripper_command_topic=gripper_command_topic,
             control_type=ControlType.CARTESIAN_POSE,
+            **kwargs,
         )
 
     @classmethod
@@ -186,8 +192,13 @@ class ROS2RobotInterfaceConfig:
         left_gripper_joint_name: str = "left_gripper_joint",
         left_gripper_command_topic: str = "/left_gripper_joint/position_command",
         right_gripper_command_topic: str = "/right_gripper_joint/position_command",
+        **kwargs: object,
     ) -> "ROS2RobotInterfaceConfig":
-        """Create a practical default preset for bimanual robots."""
+        """Create a practical default preset for bimanual robots.
+
+        Extra keyword arguments are forwarded to the dataclass constructor,
+        allowing overrides such as ``pose_position_threshold``.
+        """
         return cls(
             joint_states_topic=joint_states_topic,
             end_effector_pose_topic=left_current_pose_topic,
@@ -202,6 +213,7 @@ class ROS2RobotInterfaceConfig:
             gripper_command_topic=left_gripper_command_topic,
             right_gripper_command_topic=right_gripper_command_topic,
             control_type=ControlType.CARTESIAN_POSE,
+            **kwargs,
         )
     
 
