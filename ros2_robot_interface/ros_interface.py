@@ -9,7 +9,7 @@ import logging
 import sys
 import threading
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import rclpy
@@ -1183,6 +1183,81 @@ class ROS2RobotInterface:
                 result['right_gripper'] = right_gripper_result
         
         return result
+
+    def wait_until_arrive(
+        self,
+        part: str = "arm",
+        timeout: float = 3.0,
+        poll_period: float = 0.05,
+        position_threshold: Optional[float] = None,
+        time_now_fn: Optional[Callable[[], float]] = None,
+        sleep_fn: Optional[Callable[[float], None]] = None,
+        wall_timeout_guard: Optional[float] = None,
+        on_poll: Optional[Callable[[Optional[Dict[str, Any]], float], None]] = None,
+    ) -> Dict[str, Any]:
+        """Wait until the specified part arrives at target.
+
+        This method wraps ``check_arrive`` with a polling loop and timeout control.
+        It prefers arrival checks over fixed sleeps, while still providing a timeout
+        safeguard for unstable communication or unreachable targets.
+
+        Args:
+            part: Part name accepted by ``check_arrive`` (e.g. ``arm``, ``gripper``,
+                ``left_arm``, ``left_gripper``).
+            timeout: Maximum wait time in seconds.
+            poll_period: Polling interval in seconds.
+            position_threshold: Optional threshold forwarded to ``check_arrive``.
+            time_now_fn: Optional custom clock function. Use this when timeout should
+                follow simulation time instead of wall time.
+            sleep_fn: Optional sleep function paired with ``time_now_fn``.
+            wall_timeout_guard: Optional wall-time guard (seconds) to prevent hard
+                hangs when simulation clock is paused forever.
+
+        Returns:
+            Dict containing:
+            - ``arrived`` (bool): Whether target was reached.
+            - ``elapsed`` (float): Elapsed wait time in seconds.
+            - ``result`` (dict | None): Last result from ``check_arrive``.
+        """
+        now_fn = time_now_fn or time.monotonic
+        wait_fn = sleep_fn or time.sleep
+
+        if timeout <= 0.0:
+            result = self.check_arrive(part=part, position_threshold=position_threshold)
+            return {"arrived": bool(result and result.get("arrived", False)), "elapsed": 0.0, "result": result}
+
+        start = now_fn()
+        wall_start = time.monotonic()
+        last_result: Optional[Dict[str, Any]] = None
+        while (now_fn() - start) <= timeout:
+            result = self.check_arrive(part=part, position_threshold=position_threshold)
+            if isinstance(result, dict):
+                last_result = result
+                if on_poll is not None:
+                    try:
+                        on_poll(result, now_fn() - start)
+                    except Exception:
+                        pass
+                if result.get("arrived", False):
+                    return {
+                        "arrived": True,
+                        "elapsed": now_fn() - start,
+                        "result": result,
+                    }
+            elif on_poll is not None:
+                try:
+                    on_poll(None, now_fn() - start)
+                except Exception:
+                    pass
+            if wall_timeout_guard is not None and (time.monotonic() - wall_start) > wall_timeout_guard:
+                break
+            wait_fn(max(0.0, poll_period))
+
+        return {
+            "arrived": False,
+            "elapsed": now_fn() - start,
+            "result": last_result,
+        }
     
     def lookup_transform(self, target_frame: str, source_frame: str, 
                         timeout: Optional[float] = None) -> Optional[TransformStamped]:

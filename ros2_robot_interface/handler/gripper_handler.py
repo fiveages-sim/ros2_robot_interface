@@ -7,7 +7,7 @@ Gripper Handler - 单夹爪处理器
 
 import logging
 from enum import Enum
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, TYPE_CHECKING
 
 from rclpy.node import Node
 from rclpy.publisher import Publisher
@@ -17,6 +17,9 @@ from std_msgs.msg import Float64, Int32
 from ..utils.exceptions import ROS2NotConnectedError
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from ..config import ROS2RobotInterfaceConfig
 
 
 
@@ -41,7 +44,7 @@ class GripperHandler:
         self,
         node: Node,
         gripper_type: GripperType,
-        config: 'ROS2RobotInterfaceConfig'
+        config: "ROS2RobotInterfaceConfig"
     ):
         """
         初始化单夹爪处理器
@@ -234,27 +237,6 @@ class GripperHandler:
                 arrived = (distance < threshold) or is_stable
             else:
                 arrived = distance < threshold
-            
-            # 打印检查信息
-            print(f"  [位置检查-{self.label}] 当前位置: {current_position:.4f}")
-            print(f"  [位置检查-{self.label}] 目标位置: {self.target_position:.4f}")
-            print(f"  [位置检查-{self.label}] 距离: {distance:.4f} (阈值: {threshold:.4f})")
-            
-            if len(self.position_history) > 0:
-                history_str = ", ".join([f"{p:.4f}" for p in self.position_history])
-                print(f"  [位置检查-{self.label}] 位置历史 ({len(self.position_history)}个值): [{history_str}]")
-            history_size = self.config.gripper_stability_history_size
-            if len(self.position_history) == history_size:
-                print(f"  [位置检查-{self.label}] 位置稳定性: {is_stable} (变化: {position_variance:.4f}, 阈值: {self.config.gripper_stability_threshold:.4f})")
-            
-            if arrived:
-                if is_stable and is_closing and distance >= threshold:
-                    print(f"  [位置检查-{self.label}] ✓ 已到达关闭状态（位置稳定，可能已夹住物体）")
-                else:
-                    print(f"  [位置检查-{self.label}] ✓ 已到达目标位置")
-            else:
-                print(f"  [位置检查-{self.label}] ✗ 未到达目标位置")
-            print()
         
         return {'arrived': arrived, 'distance': distance}
     

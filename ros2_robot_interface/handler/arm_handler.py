@@ -290,14 +290,6 @@ class ArmHandler:
             arrived = (pos_dist < pose_threshold and orient_dist < orient_threshold)
             
             status_msg = f"{self.label}已到达目标位置" if arrived else f"{self.label}未到达目标位置"
-            print(f"  [位置检查-{self.label}] 当前位置: ({current_pose.position.x:.4f}, {current_pose.position.y:.4f}, {current_pose.position.z:.4f})")
-            print(f"  [位置检查-{self.label}] 目标位置: ({target_pose.position.x:.4f}, {target_pose.position.y:.4f}, {target_pose.position.z:.4f})")
-            print(f"  [位置检查-{self.label}] 位置距离: {pos_dist:.4f} 米 (阈值: {pose_threshold:.4f})")
-            print(f"  [位置检查-{self.label}] 姿态距离: {orient_dist:.4f} (阈值: {orient_threshold:.4f})")
-            print(f"  [位置检查-{self.label}] {'✓ 已到达目标位置' if arrived else '✗ 未到达目标位置'}")
-            if arrived:
-                print(f"  [OCS2] → {status_msg}，等待中...")
-            print()
         
         return {
             'arrived': arrived,
