@@ -25,6 +25,7 @@ DirectionVec = tuple[float, float, float]
 PICK_STAGE_SUFFIXES: tuple[str, ...] = ("Approach", "CloseIn", "Grasp", "Retreat")
 PLACE_STAGE_SUFFIXES: tuple[str, ...] = ("Place", "Release", "PostReleaseRetreat")
 HANDOVER_STAGE_SUFFIXES: tuple[str, ...] = ("SyncMove", "ReceiverGrasp", "SourceRelease")
+CARRY_STAGE_SUFFIXES: tuple[str, ...] = ("Approach", "Forward", "CloseIn", "Grasp", "Lift", "Retreat")
 
 _GRASP_DIRECTION_TO_VEC: dict[str, DirectionVec] = {
     "top": (0.0, 0.0, 1.0),
@@ -341,6 +342,109 @@ def build_handover_sequence(
     ]
 
 
+def build_bimanual_carry_sequence(
+    *,
+    object_center: Pose,
+    lateral_offset: float,
+    approach_offset: tuple[float, float, float],
+    lateral_clearance: float = 0.0,
+    grasp_offset: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    left_orientation: tuple[float, float, float, float],
+    right_orientation: tuple[float, float, float, float],
+    lift_offset: tuple[float, float, float],
+    retreat_offset: tuple[float, float, float],
+    gripper_open: float,
+    gripper_closed: float,
+    stage_prefix: str = "Carry",
+) -> list[StageTarget]:
+    """Build a bimanual symmetric carry sequence.
+
+    Both arms approach, close in, grasp, lift and retreat synchronously.
+    Left/right positions are mirrored about the object centre along Y.
+    """
+    cx = object_center.position.x
+    cy = object_center.position.y
+    cz = object_center.position.z
+
+    def _lr_poses(
+        x: float, y_half: float, z: float,
+    ) -> tuple[Pose, Pose]:
+        left = Pose()
+        left.position.x, left.position.y, left.position.z = x, cy + y_half, z
+        left.orientation.x, left.orientation.y = left_orientation[0], left_orientation[1]
+        left.orientation.z, left.orientation.w = left_orientation[2], left_orientation[3]
+        right = Pose()
+        right.position.x, right.position.y, right.position.z = x, cy - y_half, z
+        right.orientation.x, right.orientation.y = right_orientation[0], right_orientation[1]
+        right.orientation.z, right.orientation.w = right_orientation[2], right_orientation[3]
+        return left, right
+
+    grasp_x = cx + grasp_offset[0]
+    grasp_y_half = lateral_offset + grasp_offset[1]
+    grasp_z = cz + grasp_offset[2]
+
+    # 1-Approach: far back, arms spread wide
+    approach_l, approach_r = _lr_poses(
+        grasp_x + approach_offset[0],
+        grasp_y_half + lateral_clearance + approach_offset[1],
+        grasp_z + approach_offset[2],
+    )
+    # 2-Forward: move to object X, but still spread wide
+    forward_l, forward_r = _lr_poses(
+        grasp_x,
+        grasp_y_half + lateral_clearance,
+        grasp_z,
+    )
+    # 3-CloseIn: narrow to grasp position
+    closein_l, closein_r = _lr_poses(grasp_x, grasp_y_half, grasp_z)
+    # 4-Grasp: same position, close grippers
+    # 5-Lift
+    lift_l, lift_r = _lr_poses(
+        grasp_x + lift_offset[0],
+        grasp_y_half + lift_offset[1],
+        grasp_z + lift_offset[2],
+    )
+    # 6-Retreat
+    retreat_l, retreat_r = _lr_poses(
+        grasp_x + lift_offset[0] + retreat_offset[0],
+        grasp_y_half + lift_offset[1] + retreat_offset[1],
+        grasp_z + lift_offset[2] + retreat_offset[2],
+    )
+
+    return [
+        StageTarget(
+            name=_stage_name(stage_prefix, 1, CARRY_STAGE_SUFFIXES[0]),
+            left=ArmTarget(pose=approach_l, gripper=gripper_open),
+            right=ArmTarget(pose=approach_r, gripper=gripper_open),
+        ),
+        StageTarget(
+            name=_stage_name(stage_prefix, 2, CARRY_STAGE_SUFFIXES[1]),
+            left=ArmTarget(pose=forward_l, gripper=gripper_open),
+            right=ArmTarget(pose=forward_r, gripper=gripper_open),
+        ),
+        StageTarget(
+            name=_stage_name(stage_prefix, 3, CARRY_STAGE_SUFFIXES[2]),
+            left=ArmTarget(pose=closein_l, gripper=gripper_open),
+            right=ArmTarget(pose=closein_r, gripper=gripper_open),
+        ),
+        StageTarget(
+            name=_stage_name(stage_prefix, 4, CARRY_STAGE_SUFFIXES[3]),
+            left=ArmTarget(pose=closein_l, gripper=gripper_closed),
+            right=ArmTarget(pose=closein_r, gripper=gripper_closed),
+        ),
+        StageTarget(
+            name=_stage_name(stage_prefix, 5, CARRY_STAGE_SUFFIXES[4]),
+            left=ArmTarget(pose=lift_l, gripper=gripper_closed),
+            right=ArmTarget(pose=lift_r, gripper=gripper_closed),
+        ),
+        StageTarget(
+            name=_stage_name(stage_prefix, 6, CARRY_STAGE_SUFFIXES[5]),
+            left=ArmTarget(pose=retreat_l, gripper=gripper_closed),
+            right=ArmTarget(pose=retreat_r, gripper=gripper_closed),
+        ),
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Executor helpers
 # ---------------------------------------------------------------------------
@@ -501,10 +605,12 @@ __all__ = [
     "GripperMode",
     "SendMode",
     "StageTarget",
+    "CARRY_STAGE_SUFFIXES",
     "HANDOVER_STAGE_SUFFIXES",
     "PICK_STAGE_SUFFIXES",
     "PLACE_STAGE_SUFFIXES",
     "assign_to_arm",
+    "build_bimanual_carry_sequence",
     "build_handover_sequence",
     "build_single_arm_pick_sequence",
     "build_single_arm_place_sequence",
