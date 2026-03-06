@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 DirectionVec = tuple[float, float, float]
 
-PICK_STAGE_SUFFIXES: tuple[str, ...] = ("Approach", "CloseIn", "Grasp", "Retreat")
+PICK_STAGE_SUFFIXES: tuple[str, ...] = ("Approach", "CloseIn", "Grasp", "Lift", "Retreat")
 PLACE_STAGE_SUFFIXES: tuple[str, ...] = ("Place", "Release", "PostReleaseRetreat")
 HANDOVER_STAGE_SUFFIXES: tuple[str, ...] = ("SyncMove", "ReceiverGrasp", "SourceRelease")
 CARRY_STAGE_SUFFIXES: tuple[str, ...] = ("Approach", "Forward", "CloseIn", "Grasp", "Lift", "Retreat")
@@ -79,6 +79,7 @@ class StageTarget:
     name: str
     left: ArmTarget | None = None
     right: ArmTarget | None = None
+    frame_id: str | None = None
 
     def to_action_dict(
         self,
@@ -205,13 +206,15 @@ def build_single_arm_pick_sequence(
     close_in_pose.position.x += grasp_offset[0]
     close_in_pose.position.y += grasp_offset[1]
     close_in_pose.position.z += grasp_offset[2]
+    lift_pose = Pose()
+    lift_pose.position.x = close_in_pose.position.x + retreat_offset[0]
+    lift_pose.position.y = close_in_pose.position.y + retreat_offset[1]
+    lift_pose.position.z = close_in_pose.position.z + retreat_offset[2]
+    lift_pose.orientation = close_in_pose.orientation
     retreat_pose = _make_pose_from_target(
         target_pose, offset=approach_clearance + retreat_direction_extra,
         direction_vec=direction_vec, orientation=grasp_orientation,
     )
-    retreat_pose.position.x += retreat_offset[0]
-    retreat_pose.position.y += retreat_offset[1]
-    retreat_pose.position.z += retreat_offset[2]
 
     return [
         (
@@ -228,6 +231,10 @@ def build_single_arm_pick_sequence(
         ),
         (
             _stage_name(stage_prefix, 4, PICK_STAGE_SUFFIXES[3]),
+            ArmTarget(pose=lift_pose, gripper=gripper_closed),
+        ),
+        (
+            _stage_name(stage_prefix, 5, PICK_STAGE_SUFFIXES[4]),
             ArmTarget(pose=retreat_pose, gripper=gripper_closed),
         ),
     ]
@@ -524,7 +531,8 @@ def execute_stage_sequence(
         if on_stage_start is not None:
             on_stage_start(stage.name, stage)
 
-        _send_arm_targets(interface, stage, send_mode, frame_id)
+        effective_frame_id = stage.frame_id if stage.frame_id is not None else frame_id
+        _send_arm_targets(interface, stage, send_mode, effective_frame_id)
         _send_gripper_commands(interface, stage, gripper_mode)
 
         arrive_results: dict[str, dict[str, Any]] = {}
