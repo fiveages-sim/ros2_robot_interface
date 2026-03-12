@@ -142,15 +142,15 @@ def main():
     # ========================================================================
     # 第四部分：配置参数
     # ========================================================================
-    MAX_WAIT_TIME = 30.0  # 最大等待时间（秒）
+    MAX_WAIT_TIME = 5.0  # 最大等待时间（秒）
     CHECK_INTERVAL = 0.5  # 检查间隔（秒）
     POSE_THRESHOLD = 0.005  # 位置距离阈值（米）
     
     # ========================================================================
-    # 第五部分：上升两次，下降两次测试（等待到位后继续）
+    # 第五部分：运动 + 动态修改 movel_duration 测试
     # ========================================================================
     print("=" * 70)
-    print("[7] 双臂末端上升两次，下降两次测试（等待到位后继续）")
+    print("[7] 运动并动态修改 movel_duration 测试")
     print("=" * 70)
     
     # 记录初始Z位置
@@ -163,21 +163,24 @@ def main():
     print(f"  每次移动: 0.05m")
     print(f"  最大等待时间: {MAX_WAIT_TIME}秒")
     print(f"  到达阈值: {POSE_THRESHOLD}m")
-    print(f"  测试序列: 上升2次 → 下降2次\n")
+    print(f"  测试序列: 上升2次 -> 下降2次（每段后修改时长）\n")
+    
+    # 参数配置（按需修改为你的实际控制器节点/参数）
+    CONTROLLER_NODE_NAME = "/ocs2_arm_controller"
+    MOVEL_DURATION_PARAM_NAME = "movel_duration"
+    UPDATED_DURATIONS = [2.0, 4.0]
     
     # 执行4次移动：上升2次，下降2次
-    step_size = 0.05
+    step_size = 0.1
     total_steps = 4
     
     for step_count in range(1, total_steps + 1):
-        # 前2次是上升（z增加），后2次是下降（z减小）
+        # 前2次上升，后2次下降
         if step_count <= 2:
-            # 上升
             z_offset = step_count * step_size
             action = "上升"
             offset_str = f"{step_count * step_size:.2f}m"
         else:
-            # 下降（从上升2次的位置开始下降）
             z_offset = (2 * step_size) - (step_count - 2) * step_size
             action = "下降"
             offset_str = f"{(step_count - 2) * step_size:.2f}m"
@@ -238,6 +241,20 @@ def main():
         
         if not arrived:
             print(f"  ⚠ 超时，继续下一步...")
+        
+        # 每次运动后，动态修改 movel_duration
+        # 允许 UPDATED_DURATIONS 长度小于运动段数（循环使用）
+        new_duration = UPDATED_DURATIONS[(step_count - 1) % len(UPDATED_DURATIONS)]
+        print(f"  → 第 {step_count} 段运动完成后，修改 MoveL 时长为 {new_duration:.2f}s")
+        print(f"  → 设置参数: 节点={CONTROLLER_NODE_NAME}, {MOVEL_DURATION_PARAM_NAME}={new_duration}")
+        success = interface.set_node_parameters(
+            full_node_name=CONTROLLER_NODE_NAME,
+            parameters={MOVEL_DURATION_PARAM_NAME: float(new_duration)},
+        )
+        if success:
+            print("  ✓ 参数设置成功")
+        else:
+            print("  ⚠ 参数设置失败")
         print()
     
     # ========================================================================
