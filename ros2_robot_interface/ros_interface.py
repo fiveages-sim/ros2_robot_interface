@@ -566,16 +566,8 @@ class ROS2RobotInterface:
         
         return categories
     
-    def get_joint_state(self, categorized: bool = False) -> Dict[str, Any] | None:
-        """Get the latest joint state.
-        
-        Args:
-            categorized: If True, returns joints categorized by body part.
-                        Uses cached categorized state for better performance.
-        
-        Returns:
-            Joint state dictionary, or None if not available or stale.
-        """
+    def _get_joint_state_ref(self, categorized: bool = False) -> Dict[str, Any] | None:
+        """Get latest joint-state cache by reference (no copy, internal use only)."""
         if not self.is_connected or self.latest_joint_state is None:
             return None
         
@@ -590,13 +582,11 @@ class ROS2RobotInterface:
                 return None
         
         if not categorized:
-            # Return copy of raw joint state (quick operation)
-            return self.latest_joint_state.copy()
+            return self.latest_joint_state
         
         # Return cached categorized state (already computed in callback)
         if self.latest_categorized_joint_state is not None:
-            # Return a copy to avoid external modifications
-            return self.latest_categorized_joint_state.copy()
+            return self.latest_categorized_joint_state
         
         # Fallback: categorize on demand if cache is not available
         # (should not happen in normal operation)
@@ -609,6 +599,22 @@ class ROS2RobotInterface:
         )
         categories['timestamp'] = self.latest_joint_state.get('timestamp', 0.0)
         return categories
+
+    def get_joint_state(self, categorized: bool = False) -> Dict[str, Any] | None:
+        """Get the latest joint state.
+        
+        Args:
+            categorized: If True, returns joints categorized by body part.
+                        Uses cached categorized state for better performance.
+        
+        Returns:
+            Joint state dictionary, or None if not available or stale.
+        """
+        state_ref = self._get_joint_state_ref(categorized=categorized)
+        if state_ref is None:
+            return None
+        # Keep public API defensive: return a copy to avoid external modifications.
+        return state_ref.copy()
     
     def get_last_joint_state_time(self) -> Optional[float]:
         """Get the timestamp of when the last joint state message was received.
@@ -1258,6 +1264,129 @@ class ROS2RobotInterface:
             "elapsed": now_fn() - start,
             "result": last_result,
         }
+
+    def _extract_arm_positions_from_joint_state(
+        self,
+        joint_state: Dict[str, Any],
+        *,
+        categorized: bool,
+    ) -> Tuple[Optional[List[float]], Optional[List[float]]]:
+        """Extract left/right arm joint arrays from a joint-state snapshot."""
+        if categorized:
+            left_positions = joint_state.get("left_arm", {}).get("positions")
+            right_positions = joint_state.get("right_arm", {}).get("positions")
+            if left_positions is None:
+                left_positions = joint_state.get("arm", {}).get("positions")
+            left = list(left_positions) if left_positions else None
+            right = list(right_positions) if right_positions else None
+            return left, right
+
+        names = joint_state.get("names") or []
+        positions = joint_state.get("positions") or []
+        if not names or not positions or len(names) != len(positions):
+            return None, None
+        left: List[float] = []
+        right: List[float] = []
+        for name, pos in zip(names, positions):
+            n = str(name).lower()
+            if "gripper" in n or "hand" in n or "head" in n or "body" in n:
+                continue
+            if "joint" not in n:
+                continue
+            if n.startswith("left_"):
+                left.append(float(pos))
+            elif n.startswith("right_"):
+                right.append(float(pos))
+        return (left or None), (right or None)
+
+    def _get_current_arm_joint_positions(self) -> Tuple[Optional[List[float]], Optional[List[float]]]:
+        """Get latest left/right arm joints from categorized or raw state."""
+        try:
+            categorized_state = self._get_joint_state_ref(categorized=True) or {}
+            left, right = self._extract_arm_positions_from_joint_state(categorized_state, categorized=True)
+            if left is not None or right is not None:
+                return left, right
+        except Exception:
+            pass
+        try:
+            raw_state = self._get_joint_state_ref(categorized=False) or {}
+            return self._extract_arm_positions_from_joint_state(raw_state, categorized=False)
+        except Exception:
+            return None, None
+
+    def wait_until_joint_arrive(
+        self,
+        *,
+        left_target_positions: Optional[List[float]] = None,
+        right_target_positions: Optional[List[float]] = None,
+        timeout: float = 3.0,
+        poll_period: float = 0.05,
+        joint_tolerance: float = 0.03,
+        time_now_fn: Optional[Callable[[], float]] = None,
+        sleep_fn: Optional[Callable[[float], None]] = None,
+        on_poll: Optional[Callable[[Dict[str, Any], float], None]] = None,
+    ) -> Dict[str, Any]:
+        """Wait until arm joints reach target positions (MoveJ-friendly)."""
+        now_fn = time_now_fn or time.monotonic
+        wait_fn = sleep_fn or time.sleep
+
+        if left_target_positions is None and right_target_positions is None:
+            return {
+                "arrived": False,
+                "elapsed": 0.0,
+                "left_error_max_abs": None,
+                "right_error_max_abs": None,
+                "reason": "no_target",
+            }
+
+        def _max_abs_error(current: Optional[List[float]], target: Optional[List[float]]) -> Optional[float]:
+            if target is None:
+                return 0.0
+            if current is None or len(current) != len(target) or len(target) == 0:
+                return None
+            return max(abs(float(c) - float(t)) for c, t in zip(current, target))
+
+        start = now_fn()
+        last_result: Dict[str, Any] = {
+            "arrived": False,
+            "elapsed": 0.0,
+            "left_error_max_abs": None,
+            "right_error_max_abs": None,
+            "left_current_len": 0,
+            "right_current_len": 0,
+            "left_target_len": len(left_target_positions) if left_target_positions is not None else 0,
+            "right_target_len": len(right_target_positions) if right_target_positions is not None else 0,
+            "reason": "timeout",
+        }
+
+        while (now_fn() - start) <= timeout:
+            left_current, right_current = self._get_current_arm_joint_positions()
+            left_err = _max_abs_error(left_current, left_target_positions)
+            right_err = _max_abs_error(right_current, right_target_positions)
+            left_ok = (left_err is not None and left_err <= joint_tolerance) if left_target_positions is not None else True
+            right_ok = (right_err is not None and right_err <= joint_tolerance) if right_target_positions is not None else True
+            elapsed = now_fn() - start
+            last_result = {
+                "arrived": bool(left_ok and right_ok),
+                "elapsed": elapsed,
+                "left_error_max_abs": left_err,
+                "right_error_max_abs": right_err,
+                "left_current_len": len(left_current) if left_current is not None else 0,
+                "right_current_len": len(right_current) if right_current is not None else 0,
+                "left_target_len": len(left_target_positions) if left_target_positions is not None else 0,
+                "right_target_len": len(right_target_positions) if right_target_positions is not None else 0,
+                "reason": "ok" if (left_ok and right_ok) else "waiting",
+            }
+            if on_poll is not None:
+                try:
+                    on_poll(last_result, elapsed)
+                except Exception:
+                    pass
+            if left_ok and right_ok:
+                return last_result
+            wait_fn(max(0.0, poll_period))
+
+        return last_result
     
     def lookup_transform(self, target_frame: str, source_frame: str, 
                         timeout: Optional[float] = None) -> Optional[TransformStamped]:
