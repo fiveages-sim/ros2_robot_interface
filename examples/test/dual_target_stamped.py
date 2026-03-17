@@ -9,6 +9,11 @@ from geometry_msgs.msg import Pose, Point, Quaternion
 
 from ros2_robot_interface import ROS2RobotInterface, ROS2RobotInterfaceConfig
 
+# 全局配置参数
+MAX_WAIT_TIME = 5.0  # 最大等待时间（秒）
+CHECK_INTERVAL = 0.5  # 检查间隔（秒）
+POSE_THRESHOLD = 0.002  # 位置距离阈值（米）
+
 
 def create_pose(x, y, z, qx=0.0, qy=0.0, qz=0.0, qw=1.0):
     """创建位姿消息的辅助函数"""
@@ -57,6 +62,30 @@ def wait_for_arrival(interface, max_wait_time=30.0, check_interval=0.5, pose_thr
     right_result = interface.right_arm_handler.check_arrival(pose_threshold=pose_threshold)
     print(f"    左臂到达状态: {'✓ 已到达' if left_result['arrived'] else '✗ 未到达'}")
     print(f"    右臂到达状态: {'✓ 已到达' if right_result['arrived'] else '✗ 未到达'}")
+
+    left_current_pose = interface.left_arm_handler.get_pose()
+    right_current_pose = interface.right_arm_handler.get_pose()
+    left_target_pose = interface.left_arm_handler.get_target_pose()
+    right_target_pose = interface.right_arm_handler.get_target_pose()
+
+    def print_pose_error(arm_name, current_pose, target_pose, result):
+        if current_pose is None or target_pose is None:
+            print(f"    {arm_name}误差详情: 无法获取当前或目标位姿")
+            return
+
+        dx = target_pose.position.x - current_pose.position.x
+        dy = target_pose.position.y - current_pose.position.y
+        dz = target_pose.position.z - current_pose.position.z
+        pos_dist = result.get('position_distance', float('inf'))
+
+        print(f"    {arm_name}位置误差: dx={dx:+.4f}m, dy={dy:+.4f}m, dz={dz:+.4f}m, |d|={pos_dist:.4f}m")
+        print(
+            f"      {arm_name}Z: 当前={current_pose.position.z:.4f}m, "
+            f"目标={target_pose.position.z:.4f}m, 差值={dz:+.4f}m"
+        )
+
+    print_pose_error("左臂", left_current_pose, left_target_pose, left_result)
+    print_pose_error("右臂", right_current_pose, right_target_pose, right_result)
     return False
 
 
@@ -68,7 +97,7 @@ def main():
     print("=" * 70 + "\n")
     
     # ========================================================================
-    # 第一部分：初始化和连接
+    # 第一部分：初始化和连接 
     # ========================================================================
     print("[1] 创建配置...")
     config = ROS2RobotInterfaceConfig()
@@ -140,62 +169,116 @@ def main():
     print("  ✓ 已切换到OCS2状态\n")
     
     # ========================================================================
-    # 第四部分：配置参数
-    # ========================================================================
-    MAX_WAIT_TIME = 5.0  # 最大等待时间（秒）
-    CHECK_INTERVAL = 0.5  # 检查间隔（秒）
-    POSE_THRESHOLD = 0.005  # 位置距离阈值（米）
-    
-    # ========================================================================
     # 第五部分：运动 + 动态修改 movel_duration 测试
     # ========================================================================
     print("=" * 70)
     print("[7] 运动并动态修改 movel_duration 测试")
     print("=" * 70)
     
-    # 记录初始Z位置
+    # 记录初始位置
+    initial_left_x = left_current_pose.position.x
+    initial_left_y = left_current_pose.position.y
     initial_left_z = left_current_pose.position.z
+    initial_right_x = right_current_pose.position.x
+    initial_right_y = right_current_pose.position.y
     initial_right_z = right_current_pose.position.z
     
     print(f"\n  初始位置:")
+    print(f"    左臂X: {initial_left_x:.3f}m")
+    print(f"    左臂Y: {initial_left_y:.3f}m")
     print(f"    左臂Z: {initial_left_z:.3f}m")
+    print(f"    右臂X: {initial_right_x:.3f}m")
+    print(f"    右臂Y: {initial_right_y:.3f}m")
     print(f"    右臂Z: {initial_right_z:.3f}m")
-    print(f"  每次移动: 0.05m")
+    print(f"  方块边长: 0.10m")
     print(f"  最大等待时间: {MAX_WAIT_TIME}秒")
     print(f"  到达阈值: {POSE_THRESHOLD}m")
-    print(f"  测试序列: 上升2次 -> 下降2次（每段后修改时长）\n")
+    print(f"  左臂轨迹: 上 -> 右 -> 下 -> 左")
+    print(f"  右臂轨迹: 上 -> 左 -> 下 -> 右\n")
     
     # 参数配置（按需修改为你的实际控制器节点/参数）
     CONTROLLER_NODE_NAME = "/ocs2_arm_controller"
     MOVEL_DURATION_PARAM_NAME = "movel_duration"
     UPDATED_DURATIONS = [2.0, 4.0]
     
-    # 执行4次移动：上升2次，下降2次
+    # 执行8次移动：
+    # 1) 双臂在 Y-Z 平面画方块（左右镜像）
+    # 2) 追加一组动作：向后 -> 向上 -> 向前 -> 向下
     step_size = 0.1
-    total_steps = 4
-    
-    for step_count in range(1, total_steps + 1):
-        # 前2次上升，后2次下降
-        if step_count <= 2:
-            z_offset = step_count * step_size
-            action = "上升"
-            offset_str = f"{step_count * step_size:.2f}m"
-        else:
-            z_offset = (2 * step_size) - (step_count - 2) * step_size
-            action = "下降"
-            offset_str = f"{(step_count - 2) * step_size:.2f}m"
-        
-        current_left_z = initial_left_z + z_offset
-        current_right_z = initial_right_z + z_offset
-        
-        print(f"[7.{step_count}] {action} {offset_str}")
+    square_steps = [
+        # 原有方块轨迹（Y-Z平面）
+        {
+            "left_dx": 0.0, "left_dy": 0.0, "left_dz": step_size,
+            "right_dx": 0.0, "right_dy": 0.0, "right_dz": step_size,
+            "left_action": "上", "right_action": "上"
+        },
+        {
+            "left_dx": 0.0, "left_dy": -step_size, "left_dz": 0.0,
+            "right_dx": 0.0, "right_dy": step_size, "right_dz": 0.0,
+            "left_action": "右", "right_action": "左"
+        },
+        {
+            "left_dx": 0.0, "left_dy": 0.0, "left_dz": -step_size,
+            "right_dx": 0.0, "right_dy": 0.0, "right_dz": -step_size,
+            "left_action": "下", "right_action": "下"
+        },
+        {
+            "left_dx": 0.0, "left_dy": step_size, "left_dz": 0.0,
+            "right_dx": 0.0, "right_dy": -step_size, "right_dz": 0.0,
+            "left_action": "左", "right_action": "右"
+        },
+        # 追加动作（X-Z平面）
+        {
+            "left_dx": -step_size, "left_dy": 0.0, "left_dz": 0.0,
+            "right_dx": -step_size, "right_dy": 0.0, "right_dz": 0.0,
+            "left_action": "后", "right_action": "后"
+        },
+        {
+            "left_dx": 0.0, "left_dy": 0.0, "left_dz": step_size,
+            "right_dx": 0.0, "right_dy": 0.0, "right_dz": step_size,
+            "left_action": "上", "right_action": "上"
+        },
+        {
+            "left_dx": step_size, "left_dy": 0.0, "left_dz": 0.0,
+            "right_dx": step_size, "right_dy": 0.0, "right_dz": 0.0,
+            "left_action": "前", "right_action": "前"
+        },
+        {
+            "left_dx": 0.0, "left_dy": 0.0, "left_dz": -step_size,
+            "right_dx": 0.0, "right_dy": 0.0, "right_dz": -step_size,
+            "left_action": "下", "right_action": "下"
+        },
+    ]
+
+    current_left_x = initial_left_x
+    current_left_y = initial_left_y
+    current_left_z = initial_left_z
+    current_right_x = initial_right_x
+    current_right_y = initial_right_y
+    current_right_z = initial_right_z
+
+    for step_count, step in enumerate(square_steps, start=1):
+        current_left_x += step["left_dx"]
+        current_left_y += step["left_dy"]
+        current_left_z += step["left_dz"]
+        current_right_x += step["right_dx"]
+        current_right_y += step["right_dy"]
+        current_right_z += step["right_dz"]
+
+        print(
+            f"[7.{step_count}] 左臂{step['left_action']} / 右臂{step['right_action']} "
+            f"（边长 {step_size:.2f}m）"
+        )
         print("-" * 70)
-        print(f"  目标Z位置: 左臂={current_left_z:.3f}m, 右臂={current_right_z:.3f}m")
-        
-        # 创建目标位姿（只改变Z坐标，其他保持不变）
+        print(
+            f"  左臂目标(X,Y,Z)=({current_left_x:.3f}, {current_left_y:.3f}, {current_left_z:.3f})m, "
+            f"右臂目标(X,Y,Z)=({current_right_x:.3f}, {current_right_y:.3f}, {current_right_z:.3f})m"
+        )
+
+        # 创建目标位姿（平移，姿态保持不变）
         left_target_pose = create_pose(
-            x=left_current_pose.position.x,
-            y=left_current_pose.position.y,
+            x=current_left_x,
+            y=current_left_y,
             z=current_left_z,
             qx=left_current_pose.orientation.x,
             qy=left_current_pose.orientation.y,
@@ -204,8 +287,8 @@ def main():
         )
         
         right_target_pose = create_pose(
-            x=right_current_pose.position.x,
-            y=right_current_pose.position.y,
+            x=current_right_x,
+            y=current_right_y,
             z=current_right_z,
             qx=right_current_pose.orientation.x,
             qy=right_current_pose.orientation.y,
