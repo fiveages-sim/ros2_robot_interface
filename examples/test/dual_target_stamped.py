@@ -5,6 +5,7 @@
 
 import time
 import sys
+import math
 from geometry_msgs.msg import Pose, Point, Quaternion
 
 from ros2_robot_interface import ROS2RobotInterface, ROS2RobotInterfaceConfig
@@ -29,6 +30,35 @@ def print_pose(pose, label="Pose"):
     print(f"    位置: ({pose.position.x:7.3f}, {pose.position.y:7.3f}, {pose.position.z:7.3f})")
     print(f"    方向: ({pose.orientation.x:6.3f}, {pose.orientation.y:6.3f}, "
           f"{pose.orientation.z:6.3f}, {pose.orientation.w:6.3f})")
+
+
+def quaternion_multiply(q1, q2):
+    """四元数乘法，输入/输出格式均为 (x, y, z, w)"""
+    x1, y1, z1, w1 = q1
+    x2, y2, z2, w2 = q2
+    return (
+        w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+        w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+        w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+        w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+    )
+
+
+def normalize_quaternion(q):
+    """归一化四元数，避免累计数值误差"""
+    x, y, z, w = q
+    norm = math.sqrt(x * x + y * y + z * z + w * w)
+    if norm < 1e-9:
+        return (0.0, 0.0, 0.0, 1.0)
+    return (x / norm, y / norm, z / norm, w / norm)
+
+
+def rotate_quaternion_world_x(q_current, angle_deg):
+    """按世界坐标系 X 轴旋转指定角度（度）"""
+    half_angle = math.radians(angle_deg) * 0.5
+    q_delta_world_x = (math.sin(half_angle), 0.0, 0.0, math.cos(half_angle))
+    q_new = quaternion_multiply(q_delta_world_x, q_current)
+    return normalize_quaternion(q_new)
 
 
 def wait_for_arrival(interface, max_wait_time=30.0, check_interval=0.5, pose_threshold=0.005):
@@ -193,60 +223,108 @@ def main():
     print(f"  方块边长: 0.10m")
     print(f"  最大等待时间: {MAX_WAIT_TIME}秒")
     print(f"  到达阈值: {POSE_THRESHOLD}m")
-    print(f"  左臂轨迹: 上 -> 右 -> 下 -> 左")
-    print(f"  右臂轨迹: 上 -> 左 -> 下 -> 右\n")
+    print(f"  左臂轨迹: 上 -> 右 -> 下 -> 左 -> 后 -> 上 -> 前 -> 下")
+    print(f"  右臂轨迹: 上 -> 左 -> 下 -> 右 -> 后 -> 上 -> 前 -> 下")
+    print(f"  追加旋转: 世界X轴 +45° -> +45° -> -45° -> -45°\n")
     
     # 参数配置（按需修改为你的实际控制器节点/参数）
     CONTROLLER_NODE_NAME = "/ocs2_arm_controller"
     MOVEL_DURATION_PARAM_NAME = "movel_duration"
-    UPDATED_DURATIONS = [2.0, 4.0]
+    DEFAULT_TRANSLATION_DURATION = 2.5
+    DEFAULT_ROTATION_DURATION = 3.5
     
-    # 执行8次移动：
+    # 执行12次动作：
     # 1) 双臂在 Y-Z 平面画方块（左右镜像）
     # 2) 追加一组动作：向后 -> 向上 -> 向前 -> 向下
+    # 3) 按世界坐标系 X 轴旋转：+45° -> +45° -> -45° -> -45°
     step_size = 0.1
-    square_steps = [
+    motion_steps = [
         # 原有方块轨迹（Y-Z平面）
         {
+            "type": "translation",
             "left_dx": 0.0, "left_dy": 0.0, "left_dz": step_size,
             "right_dx": 0.0, "right_dy": 0.0, "right_dz": step_size,
-            "left_action": "上", "right_action": "上"
+            "left_action": "上", "right_action": "上",
+            "duration": DEFAULT_TRANSLATION_DURATION,
         },
         {
+            "type": "translation",
             "left_dx": 0.0, "left_dy": -step_size, "left_dz": 0.0,
             "right_dx": 0.0, "right_dy": step_size, "right_dz": 0.0,
-            "left_action": "右", "right_action": "左"
+            "left_action": "右", "right_action": "左",
+            "duration": DEFAULT_TRANSLATION_DURATION,
         },
         {
+            "type": "translation",
             "left_dx": 0.0, "left_dy": 0.0, "left_dz": -step_size,
             "right_dx": 0.0, "right_dy": 0.0, "right_dz": -step_size,
-            "left_action": "下", "right_action": "下"
+            "left_action": "下", "right_action": "下",
+            "duration": DEFAULT_TRANSLATION_DURATION,
         },
         {
+            "type": "translation",
             "left_dx": 0.0, "left_dy": step_size, "left_dz": 0.0,
             "right_dx": 0.0, "right_dy": -step_size, "right_dz": 0.0,
-            "left_action": "左", "right_action": "右"
+            "left_action": "左", "right_action": "右",
+            "duration": DEFAULT_TRANSLATION_DURATION,
         },
         # 追加动作（X-Z平面）
         {
+            "type": "translation",
             "left_dx": -step_size, "left_dy": 0.0, "left_dz": 0.0,
             "right_dx": -step_size, "right_dy": 0.0, "right_dz": 0.0,
-            "left_action": "后", "right_action": "后"
+            "left_action": "后", "right_action": "后",
+            "duration": DEFAULT_TRANSLATION_DURATION,
         },
         {
+            "type": "translation",
             "left_dx": 0.0, "left_dy": 0.0, "left_dz": step_size,
             "right_dx": 0.0, "right_dy": 0.0, "right_dz": step_size,
-            "left_action": "上", "right_action": "上"
+            "left_action": "上", "right_action": "上",
+            "duration": DEFAULT_TRANSLATION_DURATION,
         },
         {
+            "type": "translation",
             "left_dx": step_size, "left_dy": 0.0, "left_dz": 0.0,
             "right_dx": step_size, "right_dy": 0.0, "right_dz": 0.0,
-            "left_action": "前", "right_action": "前"
+            "left_action": "前", "right_action": "前",
+            "duration": DEFAULT_TRANSLATION_DURATION,
         },
         {
+            "type": "translation",
             "left_dx": 0.0, "left_dy": 0.0, "left_dz": -step_size,
             "right_dx": 0.0, "right_dy": 0.0, "right_dz": -step_size,
-            "left_action": "下", "right_action": "下"
+            "left_action": "下", "right_action": "下",
+            "duration": DEFAULT_TRANSLATION_DURATION,
+        },
+        # 追加姿态旋转（世界坐标系 X 轴）
+        {
+            "type": "rotation_world_x",
+            "angle_deg": 45.0,
+            "left_action": "绕世界X轴旋转 +45°",
+            "right_action": "绕世界X轴旋转 +45°",
+            "duration": DEFAULT_ROTATION_DURATION,
+        },
+        {
+            "type": "rotation_world_x",
+            "angle_deg": 45.0,
+            "left_action": "绕世界X轴旋转 +45°",
+            "right_action": "绕世界X轴旋转 +45°",
+            "duration": DEFAULT_ROTATION_DURATION,
+        },
+        {
+            "type": "rotation_world_x",
+            "angle_deg": -45.0,
+            "left_action": "绕世界X轴旋转 -45°",
+            "right_action": "绕世界X轴旋转 -45°",
+            "duration": DEFAULT_ROTATION_DURATION,
+        },
+        {
+            "type": "rotation_world_x",
+            "angle_deg": -45.0,
+            "left_action": "绕世界X轴旋转 -45°",
+            "right_action": "绕世界X轴旋转 -45°",
+            "duration": DEFAULT_ROTATION_DURATION,
         },
     ]
 
@@ -256,14 +334,30 @@ def main():
     current_right_x = initial_right_x
     current_right_y = initial_right_y
     current_right_z = initial_right_z
+    current_left_q = (
+        left_current_pose.orientation.x,
+        left_current_pose.orientation.y,
+        left_current_pose.orientation.z,
+        left_current_pose.orientation.w,
+    )
+    current_right_q = (
+        right_current_pose.orientation.x,
+        right_current_pose.orientation.y,
+        right_current_pose.orientation.z,
+        right_current_pose.orientation.w,
+    )
 
-    for step_count, step in enumerate(square_steps, start=1):
-        current_left_x += step["left_dx"]
-        current_left_y += step["left_dy"]
-        current_left_z += step["left_dz"]
-        current_right_x += step["right_dx"]
-        current_right_y += step["right_dy"]
-        current_right_z += step["right_dz"]
+    for step_count, step in enumerate(motion_steps, start=1):
+        if step["type"] == "translation":
+            current_left_x += step["left_dx"]
+            current_left_y += step["left_dy"]
+            current_left_z += step["left_dz"]
+            current_right_x += step["right_dx"]
+            current_right_y += step["right_dy"]
+            current_right_z += step["right_dz"]
+        elif step["type"] == "rotation_world_x":
+            current_left_q = rotate_quaternion_world_x(current_left_q, step["angle_deg"])
+            current_right_q = rotate_quaternion_world_x(current_right_q, step["angle_deg"])
 
         print(
             f"[7.{step_count}] 左臂{step['left_action']} / 右臂{step['right_action']} "
@@ -274,26 +368,45 @@ def main():
             f"  左臂目标(X,Y,Z)=({current_left_x:.3f}, {current_left_y:.3f}, {current_left_z:.3f})m, "
             f"右臂目标(X,Y,Z)=({current_right_x:.3f}, {current_right_y:.3f}, {current_right_z:.3f})m"
         )
+        print(
+            f"  左臂目标姿态(qx,qy,qz,qw)=({current_left_q[0]:.3f}, {current_left_q[1]:.3f}, "
+            f"{current_left_q[2]:.3f}, {current_left_q[3]:.3f}), "
+            f"右臂目标姿态=({current_right_q[0]:.3f}, {current_right_q[1]:.3f}, "
+            f"{current_right_q[2]:.3f}, {current_right_q[3]:.3f})"
+        )
+
+        # 每段运动开始前，设置对应的 MoveL 时长
+        target_duration = float(step["duration"])
+        print(f"  → 设置当前段 MoveL 时长: {target_duration:.2f}s")
+        print(f"  → 设置参数: 节点={CONTROLLER_NODE_NAME}, {MOVEL_DURATION_PARAM_NAME}={target_duration}")
+        success = interface.set_node_parameters(
+            full_node_name=CONTROLLER_NODE_NAME,
+            parameters={MOVEL_DURATION_PARAM_NAME: target_duration},
+        )
+        if success:
+            print("  ✓ 参数设置成功")
+        else:
+            print("  ⚠ 参数设置失败")
 
         # 创建目标位姿（平移，姿态保持不变）
         left_target_pose = create_pose(
             x=current_left_x,
             y=current_left_y,
             z=current_left_z,
-            qx=left_current_pose.orientation.x,
-            qy=left_current_pose.orientation.y,
-            qz=left_current_pose.orientation.z,
-            qw=left_current_pose.orientation.w
+            qx=current_left_q[0],
+            qy=current_left_q[1],
+            qz=current_left_q[2],
+            qw=current_left_q[3],
         )
         
         right_target_pose = create_pose(
             x=current_right_x,
             y=current_right_y,
             z=current_right_z,
-            qx=right_current_pose.orientation.x,
-            qy=right_current_pose.orientation.y,
-            qz=right_current_pose.orientation.z,
-            qw=right_current_pose.orientation.w
+            qx=current_right_q[0],
+            qy=current_right_q[1],
+            qz=current_right_q[2],
+            qw=current_right_q[3],
         )
         
         # 获取 frame_id（优先使用左臂的 frame_id，如果不可用则使用右臂的）
@@ -325,19 +438,6 @@ def main():
         if not arrived:
             print(f"  ⚠ 超时，继续下一步...")
         
-        # 每次运动后，动态修改 movel_duration
-        # 允许 UPDATED_DURATIONS 长度小于运动段数（循环使用）
-        new_duration = UPDATED_DURATIONS[(step_count - 1) % len(UPDATED_DURATIONS)]
-        print(f"  → 第 {step_count} 段运动完成后，修改 MoveL 时长为 {new_duration:.2f}s")
-        print(f"  → 设置参数: 节点={CONTROLLER_NODE_NAME}, {MOVEL_DURATION_PARAM_NAME}={new_duration}")
-        success = interface.set_node_parameters(
-            full_node_name=CONTROLLER_NODE_NAME,
-            parameters={MOVEL_DURATION_PARAM_NAME: float(new_duration)},
-        )
-        if success:
-            print("  ✓ 参数设置成功")
-        else:
-            print("  ⚠ 参数设置失败")
         print()
     
     # ========================================================================
