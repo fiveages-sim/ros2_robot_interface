@@ -172,6 +172,16 @@ def _make_pose(
     return pose
 
 
+_PLACE_POSE_POS_EPS_SQ = 1e-10
+
+
+def _poses_same_position(a: Pose, b: Pose, *, eps_sq: float = _PLACE_POSE_POS_EPS_SQ) -> bool:
+    dx = float(a.position.x - b.position.x)
+    dy = float(a.position.y - b.position.y)
+    dz = float(a.position.z - b.position.z)
+    return (dx * dx + dy * dy + dz * dz) <= eps_sq
+
+
 # ---------------------------------------------------------------------------
 # Sequence builders (arm-agnostic → list[ArmStage])
 # ---------------------------------------------------------------------------
@@ -247,32 +257,88 @@ def build_single_arm_place_sequence(
     post_release_retract_offset: tuple[float, float, float],
     gripper_open: float,
     gripper_closed: float,
+    place_direction: str = "top",
+    place_direction_vector: DirectionVec | None = None,
+    place_approach_clearance: float = 0.0,
+    place_insert_clearance: float = 0.0,
     stage_prefix: str = "Place",
     start_index: int = 1,
 ) -> list[ArmStage]:
-    place_pose = _make_pose(place_position, place_orientation)
+    """Build place stages from a target pose, mirroring pick ``approach → insert`` semantics.
+
+    The place *target* is ``place_position`` / ``place_orientation`` (object or slot frame).
+    Motion approaches along ``place_direction`` (or ``place_direction_vector``), same convention
+    as :func:`build_single_arm_pick_sequence`:
+
+    - ``place_approach_clearance``: offset along the approach direction from the target (typically
+       stay *farther* along +direction before moving in).
+    - ``place_insert_clearance``: final offset along the same direction (like pick
+       ``grasp_clearance``; may be negative to move slightly past the nominal target).
+
+    When approach and insert poses coincide (e.g. both clearances ``0``), the explicit approach
+    stage is omitted (3 stages: Place / Release / PostReleaseRetreat).
+    """
+    direction_vec = _resolve_grasp_direction_vec(
+        grasp_direction=place_direction,
+        grasp_direction_vector=place_direction_vector,
+    )
+    target_pose = _make_pose(place_position, place_orientation)
+    approach_pose = _make_pose_from_target(
+        target_pose,
+        offset=place_approach_clearance,
+        direction_vec=direction_vec,
+        orientation=place_orientation,
+    )
+    final_pose = _make_pose_from_target(
+        target_pose,
+        offset=place_insert_clearance,
+        direction_vec=direction_vec,
+        orientation=place_orientation,
+    )
+    ox, oy, oz = post_release_retract_offset
     retract_pose = _make_pose(
         (
-            place_position[0] + post_release_retract_offset[0],
-            place_position[1] + post_release_retract_offset[1],
-            place_position[2] + post_release_retract_offset[2],
+            final_pose.position.x + ox,
+            final_pose.position.y + oy,
+            final_pose.position.z + oz,
         ),
         place_orientation,
     )
-    return [
+
+    need_approach = not _poses_same_position(approach_pose, final_pose)
+    idx = start_index
+    stages: list[ArmStage] = []
+
+    if need_approach:
+        stages.append(
+            (
+                _stage_name(stage_prefix, idx, "Approach"),
+                ArmTarget(pose=approach_pose, gripper=gripper_closed),
+            ),
+        )
+        idx += 1
+
+    stages.append(
         (
-            _stage_name(stage_prefix, start_index, PLACE_STAGE_SUFFIXES[0]),
-            ArmTarget(pose=place_pose, gripper=gripper_closed),
+            _stage_name(stage_prefix, idx, PLACE_STAGE_SUFFIXES[0]),
+            ArmTarget(pose=final_pose, gripper=gripper_closed),
         ),
+    )
+    idx += 1
+    stages.append(
         (
-            _stage_name(stage_prefix, start_index + 1, PLACE_STAGE_SUFFIXES[1]),
-            ArmTarget(pose=place_pose, gripper=gripper_open),
+            _stage_name(stage_prefix, idx, PLACE_STAGE_SUFFIXES[1]),
+            ArmTarget(pose=final_pose, gripper=gripper_open),
         ),
+    )
+    idx += 1
+    stages.append(
         (
-            _stage_name(stage_prefix, start_index + 2, PLACE_STAGE_SUFFIXES[2]),
+            _stage_name(stage_prefix, idx, PLACE_STAGE_SUFFIXES[2]),
             ArmTarget(pose=retract_pose, gripper=gripper_open),
         ),
-    ]
+    )
+    return stages
 
 
 def build_single_arm_return_home_sequence(

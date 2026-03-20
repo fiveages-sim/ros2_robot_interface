@@ -188,13 +188,18 @@ class ROS2RobotInterface:
         if "/right_hand_controller/target_joint_position" in topic_names:
             self.config.right_hand_joint_controller_topic = "/right_hand_controller/target_joint_position"
 
-        # 检测分开的左右臂 topic（优先检测，双臂模式）
+        # 检测分开的左右臂 topic（优先检测 WBC / ARM 的 /left）
+        # 仅在尚未手动/预置 left_arm_joint_controller_topic 时写入，避免覆盖单臂无后缀 topic 配置
         if "/ocs2_wbc_controller/target_joint_position/left" in topic_names:
-            self.config.left_arm_joint_controller_topic = "/ocs2_wbc_controller/target_joint_position/left"
+            if self.config.left_arm_joint_controller_topic is None:
+                self.config.left_arm_joint_controller_topic = (
+                    "/ocs2_wbc_controller/target_joint_position/left"
+                )
             if is_dual_arm and "/ocs2_wbc_controller/target_joint_position/right" in topic_names:
                 self.config.right_arm_joint_controller_topic = "/ocs2_wbc_controller/target_joint_position/right"
         elif "/ocs2_arm_controller/target_joint_position/left" in topic_names:
-            self.config.left_arm_joint_controller_topic = "/ocs2_arm_controller/target_joint_position/left"
+            if self.config.left_arm_joint_controller_topic is None:
+                self.config.left_arm_joint_controller_topic = "/ocs2_arm_controller/target_joint_position/left"
             if is_dual_arm and "/ocs2_arm_controller/target_joint_position/right" in topic_names:
                 self.config.right_arm_joint_controller_topic = "/ocs2_arm_controller/target_joint_position/right"
 
@@ -211,11 +216,16 @@ class ROS2RobotInterface:
                 # 注意：统一 topic 和分开的 topic 可以同时存在
                 self.config.unified_arm_joint_controller_topic = "/ocs2_arm_controller/target_joint_position"
         else:
-            # 单臂模式：只检测 /ocs2_arm_controller/target_joint_position（无后缀）
-            # 如果没有设置 left_arm_joint_controller_topic（即没有 /left 后缀），则设置为无后缀的 topic
+            # 单臂模式：优先无后缀 `/ocs2_arm_controller/target_joint_position`（常见单链 OCS2）
             if "/ocs2_arm_controller/target_joint_position" in topic_names:
                 if self.config.left_arm_joint_controller_topic is None:
                     self.config.left_arm_joint_controller_topic = "/ocs2_arm_controller/target_joint_position"
+            # 若无后缀话题（图中尚未出现或仿真仅广告 /left），退回分臂 topic，供 MoveJ 使用
+            elif self.config.left_arm_joint_controller_topic is None:
+                if "/ocs2_arm_controller/target_joint_position/left" in topic_names:
+                    self.config.left_arm_joint_controller_topic = (
+                        "/ocs2_arm_controller/target_joint_position/left"
+                    )
         
         return is_dual_arm
     

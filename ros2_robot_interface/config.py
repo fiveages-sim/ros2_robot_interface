@@ -72,7 +72,7 @@ class ROS2RobotInterfaceConfig:
     # 手臂关节控制器话题（自动检测，无需手动配置）
     # ============================================================================
     # 【自动检测】系统会在 connect() 时自动检测这些话题，不应手动设置
-    left_arm_joint_controller_topic: str | None = None  # 【自动检测】左臂关节控制器话题（根据可用话题自动检测）
+    left_arm_joint_controller_topic: str | None = None  # 【自动检测或可手动】左臂/单臂链关节 MoveJ 话题；单臂 OCS2 常为 /ocs2_arm_controller/target_joint_position
     right_arm_joint_controller_topic: str | None = None  # 【自动检测】右臂关节控制器话题（双臂模式时自动检测）
     unified_arm_joint_controller_topic: str | None = None  # 【自动检测】统一双臂关节控制器话题（如 /ocs2_wbc_controller/target_joint_position 或 /ocs2_arm_controller/target_joint_position）
     
@@ -176,6 +176,27 @@ class ROS2RobotInterfaceConfig:
             control_type=ControlType.CARTESIAN_POSE,
             **kwargs,
         )
+
+    @classmethod
+    def default_single_arm_ocs2_arm_controller(
+        cls,
+        *,
+        arm_joint_topic: str = "/ocs2_arm_controller/target_joint_position",
+        **kwargs: object,
+    ) -> "ROS2RobotInterfaceConfig":
+        """单臂 + ``ocs2_arm_controller`` 典型栈（如 Isaac Sim / 本仓库 OCS2 关节命令）。
+
+        预先设置 ``left_arm_joint_controller_topic``，避免仅依赖 ``connect()`` 时 ROS 图探测
+        尚未列出该话题而导致 MoveJ 发布器未创建。若控制器带命名空间，传入
+        ``arm_joint_topic="/namespace/ocs2_arm_controller/target_joint_position"`` 覆盖即可。
+
+        其余参数与 :meth:`default_single_arm` 相同，经 ``**kwargs`` 传入.
+        """
+        merged: dict[str, object] = {
+            "left_arm_joint_controller_topic": arm_joint_topic,
+        }
+        merged.update(kwargs)
+        return cls.default_single_arm(**merged)
 
     @classmethod
     def default_bimanual(
