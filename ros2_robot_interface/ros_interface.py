@@ -63,6 +63,9 @@ class ROS2RobotInterface:
         self.arm_trajectory_pub: Publisher | None = None  # Unified trajectory publisher for both arms
         self.unified_arm_joint_controller_pub: Publisher | None = None  # Unified joint position publisher for both arms
 
+        self.waist_lifting_command_pub: Publisher | None = None
+        self.waist_turning_command_pub: Publisher | None = None
+
         self.latest_joint_state: Dict[str, Any] | None = None
         self.latest_categorized_joint_state: Dict[str, Any] | None = None  # Cached categorized state
         
@@ -180,6 +183,15 @@ class ROS2RobotInterface:
         
         if "/body_joint_controller/target_joint_position" in topic_names:
             self.config.body_joint_controller_topic = "/body_joint_controller/target_joint_position"
+
+        if "/body_joint_controller/waist_lifting" in topic_names:
+            self.config.waist_lifting_topic = "/body_joint_controller/waist_lifting"
+
+        if "/body_joint_controller/waist_lifting_command" in topic_names:
+            self.config.waist_lifting_command_topic = "/body_joint_controller/waist_lifting_command"
+
+        if "/body_joint_controller/waist_turning_command" in topic_names:
+            self.config.waist_turning_command_topic = "/body_joint_controller/waist_turning_command"
         
         # 检测灵巧手关节控制器 topic
         if "/left_hand_controller/target_joint_position" in topic_names:
@@ -345,6 +357,21 @@ class ROS2RobotInterface:
             if self.config.body_joint_controller_topic:
                 self.body_joint_controller_pub = self.robot_node.create_publisher(
                     Float64MultiArray, self.config.body_joint_controller_topic, 10
+                )
+
+            if self.config.waist_lifting_topic:
+                self.waist_lifting_pub = self.robot_node.create_publisher(
+                    Float64, self.config.waist_lifting_topic, 10
+                )
+
+            if self.config.waist_lifting_command_topic:
+                self.waist_lifting_command_pub = self.robot_node.create_publisher(
+                    Float64, self.config.waist_lifting_command_topic, 10
+                )
+
+            if self.config.waist_turning_command_topic:
+                self.waist_turning_command_pub = self.robot_node.create_publisher(
+                    Float64, self.config.waist_turning_command_topic, 10
                 )
             
             if self.config.left_hand_joint_controller_topic:
@@ -894,6 +921,52 @@ class ROS2RobotInterface:
         logger.debug(f"Published body joint positions: {positions}")
         
         self.body_target_positions = positions.copy() if positions else None
+
+    def send_waist_lifting_relative_position(self, position: float) -> None:
+        """Send target relative position for waist lifting."""
+        if not self.is_connected:
+            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+        
+        if self.waist_lifting_pub is None:
+            logger.warning("Waist lifting publisher not initialized. Set waist_lifting_topic in config.")
+            return
+        
+        msg = Float64()
+        msg.data = position
+        self.waist_lifting_pub.publish(msg)
+        logger.debug(f"Published waist lifting relative position: {position}")
+
+    def send_waist_lifting_velocity_scale(self, velocity_scale: float) -> None:
+        """Send target velocity for waist lifting."""
+        if not self.is_connected:
+            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+        
+        if self.waist_lifting_pub is None:
+            logger.warning("Waist lifting publisher not initialized. Set waist_lifting_command_topic in config.")
+            return
+        
+        velocity_scale = max(min(velocity_scale, 1),-1)
+        
+        msg = Float64()
+        msg.data = velocity_scale
+        self.waist_lifting_command_pub.publish(msg)
+        logger.debug(f"Published waist lifting velocity_scale: {velocity_scale}")
+
+    def send_waist_turning_velocity_scale(self, velocity_scale: float) -> None:
+        """Send target velocity for waist turning."""
+        if not self.is_connected:
+            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+        
+        if self.waist_lifting_pub is None:
+            logger.warning("Waist turning publisher not initialized. Set waist_turning_command_topic in config.")
+            return
+        
+        velocity_scale = max(min(velocity_scale, 1),-1)
+        
+        msg = Float64()
+        msg.data = velocity_scale
+        self.waist_turning_command_pub.publish(msg)
+        logger.debug(f"Published waist turning velocity_scale: {velocity_scale}")
     
     def send_left_hand_joint_positions(self, positions: List[float]) -> None:
         """Send target joint positions for left hand joints."""
