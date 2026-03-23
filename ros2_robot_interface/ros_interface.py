@@ -53,6 +53,7 @@ class ROS2RobotInterface:
         self.joint_state_sub: Subscription | None = None
         self.fsm_command_sub: Subscription | None = None
         self.robot_description_sub: Subscription | None = None
+        self.body_current_target_sub: Subscription | None = None
         self.target_path_pub: Publisher | None = None
         self.dual_target_stamped_pub: Publisher | None = None
         self.fsm_command_pub: Publisher | None = None
@@ -83,6 +84,7 @@ class ROS2RobotInterface:
         
         self.head_target_positions: Optional[List[float]] = None
         self.body_target_positions: Optional[List[float]] = None
+        self.body_current_target: Optional[List[float]] = None
         
         self.tf_buffer: Optional[tf2_ros.Buffer] = None
         self.tf_listener: Optional[tf2_ros.TransformListener] = None
@@ -183,6 +185,9 @@ class ROS2RobotInterface:
         
         if "/body_joint_controller/target_joint_position" in topic_names:
             self.config.body_joint_controller_topic = "/body_joint_controller/target_joint_position"
+
+        if "/body_joint_controller/current_target_joint" in topic_names:
+            self.config.body_joint_current_target_topic = "/body_joint_controller/current_target_joint"
 
         if "/body_joint_controller/waist_lifting" in topic_names:
             self.config.waist_lifting_topic = "/body_joint_controller/waist_lifting"
@@ -293,6 +298,16 @@ class ROS2RobotInterface:
                 robot_desc_qos
             )
             logger.info("✅ Subscribed to /robot_description for URDF tracking")
+
+            if self.config.body_joint_current_target_topic:
+                # Subscribe to current target body joints
+                self.body_current_target_sub = self.robot_node.create_subscription(
+                    Float64MultiArray,
+                    self.config.body_joint_current_target_topic,
+                    self._body_current_target_callback,
+                    10
+                )
+                logger.info("✅ Subscribed to {} for body target tracking".format(self.config.body_joint_current_target_topic))
             
             # Initialize TF buffer first (needed by ArmHandler)
             self.tf_buffer = tf2_ros.Buffer()
@@ -455,6 +470,14 @@ class ROS2RobotInterface:
         except Exception as e:
             logger.error(f"Error in robot description callback: {e}", exc_info=True)
     
+    def _body_current_target_callback(self, msg: Float64MultiArray) -> None:
+        """Callback for body current target joint messages."""
+        try:
+            self.body_current_target = list(msg.data) if msg.data else None
+            logger.debug(f"Body current target updated: {self.body_current_target}")
+        except Exception as e:
+            logger.error(f"Error in body current target callback: {e}", exc_info=True)
+
     def _joint_state_callback(self, msg: JointState) -> None:
         """Callback for joint state messages."""
         current_time = time.time()
@@ -672,6 +695,12 @@ class ROS2RobotInterface:
             return None
 
         return self.right_arm_handler.get_pose()
+    
+    def get_body_current_target(self) -> Optional[List[float]]:
+        """Get latest body current target."""
+        if self.body_current_target is None:
+            return None
+        return list(self.body_current_target)
 
     def send_end_effector_target(self, pose: Pose) -> None:
         """Send a target pose for the left arm end-effector."""
@@ -1501,6 +1530,10 @@ class ROS2RobotInterface:
         if self.robot_description_sub:
             self.robot_description_sub.destroy()
             self.robot_description_sub = None
+
+        if self.body_current_target_sub:
+            self.body_current_target_sub.destroy()
+            self.body_current_target_sub = None
         
         # Cleanup arm handlers
         if self.left_arm_handler:
@@ -1551,6 +1584,14 @@ class ROS2RobotInterface:
         if self.unified_arm_joint_controller_pub:
             self.unified_arm_joint_controller_pub.destroy()
             self.unified_arm_joint_controller_pub = None
+
+        if self.waist_lifting_command_pub:
+            self.waist_lifting_command_pub.destroy()
+            self.waist_lifting_command_pub = None
+
+        if self.waist_turning_command_pub:
+            self.waist_turning_command_pub.destroy()
+            self.waist_turning_command_pub = None
 
         if self.robot_node:
             self.robot_node.destroy_node()
