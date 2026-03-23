@@ -17,6 +17,7 @@ from geometry_msgs.msg import Pose, PoseStamped, TransformStamped, Twist
 from nav_msgs.msg import Path
 from rclpy.duration import Duration
 from rclpy.executors import SingleThreadedExecutor
+from rclpy.client import Client
 from rclpy.node import Node
 from rclpy.publisher import Publisher
 from rclpy.subscription import Subscription
@@ -27,6 +28,9 @@ from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 import tf2_ros
 from tf2_ros import TransformException
 from tf2_geometry_msgs import do_transform_pose
+
+from arms_ros2_control_msgs.srv import ExecutePath
+
 from .config import ControlType, ROS2RobotInterfaceConfig
 from .utils.exceptions import ROS2AlreadyConnectedError, ROS2NotConnectedError
 from .handler import ArmHandler, ArmType, GripperHandler, GripperType
@@ -54,6 +58,7 @@ class ROS2RobotInterface:
         self.fsm_command_sub: Subscription | None = None
         self.robot_description_sub: Subscription | None = None
         self.target_path_pub: Publisher | None = None
+        self.execute_path_client: Client | None = None
         self.dual_target_stamped_pub: Publisher | None = None
         self.fsm_command_pub: Publisher | None = None
         self.head_joint_controller_pub: Publisher | None = None
@@ -305,6 +310,9 @@ class ROS2RobotInterface:
                 )
                 self.right_arm_handler.initialize()
                 self.target_path_pub = self.robot_node.create_publisher(Path, "/target_path", 10)
+                self.execute_path_client = self.robot_node.create_client(
+                    ExecutePath, "execute_path"
+                )
                 self.dual_target_stamped_pub = self.robot_node.create_publisher(Path, "/dual_target/stamped", 10)
             
             # Create left gripper handler (if enabled and controller detected)
@@ -752,7 +760,68 @@ class ROS2RobotInterface:
         self.target_path_pub.publish(path_msg)
         logger.info(f"Published target path with {len(left_poses)} left arm waypoints and {len(right_poses)} right arm waypoints (total: {len(path_msg.poses)})")
         logger.debug(f"Path frame_id: {path_msg.header.frame_id}")
-    
+
+    def execute_path(
+        self,
+        left_poses: List[Pose | PoseStamped],
+        right_poses: List[Pose | PoseStamped],
+        trajectory_duration: float = 0.0,
+        frame_id: Optional[str] = None,
+    ) -> bool:
+        """Send unequal-waypoint dual-arm path via ExecutePath service."""
+        if not self.is_connected:
+            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+
+        if not self.config.right_end_effector_target_topic:
+            raise ROS2NotConnectedError(
+                "ExecutePath requires dual-arm mode. Right end-effector target topic not configured."
+            )
+
+        if self.execute_path_client is None:
+            raise ROS2NotConnectedError("ExecutePath client not initialized")
+
+        if not self.execute_path_client.service_is_ready():
+            raise ROS2NotConnectedError("ExecutePath service not available")
+
+        def to_pose_stamped(pose: Pose | PoseStamped) -> PoseStamped:
+            ps = PoseStamped()
+            if frame_id is not None:
+                ps.header.frame_id = frame_id
+            elif isinstance(pose, PoseStamped):
+                ps.header.frame_id = pose.header.frame_id
+            else:
+                ps.header.frame_id = ""
+            ps.header.stamp = self.robot_node.get_clock().now().to_msg()
+            ps.pose = pose.pose if isinstance(pose, PoseStamped) else pose
+            return ps
+
+        request = ExecutePath.Request()
+        request.left_arm_path.poses = [to_pose_stamped(p) for p in left_poses]
+        request.right_arm_path.poses = [to_pose_stamped(p) for p in right_poses]
+        request.trajectory_duration = trajectory_duration
+
+        if left_poses and self.left_arm_handler:
+            self.left_arm_handler.latest_target_pose = None
+        if right_poses and self.right_arm_handler:
+            self.right_arm_handler.latest_target_pose = None
+
+        future = self.execute_path_client.call_async(request)
+
+        event = threading.Event()
+        future.add_done_callback(lambda _: event.set())
+        if not event.wait(timeout=5.0):
+            raise ROS2NotConnectedError("ExecutePath service call timed out")
+
+        if future.result() is None:
+            raise ROS2NotConnectedError("ExecutePath service call failed")
+
+        response = future.result()
+        logger.info(
+            f"ExecutePath: success={response.success}, "
+            f"duration={response.estimated_duration:.2f}s, msg={response.message}"
+        )
+        return response.success
+
     def send_dual_arm_target_stamped(self, left_pose: Pose, right_pose: Pose, frame_id: str = "arm_base") -> None:
         """Send dual-arm target poses to /dual_target/stamped topic."""
         if not self.is_connected:
@@ -1441,7 +1510,11 @@ class ROS2RobotInterface:
         if self.target_path_pub:
             self.target_path_pub.destroy()
             self.target_path_pub = None
-        
+
+        if self.execute_path_client:
+            self.execute_path_client.destroy()
+            self.execute_path_client = None
+
         if self.dual_target_stamped_pub:
             self.dual_target_stamped_pub.destroy()
             self.dual_target_stamped_pub = None
