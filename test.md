@@ -5,17 +5,22 @@
 快速跳转：
 - [1. test_interface.py - 通用接口测试](#1-test_interfacepy---通用接口测试)
 - [2. test_interface_isaac.py - Isaac Sim 联合仿真测试](#2-test_interface_isaacpy---isaac-sim-联合仿真测试)
-- [3. test_dual_arm_target_stamped.py - 双臂目标位姿测试](#3-test_dual_arm_target_stampedpy---双臂目标位姿测试)
+- [3. examples/test/dual_target_stamped.py - 双臂目标位姿测试](#3-examplestestdual_target_stampedpy---双臂目标位姿测试)
 - [4. test_arm_joint_movej.py - 手臂关节 MoveJ 模式测试](#4-test_arm_joint_movejpy---手臂关节-movej-模式测试)
-- [5. test_w2_path.py - W2 机器人路径测试](#5-test_w2_pathpy---w2-机器人路径测试)
+- [5. examples/test/dual_cartesian_path.py - 双臂 Path 轨迹测试](#5-examplestestdual_cartesian_pathpy---双臂-path-轨迹测试)
 - [6. test_tf_transform.py - TF 变换查询和坐标转换测试](#6-test_tf_transformpy---tf-变换查询和坐标转换测试)
 - [7. test_gripper.py - 夹爪开关控制测试](#7-test_gripperpy---夹爪开关控制测试)
 - [8. test_gripper_position.py - 夹爪位置到达测试](#8-test_gripper_positionpy---夹爪位置到达测试)
-- [9. test_check_arrival.py - 手臂到达判断测试](#9-test_check_arrivalpy---手臂到达判断测试)
+- [9. examples/test/check_arrival.py - 手臂到达判断测试](#9-examplestestcheck_arrivalpy---手臂到达判断测试)
 - [10. test_dual_arm_joint_positions.py - 双臂关节位置统一控制测试](#10-test_dual_arm_joint_positionspy---双臂关节位置统一控制测试)
 - [11. demo_wavearm.py - W2 机器人挥手演示（手臂）](#11-examplesfancydemo_wavearmpy---w2-机器人挥手演示手臂)
 - [12. demo_wavehand.py - W2 机器人挥手演示（灵巧手）](#12-examplesfancydemo_wavehandpy---w2-机器人挥手演示灵巧手)
 - [13. demo_pourbeer_o6.py - W2 机器人倒酒演示（O6灵巧手）](#13-examplesfancydemo_pourbeer_o6py---w2-机器人倒酒演示o6灵巧手)
+- [14. dual_cartesian_execute_path.py - ExecutePath 不对称轨迹测试](#14-examplestestdual_cartesian_execute_pathpy---executepath-不对称轨迹测试)
+- [15. dual_cartesian_path.py - 双臂 Path 轨迹测试](#15-examplestestdual_cartesian_pathpy---双臂-path-轨迹测试)
+- [16. list_nodes.py - 节点列表查询测试](#16-examplestestlist_nodespy---节点列表查询测试)
+- [17. list_parameters.py - 节点参数查询/设置测试](#17-examplestestlist_parameterspy---节点参数查询设置测试)
+- [18. demo_wavearm_jointspace.py - W2 挥手演示（关节空间）](#18-examplesfancydemo_wavearm_jointspacepy---w2-挥手演示关节空间)
 
 其他部分：
 - [🔗 相关文档](#-相关文档)
@@ -25,6 +30,8 @@
 ## 📁 测试文件说明
 
 所有测试文件位于 `examples/` 目录下，每个文件用于测试不同的功能模块：
+
+> 运行说明（已更新）：当前脚本运行**不需要**执行 `source ~/ros2_ws/install/setup.bash`，激活 Python 环境后直接运行即可。
 
 ### 1. `test_interface.py` - 通用接口测试
 
@@ -49,7 +56,6 @@
 **运行方式：**
 ```bash
 conda activate lerobot_ros2
-source ~/ros2_ws/install/setup.bash
 cd ~/libraries/ros2_robot_interface
 python examples/test_interface.py
 ```
@@ -75,14 +81,13 @@ python examples/test_interface.py
 **运行方式：**
 ```bash
 conda activate lerobot_ros2
-source ~/ros2_ws/install/setup.bash
 cd ~/libraries/ros2_robot_interface
 python examples/test_interface_isaac.py
 ```
 
 ---
 
-### 3. `test_dual_arm_target_stamped.py` - 双臂目标位姿测试
+### 3. `examples/test/dual_target_stamped.py` - 双臂目标位姿测试
 
 **功能：** 专门测试双臂机器人的同步目标位姿发送功能
 
@@ -100,9 +105,8 @@ python examples/test_interface_isaac.py
 **运行方式：**
 ```bash
 conda activate lerobot_ros2
-source ~/ros2_ws/install/setup.bash
 cd ~/libraries/ros2_robot_interface
-python examples/test_dual_arm_target_stamped.py
+python examples/test/dual_target_stamped.py
 ```
 
 ---
@@ -125,34 +129,32 @@ python examples/test_dual_arm_target_stamped.py
 **运行方式：**
 ```bash
 conda activate lerobot_ros2
-source ~/ros2_ws/install/setup.bash
 cd ~/libraries/ros2_robot_interface
 python examples/test_arm_joint_movej.py
 ```
 
 ---
 
-### 5. `test_w2_path.py` - W2 机器人路径测试
+### 5. `examples/test/dual_cartesian_path.py` - 双臂 Path 轨迹测试
 
-**功能：** 测试 W2 机器人的路径轨迹执行功能
+**功能：** 测试双臂笛卡尔路径轨迹发送功能（`send_target_path()`）。
 
 **测试内容：**
-- ✅ `target_path` 接口
-- ✅ 轨迹文件读取（`w2轨迹测试.txt`）
+- ✅ `send_target_path()` 接口
+- ✅ 双臂路径点成对发送
 - ✅ 多段路径连续执行
 - ✅ 路径执行完成等待
 
 **适用场景：**
-- W2 机器人路径规划
-- 轨迹文件执行
+- 双臂路径规划功能验证
+- Path 话题接口验证
 - 复杂路径任务测试
 
 **运行方式：**
 ```bash
 conda activate lerobot_ros2
-source ~/ros2_ws/install/setup.bash
 cd ~/libraries/ros2_robot_interface
-python examples/test_w2_path.py
+python examples/test/dual_cartesian_path.py
 ```
 
 ---
@@ -189,7 +191,6 @@ python examples/test_w2_path.py
 **运行方式：**
 ```bash
 conda activate lerobot_ros2
-source ~/ros2_ws/install/setup.bash
 cd ~/libraries/ros2_robot_interface
 python examples/test_tf_transform.py
 ```
@@ -221,7 +222,6 @@ python examples/test_tf_transform.py
 **运行方式：**
 ```bash
 conda activate lerobot_ros2
-source ~/ros2_ws/install/setup.bash
 cd ~/libraries/ros2_robot_interface
 python examples/test_gripper.py
 ```
@@ -255,7 +255,6 @@ python examples/test_gripper.py
 **运行方式：**
 ```bash
 conda activate lerobot_ros2
-source ~/ros2_ws/install/setup.bash
 cd ~/libraries/ros2_robot_interface
 python examples/test_gripper_position.py
 ```
@@ -267,7 +266,7 @@ python examples/test_gripper_position.py
 
 ---
 
-### 9. `test_check_arrival.py` - 手臂到达判断测试
+### 9. `examples/test/check_arrival.py` - 手臂到达判断测试
 
 **功能：** 专门用于测试手臂的到达判断功能
 
@@ -288,9 +287,8 @@ python examples/test_gripper_position.py
 **运行方式：**
 ```bash
 conda activate lerobot_ros2
-source ~/ros2_ws/install/setup.bash
 cd ~/libraries/ros2_robot_interface
-python examples/test_check_arrival.py
+python examples/test/check_arrival.py
 ```
 
 **注意事项：**
@@ -322,7 +320,6 @@ python examples/test_check_arrival.py
 **运行方式：**
 ```bash
 conda activate lerobot_ros2
-source ~/ros2_ws/install/setup.bash
 cd ~/libraries/ros2_robot_interface
 python examples/test_dual_arm_joint_positions.py
 ```
@@ -355,7 +352,6 @@ python examples/test_dual_arm_joint_positions.py
 **运行方式：**
 ```bash
 conda activate lerobot_ros2
-source ~/ros2_ws/install/setup.bash
 cd ~/libraries/ros2_robot_interface
 python examples/fancy/demo_wavearm.py
 ```
@@ -387,7 +383,6 @@ python examples/fancy/demo_wavearm.py
 **运行方式：**
 ```bash
 conda activate lerobot_ros2
-source ~/ros2_ws/install/setup.bash
 cd ~/libraries/ros2_robot_interface
 python examples/fancy/demo_wavehand.py
 ```
@@ -420,7 +415,6 @@ python examples/fancy/demo_wavehand.py
 **运行方式：**
 ```bash
 conda activate lerobot_ros2
-source ~/ros2_ws/install/setup.bash
 cd ~/libraries/ros2_robot_interface
 python examples/fancy/demo_pourbeer_o6.py
 ```
@@ -430,6 +424,92 @@ python examples/fancy/demo_pourbeer_o6.py
 - 演示脚本会自动切换到 OCS2 状态并执行倒酒轨迹
 - 执行完成后会自动回到 HOME 位置并切换到 HOLD 状态
 - 使用四元数格式的轨迹点，支持精确的位姿控制
+
+---
+
+### 14. `examples/test/dual_cartesian_execute_path.py` - ExecutePath 不对称轨迹测试
+
+**功能：** 使用 `execute_path()` Service 测试双臂不对称路径点数量与不同轨迹持续时间。
+
+**测试内容：**
+- ✅ `execute_path()` 服务调用
+- ✅ 仅左臂/仅右臂轨迹发送（另一臂路径为空）
+- ✅ 左右臂不对称路径点数量（如左2右1、左2右3、左3右2等）
+- ✅ 不同 `trajectory_duration` 对执行效果影响（1s 到 10s）
+- ✅ 到达检测（`check_arrival()`）
+
+**运行方式：**
+```bash
+conda activate lerobot_ros2
+source ~/ros2_ws/install/setup.bash
+python examples/test/dual_cartesian_execute_path.py
+```
+
+---
+
+### 15. `examples/test/dual_cartesian_path.py` - 双臂 Path 轨迹测试
+
+**功能：** 使用 `send_target_path()` 进行双臂笛卡尔路径发送测试。
+
+**测试内容：**
+- ✅ `send_target_path()` 话题发布路径
+- ✅ 双臂路径点按阶段配对执行
+- ✅ 路径发送后的到达检测
+
+**运行方式：**
+```bash
+conda activate lerobot_ros2
+python examples/test/dual_cartesian_path.py
+```
+
+---
+
+### 16. `examples/test/list_nodes.py` - 节点列表查询测试
+
+**功能：** 测试 `list_nodes()` 系统信息查询能力。
+
+**测试内容：**
+- ✅ 查询当前 ROS2 节点列表
+- ✅ 打印节点名称、命名空间、完整路径
+
+**运行方式：**
+```bash
+conda activate lerobot_ros2
+python examples/test/list_nodes.py
+```
+
+---
+
+### 17. `examples/test/list_parameters.py` - 节点参数查询/设置测试
+
+**功能：** 测试 `list_node_parameters()` 与 `set_node_parameters()`。
+
+**测试内容：**
+- ✅ 查询目标节点动态参数
+- ✅ 设置参数并校验设置结果
+
+**运行方式：**
+```bash
+conda activate lerobot_ros2
+python examples/test/list_parameters.py
+```
+
+---
+
+### 18. `examples/fancy/demo_wavearm_jointspace.py` - W2 挥手演示（关节空间）
+
+**功能：** 使用关节空间方式执行挥手演示（相对笛卡尔轨迹版）。
+
+**测试内容：**
+- ✅ 关节空间轨迹/目标发送
+- ✅ 双臂协调动作编排
+- ✅ 演示流程状态切换与收尾
+
+**运行方式：**
+```bash
+conda activate lerobot_ros2
+python examples/fancy/demo_wavearm_jointspace.py
+```
 
 ---
 
