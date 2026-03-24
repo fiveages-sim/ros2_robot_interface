@@ -99,9 +99,18 @@ def main():
     print("[9] 发送腰部上升0.1m指令")
     print("-" * 70)
     try:
+        success = interface.set_node_parameters(
+            full_node_name="/body_joint_controller",
+            parameters={"waist_lifting_duration": float(10.0)},
+        )
+        if success:
+            print("  ✓ 参数设置成功")
+        else:
+            print("  ⚠ 参数设置失败")
+        print()
         interface.send_waist_lifting_relative_position(0.1)  # 发送相对当前位置上升0.1m
         print("  ✓ 命令已发送: 腰部开始上升")
-        time.sleep(3.0)  # 等待腰部运动完成
+        time.sleep(12.0)  # 等待腰部运动完成
         print("  ✓ 腰部到达目标位置\n")
     except Exception as e:
         print(f"  ⚠ 腰部上升控制失败: {e}\n")
@@ -111,9 +120,18 @@ def main():
     print("[10] 发送腰部下降0.1m指令")
     print("-" * 70)
     try:
+        success = interface.set_node_parameters(
+            full_node_name="/body_joint_controller",
+            parameters={"waist_lifting_duration": float(3.0)},
+        )
+        if success:
+            print("  ✓ 参数设置成功")
+        else:
+            print("  ⚠ 参数设置失败")
+        print()
         interface.send_waist_lifting_relative_position(-0.1)  # 发送相对当前位置下降0.1m
         print("  ✓ 命令已发送: 腰部开始下降")
-        time.sleep(3.0)  # 等待腰部运动完成
+        time.sleep(5.0)  # 等待腰部运动完成
         print("  ✓ 腰部到达目标位置\n")
     except Exception as e:
         print(f"  ⚠ 腰部下降控制失败: {e}\n")
