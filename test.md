@@ -452,7 +452,10 @@ python examples/test_movej_with_para.py
 运行效果如下所示：
 
 
-https://github.com/user-attachments/assets/30055686-4725-413d-98f0-18926cf82bcd
+
+
+https://github.com/user-attachments/assets/1d24e339-ebff-4b6a-aefe-e2ea927f66b7
+
 
 
 
