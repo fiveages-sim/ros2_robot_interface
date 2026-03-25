@@ -432,8 +432,8 @@ python examples/fancy/demo_pourbeer_o6.py
 - 使用四元数格式的轨迹点，支持精确的位姿控制
 
 ---
-### 14. `examples/test_movej_with_para.py` - W2 机器人双臂可以调节参数的movej演示
-**功能：** W2 机器人双臂关节单点和多点调用movej的service，可以通过msg调整参数
+### 14. `examples/test_movej_with_para.py` - 机器人可以调节参数的movej演示
+**功能：**  机器人关节单点和多点调用movej的service，可以通过msg调整参数
 
 **测试内容：**
 - ✅ 测试单点movej，发送目标点，在非时间模式下，按照最大速度、最大加速度、最大加加速度运动
