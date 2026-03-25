@@ -16,11 +16,13 @@
 - [11. demo_wavearm.py - W2 机器人挥手演示（手臂）](#11-examplesfancydemo_wavearmpy---w2-机器人挥手演示手臂)
 - [12. demo_wavehand.py - W2 机器人挥手演示（灵巧手）](#12-examplesfancydemo_wavehandpy---w2-机器人挥手演示灵巧手)
 - [13. demo_pourbeer_o6.py - W2 机器人倒酒演示（O6灵巧手）](#13-examplesfancydemo_pourbeer_o6py---w2-机器人倒酒演示o6灵巧手)
-- [14. dual_cartesian_execute_path.py - ExecutePath 不对称轨迹测试](#14-examplestestdual_cartesian_execute_pathpy---executepath-不对称轨迹测试)
-- [15. dual_cartesian_path.py - 双臂 Path 轨迹测试](#15-examplestestdual_cartesian_pathpy---双臂-path-轨迹测试)
-- [16. list_nodes.py - 节点列表查询测试](#16-examplestestlist_nodespy---节点列表查询测试)
-- [17. list_parameters.py - 节点参数查询/设置测试](#17-examplestestlist_parameterspy---节点参数查询设置测试)
-- [18. demo_wavearm_jointspace.py - W2 挥手演示（关节空间）](#18-examplesfancydemo_wavearm_jointspacepy---w2-挥手演示关节空间)
+- [14. test_movej_with_para.py - 机器人可以调节参数的movej演示](#14-examplestest_movej_with_parapy---机器人可以调节参数的movej演示)
+- [15. dual_cartesian_execute_path.py - ExecutePath 不对称轨迹测试](#15-examplestestdual_cartesian_execute_pathpy---executepath-不对称轨迹测试)
+- [16. dual_cartesian_path.py - 双臂 Path 轨迹测试](#16-examplestestdual_cartesian_pathpy---双臂-path-轨迹测试)
+- [17. list_nodes.py - 节点列表查询测试](#17-examplestestlist_nodespy---节点列表查询测试)
+- [18. list_parameters.py - 节点参数查询/设置测试](#18-examplestestlist_parameterspy---节点参数查询设置测试)
+- [19. demo_wavearm_jointspace.py - W2 挥手演示（关节空间）](#19-examplesfancydemo_wavearm_jointspacepy---w2-挥手演示关节空间)
+- [20. waist_lifting.py - 腰部升降旋转测试](#20-examplestestwaist_liftingpy---腰部升降旋转功能测试)
 
 其他部分：
 - [🔗 相关文档](#-相关文档)
@@ -455,7 +457,7 @@ https://github.com/user-attachments/assets/1d24e339-ebff-4b6a-aefe-e2ea927f66b7
 
 ---
 
-### 14. `examples/test/dual_cartesian_execute_path.py` - ExecutePath 不对称轨迹测试
+### 15. `examples/test/dual_cartesian_execute_path.py` - ExecutePath 不对称轨迹测试
 
 **功能：** 使用 `execute_path()` Service 测试双臂不对称路径点数量与不同轨迹持续时间。
 
@@ -475,7 +477,7 @@ python examples/test/dual_cartesian_execute_path.py
 
 ---
 
-### 15. `examples/test/dual_cartesian_path.py` - 双臂 Path 轨迹测试
+### 16. `examples/test/dual_cartesian_path.py` - 双臂 Path 轨迹测试
 
 **功能：** 使用 `send_target_path()` 进行双臂笛卡尔路径发送测试。
 
@@ -492,7 +494,7 @@ python examples/test/dual_cartesian_path.py
 
 ---
 
-### 16. `examples/test/list_nodes.py` - 节点列表查询测试
+### 17. `examples/test/list_nodes.py` - 节点列表查询测试
 
 **功能：** 测试 `list_nodes()` 系统信息查询能力。
 
@@ -508,7 +510,7 @@ python examples/test/list_nodes.py
 
 ---
 
-### 17. `examples/test/list_parameters.py` - 节点参数查询/设置测试
+### 18. `examples/test/list_parameters.py` - 节点参数查询/设置测试
 
 **功能：** 测试 `list_node_parameters()` 与 `set_node_parameters()`。
 
@@ -524,7 +526,7 @@ python examples/test/list_parameters.py
 
 ---
 
-### 18. `examples/fancy/demo_wavearm_jointspace.py` - W2 挥手演示（关节空间）
+### 19. `examples/fancy/demo_wavearm_jointspace.py` - W2 挥手演示（关节空间）
 
 **功能：** 使用关节空间方式执行挥手演示（相对笛卡尔轨迹版）。
 
@@ -537,6 +539,23 @@ python examples/test/list_parameters.py
 ```bash
 conda activate lerobot_ros2
 python examples/fancy/demo_wavearm_jointspace.py
+```
+
+---
+
+### 20. `examples/test/waist_lifting.py` - 腰部升降旋转功能测试
+
+**功能：** 测试腰部的升降和旋转功能
+
+**测试内容：**
+- ✅ 调节单次升降运动的期望时间，并发送期望移动的相对距离
+- ✅ 以一定速度持续上升与下降测试
+- ✅ 以一定速度持续左转与右转测试
+
+**运行方式：**
+```bash
+conda activate lerobot_ros2
+python examples/test/waist_lifting.py
 ```
 
 ---
