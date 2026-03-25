@@ -57,7 +57,7 @@
 
 **运行方式：**
 ```bash
-conda activate lerobot_ros2
+conda activate fa-ros2
 cd ~/libraries/ros2_robot_interface
 python examples/test_interface.py
 ```
@@ -82,7 +82,7 @@ python examples/test_interface.py
 
 **运行方式：**
 ```bash
-conda activate lerobot_ros2
+conda activate fa-ros2
 cd ~/libraries/ros2_robot_interface
 python examples/test_interface_isaac.py
 ```
@@ -106,7 +106,7 @@ python examples/test_interface_isaac.py
 
 **运行方式：**
 ```bash
-conda activate lerobot_ros2
+conda activate fa-ros2
 cd ~/libraries/ros2_robot_interface
 python examples/test/dual_target_stamped.py
 ```
@@ -130,7 +130,7 @@ python examples/test/dual_target_stamped.py
 
 **运行方式：**
 ```bash
-conda activate lerobot_ros2
+conda activate fa-ros2
 cd ~/libraries/ros2_robot_interface
 python examples/test_arm_joint_movej.py
 ```
@@ -154,7 +154,7 @@ python examples/test_arm_joint_movej.py
 
 **运行方式：**
 ```bash
-conda activate lerobot_ros2
+conda activate fa-ros2
 cd ~/libraries/ros2_robot_interface
 python examples/test/dual_cartesian_path.py
 ```
@@ -192,7 +192,7 @@ python examples/test/dual_cartesian_path.py
 
 **运行方式：**
 ```bash
-conda activate lerobot_ros2
+conda activate fa-ros2
 cd ~/libraries/ros2_robot_interface
 python examples/test_tf_transform.py
 ```
@@ -223,7 +223,7 @@ python examples/test_tf_transform.py
 
 **运行方式：**
 ```bash
-conda activate lerobot_ros2
+conda activate fa-ros2
 cd ~/libraries/ros2_robot_interface
 python examples/test_gripper.py
 ```
@@ -256,7 +256,7 @@ python examples/test_gripper.py
 
 **运行方式：**
 ```bash
-conda activate lerobot_ros2
+conda activate fa-ros2
 cd ~/libraries/ros2_robot_interface
 python examples/test_gripper_position.py
 ```
@@ -288,7 +288,7 @@ python examples/test_gripper_position.py
 
 **运行方式：**
 ```bash
-conda activate lerobot_ros2
+conda activate fa-ros2
 cd ~/libraries/ros2_robot_interface
 python examples/test/check_arrival.py
 ```
@@ -321,7 +321,7 @@ python examples/test/check_arrival.py
 
 **运行方式：**
 ```bash
-conda activate lerobot_ros2
+conda activate fa-ros2
 cd ~/libraries/ros2_robot_interface
 python examples/test_dual_arm_joint_positions.py
 ```
@@ -353,7 +353,7 @@ python examples/test_dual_arm_joint_positions.py
 
 **运行方式：**
 ```bash
-conda activate lerobot_ros2
+conda activate fa-ros2
 cd ~/libraries/ros2_robot_interface
 python examples/fancy/demo_wavearm.py
 ```
@@ -384,7 +384,7 @@ python examples/fancy/demo_wavearm.py
 
 **运行方式：**
 ```bash
-conda activate lerobot_ros2
+conda activate fa-ros2
 cd ~/libraries/ros2_robot_interface
 python examples/fancy/demo_wavehand.py
 ```
@@ -416,7 +416,7 @@ python examples/fancy/demo_wavehand.py
 
 **运行方式：**
 ```bash
-conda activate lerobot_ros2
+conda activate fa-ros2
 cd ~/libraries/ros2_robot_interface
 python examples/fancy/demo_pourbeer_o6.py
 ```
@@ -440,7 +440,7 @@ python examples/fancy/demo_pourbeer_o6.py
 
 **运行方式：**
 ```bash
-conda activate lerobot_ros2
+conda activate fa-ros2
 source ~/ros2_ws/install/setup.bash
 cd ~/libraries/ros2_robot_interface
 python examples/test_movej_with_para.py
@@ -470,7 +470,7 @@ https://github.com/user-attachments/assets/1d24e339-ebff-4b6a-aefe-e2ea927f66b7
 
 **运行方式：**
 ```bash
-conda activate lerobot_ros2
+conda activate fa-ros2
 source ~/ros2_ws/install/setup.bash
 python examples/test/dual_cartesian_execute_path.py
 ```
@@ -488,7 +488,7 @@ python examples/test/dual_cartesian_execute_path.py
 
 **运行方式：**
 ```bash
-conda activate lerobot_ros2
+conda activate fa-ros2
 python examples/test/dual_cartesian_path.py
 ```
 
@@ -504,7 +504,7 @@ python examples/test/dual_cartesian_path.py
 
 **运行方式：**
 ```bash
-conda activate lerobot_ros2
+conda activate fa-ros2
 python examples/test/list_nodes.py
 ```
 
@@ -520,7 +520,7 @@ python examples/test/list_nodes.py
 
 **运行方式：**
 ```bash
-conda activate lerobot_ros2
+conda activate fa-ros2
 python examples/test/list_parameters.py
 ```
 
@@ -537,7 +537,7 @@ python examples/test/list_parameters.py
 
 **运行方式：**
 ```bash
-conda activate lerobot_ros2
+conda activate fa-ros2
 python examples/fancy/demo_wavearm_jointspace.py
 ```
 
@@ -554,7 +554,7 @@ python examples/fancy/demo_wavearm_jointspace.py
 
 **运行方式：**
 ```bash
-conda activate lerobot_ros2
+conda activate fa-ros2
 python examples/test/waist_lifting.py
 ```
 
