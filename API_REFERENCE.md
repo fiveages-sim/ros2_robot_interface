@@ -23,10 +23,17 @@
   - [检查到达](#检查到达-4)
 - [统一接口方法](#统一接口方法)
   - [FSM状态切换](#fsm状态切换)
+  - [FSM状态查询](#fsm状态查询)
   - [关节状态获取](#关节状态获取)
+  - [手部关节控制](#手部关节控制)
   - [末端执行器位姿获取](#末端执行器位姿获取)
+  - [双臂路径与轨迹执行](#双臂路径与轨迹执行)
   - [统一到达检查](#统一到达检查)
+  - [等待到达](#等待到达)
   - [坐标转换](#坐标转换)
+  - [机器人描述与参数查询](#机器人描述与参数查询)
+- [常量 (Constants)](#常量-constants)
+- [运动生成功能 (motion_generation)](#运动生成功能-motion_generation)
 - [快速参考表](#快速参考表)
 - [注意事项](#注意事项)
 
@@ -750,6 +757,34 @@ interface.send_fsm_command(4)
 
 ---
 
+### FSM状态查询
+
+#### `get_fsm_command() -> int`
+
+**功能：** 获取当前 FSM 命令值。
+
+**返回值：**
+- `1`: HOME
+- `2`: HOLD
+- `3`: OCS2
+- `4`: MOVEJ
+
+#### `get_fsm_state() -> str`
+
+**功能：** 获取当前 FSM 状态名。
+
+**返回值：**
+- `"HOME"` / `"HOLD"` / `"OCS2"` / `"MOVEJ"`
+
+**示例：**
+```python
+cmd = interface.get_fsm_command()
+state = interface.get_fsm_state()
+print(f"FSM command={cmd}, state={state}")
+```
+
+---
+
 ### 关节状态获取
 
 #### `get_joint_state(categorized: bool = False) -> Dict[str, Any] | None`
@@ -807,6 +842,29 @@ if categorized_state:
     left_arm_data = categorized_state.get('left_arm', {})
     gripper_data = categorized_state.get('gripper', {})
     head_data = categorized_state.get('head', {})
+```
+
+---
+
+### 手部关节控制
+
+#### `send_left_hand_joint_positions(positions: List[float]) -> None`
+
+**功能：** 发送左手（灵巧手）关节位置命令。
+
+**说明：**
+- 发布到 `left_hand_joint_controller_topic`（自动检测或手动配置）
+- 适用于需要独立控制灵巧手每个关节的位置场景
+
+#### `send_right_hand_joint_positions(positions: List[float]) -> None`
+
+**功能：** 发送右手（灵巧手）关节位置命令（双臂模式）。
+
+**示例：**
+```python
+# 例如每只手 6 个关节
+interface.send_left_hand_joint_positions([0.0, 0.3, 0.5, 0.2, 0.1, 0.0])
+interface.send_right_hand_joint_positions([0.0, 0.3, 0.5, 0.2, 0.1, 0.0])
 ```
 
 ---
@@ -889,6 +947,77 @@ if last_time:
     print(f"距离上次接收: {time_since_last:.2f} 秒")
 else:
     print("未连接或尚未接收到关节状态")
+```
+
+---
+
+### 双臂路径与轨迹执行
+
+#### `send_target_path(left_poses, right_poses, frame_id: Optional[str] = None) -> None`
+
+**功能：** 通过 topic 发送双臂路径（`nav_msgs/Path`）。
+
+**说明：**
+- 要求双臂模式
+- 左右轨迹点数量需要一致（按阶段一一对应）
+- 可传入 `Pose` 或 `PoseStamped`
+- 会清空旧 target 缓存，避免到达判断误判
+
+#### `execute_path(left_poses, right_poses, trajectory_duration: float = 0.0, frame_id: Optional[str] = None) -> bool`
+
+**功能：** 通过 `ExecutePath` service 执行双臂路径并等待服务响应。
+
+**说明：**
+- 不要求左右轨迹点数量一致（支持不等长路径）
+
+**返回值：**
+- `bool`: 服务返回的执行成功标志
+
+**示例：**
+```python
+from geometry_msgs.msg import Pose
+
+def make_pose(x, y, z):
+    p = Pose()
+    p.position.x = x
+    p.position.y = y
+    p.position.z = z
+    p.orientation.w = 1.0
+    return p
+
+# 左右路径点数量可以不一致
+left_poses = [
+    make_pose(0.40, 0.20, 0.30),
+    make_pose(0.45, 0.20, 0.32),
+    make_pose(0.50, 0.20, 0.34),
+]
+right_poses = [
+    make_pose(0.40, -0.20, 0.30),
+    make_pose(0.48, -0.20, 0.33),
+]
+
+ok = interface.execute_path(
+    left_poses=left_poses,
+    right_poses=right_poses,
+    trajectory_duration=2.0,
+    frame_id="arm_base",
+)
+print(f"execute_path success: {ok}")
+```
+
+#### `send_joint_trajectory(joint_names: List[str], waypoints: List[List[float]]) -> None`
+
+**功能：** 发送多路点关节轨迹（`JointTrajectory`），支持单臂/双臂统一接口。
+
+**示例：**
+```python
+# 左臂轨迹示例
+joint_names = ["left_joint1", "left_joint2", "left_joint3", "left_joint4", "left_joint5", "left_joint6", "left_joint7"]
+waypoints = [
+    [0.0, 0.3, -0.2, 0.0, 1.2, 0.0, 0.0],
+    [0.1, 0.4, -0.3, 0.1, 1.1, 0.1, 0.0],
+]
+interface.send_joint_trajectory(joint_names, waypoints)
 ```
 
 ---
@@ -979,6 +1108,34 @@ results = interface.check_arrive(
 # 如果需要自定义手臂或夹爪的阈值，直接调用 handler 的方法
 arm_result = interface.left_arm_handler.check_arrival(pose_threshold=0.05)
 gripper_result = interface.left_gripper_handler.check_arrival(current_position, threshold=0.005)
+```
+
+---
+
+### 等待到达
+
+#### `wait_until_arrive(part: str = "arm", timeout: float = 3.0, poll_period: float = 0.05, position_threshold: Optional[float] = None, ...) -> Dict[str, Any]`
+
+**功能：** 轮询 `check_arrive()` 并在超时前等待指定部分到达目标，替代固定 `sleep`。
+
+**返回值：**
+```python
+{
+    "arrived": bool,
+    "elapsed": float,
+    "result": dict | None
+}
+```
+
+**示例：**
+```python
+wait_result = interface.wait_until_arrive(
+    part="left_arm",
+    timeout=5.0,
+    poll_period=0.05,
+)
+if not wait_result["arrived"]:
+    print(f"超时未到达，耗时: {wait_result['elapsed']:.2f}s")
 ```
 
 ---
@@ -1080,6 +1237,114 @@ target_node = "ros2_robot_interface"
 matching_nodes = [n for n in nodes if target_node in n['name']]
 if matching_nodes:
     print(f"找到节点: {matching_nodes[0]['full_name']}")
+```
+
+---
+
+### 机器人描述与参数查询
+
+#### `get_robot_description() -> Optional[str]`
+
+**功能：** 获取最近一次接收到的 `robot_description`（URDF XML 字符串）。
+
+#### `has_robot_description() -> bool`
+
+**功能：** 判断是否已接收到 `robot_description`。
+
+#### `list_node_parameters(full_node_name: str) -> List[Dict[str, Any]]`
+
+**功能：** 查询指定节点的可动态参数及其信息。
+
+#### `set_node_parameters(full_node_name: str, parameters: Dict[str, Any]) -> bool`
+
+**功能：** 批量设置指定节点参数。
+
+**示例：**
+```python
+node_name = "/my_controller"
+params = interface.list_node_parameters(node_name)
+print(f"可配置参数数量: {len(params)}")
+
+ok = interface.set_node_parameters(node_name, {
+    "trajectory_duration": 2.0,
+    "enable_safety_check": True,
+})
+print(f"参数设置结果: {ok}")
+```
+
+---
+
+## 常量 (Constants)
+
+可直接从包顶层导入 FSM 状态常量：
+
+- `FSM_HOME = 1`
+- `FSM_HOLD = 2`
+- `FSM_OCS2 = 3`
+- `FSM_MOVEJ = 4`
+
+```python
+from ros2_robot_interface import FSM_HOME, FSM_OCS2
+interface.send_fsm_command(FSM_OCS2)
+```
+
+---
+
+## 运动生成功能 (motion_generation)
+
+包顶层已导出可组合的动作序列构建与执行工具，适合 pick/place/handover 这类阶段化任务。
+
+### 主要类型
+
+- `ArmSide`: `LEFT` / `RIGHT`
+- `SendMode`: `UNSTAMPED` / `STAMPED` / `DUAL_ARM_STAMPED`
+- `GripperMode`: `JOINT_POSITION` / `TARGET_COMMAND`
+- `ArmTarget`: 单臂目标（`Pose + gripper`）
+- `StageTarget`: 单阶段目标（可含 left/right）
+
+### 主要函数
+
+- `build_single_arm_pick_sequence(...)`
+- `build_single_arm_place_sequence(...)`
+- `build_single_arm_return_home_sequence(...)`
+- `assign_to_arm(sequence, side)`
+- `compose_bimanual_synchronized_sequence(left_sequence, right_sequence)`
+- `build_handover_sequence(...)`
+- `execute_stage_sequence(interface=..., sequence=..., ...)`
+
+### 示例
+
+```python
+from ros2_robot_interface import (
+    ArmSide,
+    SendMode,
+    GripperMode,
+    build_single_arm_pick_sequence,
+    assign_to_arm,
+    execute_stage_sequence,
+)
+
+pick_seq = build_single_arm_pick_sequence(
+    target_pose=target_pose,
+    approach_clearance=0.12,
+    grasp_clearance=0.02,
+    grasp_orientation=(0.0, 1.0, 0.0, 0.0),
+    gripper_open=1.0,
+    gripper_closed=0.0,
+)
+stages = assign_to_arm(pick_seq, ArmSide.LEFT)
+
+execute_stage_sequence(
+    interface=interface,
+    sequence=stages,
+    send_mode=SendMode.STAMPED,
+    gripper_mode=GripperMode.TARGET_COMMAND,
+    arrival_timeout=3.0,
+    arrival_poll=0.05,
+    time_now_fn=time.monotonic,
+    sleep_fn=time.sleep,
+    gripper_action_wait=0.2,
+)
 ```
 
 ---
