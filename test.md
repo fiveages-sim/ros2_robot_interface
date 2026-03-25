@@ -426,6 +426,34 @@ python examples/fancy/demo_pourbeer_o6.py
 - 使用四元数格式的轨迹点，支持精确的位姿控制
 
 ---
+### 14. `examples/test_movej_with_para.py` - 机器人可以调节参数的movej演示
+**功能：**  机器人关节单点和多点调用movej的service，可以通过msg调整参数
+
+**测试内容：**
+- ✅ 测试单点movej，发送目标点，在非时间模式下，按照最大速度、最大加速度、最大加加速度运动
+- ✅ 测试多点movej，第一个点选择的是非时间模式的参数，第二个点选择的是时间模式，运动时间为5s，没有设置最大速度、最大加速度、最大加加速度参数（会使用程序内部默认的参数比例），第三个点同时设置了时间模式和最大速度、最大加速度、最大加加速度，会使用设置的参数规划，然后进行时间缩放到目标时间，第一个点和第二个点设置了转接比例（0-0.5）会在这两个点进行转接不会停下来，最后一个点的转接比例要设置为0,因为需要停止在这个点
+
+**适用场景：**
+- 需要设置不同参数的movej单点或者多点的情况，多点需要平滑过渡时候
+
+**运行方式：**
+```bash
+conda activate lerobot_ros2
+source ~/ros2_ws/install/setup.bash
+cd ~/libraries/ros2_robot_interface
+python examples/test_movej_with_para.py
+```
+运行效果如下所示：
+
+
+
+
+https://github.com/user-attachments/assets/1d24e339-ebff-4b6a-aefe-e2ea927f66b7
+
+
+
+
+---
 
 ### 14. `examples/test/dual_cartesian_execute_path.py` - ExecutePath 不对称轨迹测试
 
