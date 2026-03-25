@@ -557,8 +557,15 @@ python examples/fancy/demo_wavearm_jointspace.py
 conda activate fa-ros2
 python examples/test/waist_lifting.py
 ```
+运行效果如下所示：
+
+https://github.com/user-attachments/assets/a0bbc49a-6443-405d-99b3-d6ae84a00de3
 
 ---
+
+
+
+
 
 ## 🔗 相关文档
 
