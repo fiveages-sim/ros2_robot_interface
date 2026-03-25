@@ -57,6 +57,7 @@ class ROS2RobotInterface:
         self.joint_state_sub: Subscription | None = None
         self.fsm_command_sub: Subscription | None = None
         self.robot_description_sub: Subscription | None = None
+        self.body_current_target_sub: Subscription | None = None
         self.target_path_pub: Publisher | None = None
         self.execute_path_client: Client | None = None
         self.dual_target_stamped_pub: Publisher | None = None
@@ -67,6 +68,9 @@ class ROS2RobotInterface:
         self.right_hand_joint_controller_pub: Publisher | None = None
         self.arm_trajectory_pub: Publisher | None = None  # Unified trajectory publisher for both arms
         self.unified_arm_joint_controller_pub: Publisher | None = None  # Unified joint position publisher for both arms
+
+        self.waist_lifting_command_pub: Publisher | None = None
+        self.waist_turning_command_pub: Publisher | None = None
 
         self.latest_joint_state: Dict[str, Any] | None = None
         self.latest_categorized_joint_state: Dict[str, Any] | None = None  # Cached categorized state
@@ -85,6 +89,7 @@ class ROS2RobotInterface:
         
         self.head_target_positions: Optional[List[float]] = None
         self.body_target_positions: Optional[List[float]] = None
+        self.body_current_target: Optional[List[float]] = None
         
         self.tf_buffer: Optional[tf2_ros.Buffer] = None
         self.tf_listener: Optional[tf2_ros.TransformListener] = None
@@ -185,6 +190,18 @@ class ROS2RobotInterface:
         
         if "/body_joint_controller/target_joint_position" in topic_names:
             self.config.body_joint_controller_topic = "/body_joint_controller/target_joint_position"
+
+        if "/body_joint_controller/current_target_joint" in topic_names:
+            self.config.body_joint_current_target_topic = "/body_joint_controller/current_target_joint"
+
+        if "/body_joint_controller/waist_lifting" in topic_names:
+            self.config.waist_lifting_topic = "/body_joint_controller/waist_lifting"
+
+        if "/body_joint_controller/waist_lifting_command" in topic_names:
+            self.config.waist_lifting_command_topic = "/body_joint_controller/waist_lifting_command"
+
+        if "/body_joint_controller/waist_turning_command" in topic_names:
+            self.config.waist_turning_command_topic = "/body_joint_controller/waist_turning_command"
         
         # 检测灵巧手关节控制器 topic
         if "/left_hand_controller/target_joint_position" in topic_names:
@@ -286,6 +303,16 @@ class ROS2RobotInterface:
                 robot_desc_qos
             )
             logger.info("✅ Subscribed to /robot_description for URDF tracking")
+
+            if self.config.body_joint_current_target_topic:
+                # Subscribe to current target body joints
+                self.body_current_target_sub = self.robot_node.create_subscription(
+                    Float64MultiArray,
+                    self.config.body_joint_current_target_topic,
+                    self._body_current_target_callback,
+                    10
+                )
+                logger.info("✅ Subscribed to {} for body target tracking".format(self.config.body_joint_current_target_topic))
             
             # Initialize TF buffer first (needed by ArmHandler)
             self.tf_buffer = tf2_ros.Buffer()
@@ -353,6 +380,21 @@ class ROS2RobotInterface:
             if self.config.body_joint_controller_topic:
                 self.body_joint_controller_pub = self.robot_node.create_publisher(
                     Float64MultiArray, self.config.body_joint_controller_topic, 10
+                )
+
+            if self.config.waist_lifting_topic:
+                self.waist_lifting_pub = self.robot_node.create_publisher(
+                    Float64, self.config.waist_lifting_topic, 10
+                )
+
+            if self.config.waist_lifting_command_topic:
+                self.waist_lifting_command_pub = self.robot_node.create_publisher(
+                    Float64, self.config.waist_lifting_command_topic, 10
+                )
+
+            if self.config.waist_turning_command_topic:
+                self.waist_turning_command_pub = self.robot_node.create_publisher(
+                    Float64, self.config.waist_turning_command_topic, 10
                 )
             
             if self.config.left_hand_joint_controller_topic:
@@ -436,6 +478,14 @@ class ROS2RobotInterface:
         except Exception as e:
             logger.error(f"Error in robot description callback: {e}", exc_info=True)
     
+    def _body_current_target_callback(self, msg: Float64MultiArray) -> None:
+        """Callback for body current target joint messages."""
+        try:
+            self.body_current_target = list(msg.data) if msg.data else None
+            logger.debug(f"Body current target updated: {self.body_current_target}")
+        except Exception as e:
+            logger.error(f"Error in body current target callback: {e}", exc_info=True)
+
     def _joint_state_callback(self, msg: JointState) -> None:
         """Callback for joint state messages."""
         current_time = time.time()
@@ -653,6 +703,12 @@ class ROS2RobotInterface:
             return None
 
         return self.right_arm_handler.get_pose()
+    
+    def get_body_current_target(self) -> Optional[List[float]]:
+        """Get latest body current target."""
+        if self.body_current_target is None:
+            return None
+        return list(self.body_current_target)
 
     def send_end_effector_target(self, pose: Pose) -> None:
         """Send a target pose for the left arm end-effector."""
@@ -963,6 +1019,52 @@ class ROS2RobotInterface:
         logger.debug(f"Published body joint positions: {positions}")
         
         self.body_target_positions = positions.copy() if positions else None
+
+    def send_waist_lifting_relative_position(self, position: float) -> None:
+        """Send target relative position for waist lifting."""
+        if not self.is_connected:
+            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+        
+        if self.waist_lifting_pub is None:
+            logger.warning("Waist lifting publisher not initialized. Set waist_lifting_topic in config.")
+            return
+        
+        msg = Float64()
+        msg.data = position
+        self.waist_lifting_pub.publish(msg)
+        logger.debug(f"Published waist lifting relative position: {position}")
+
+    def send_waist_lifting_velocity_scale(self, velocity_scale: float) -> None:
+        """Send target velocity for waist lifting."""
+        if not self.is_connected:
+            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+        
+        if self.waist_lifting_pub is None:
+            logger.warning("Waist lifting publisher not initialized. Set waist_lifting_command_topic in config.")
+            return
+        
+        velocity_scale = max(min(velocity_scale, 1),-1)
+        
+        msg = Float64()
+        msg.data = velocity_scale
+        self.waist_lifting_command_pub.publish(msg)
+        logger.debug(f"Published waist lifting velocity_scale: {velocity_scale}")
+
+    def send_waist_turning_velocity_scale(self, velocity_scale: float) -> None:
+        """Send target velocity for waist turning."""
+        if not self.is_connected:
+            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+        
+        if self.waist_lifting_pub is None:
+            logger.warning("Waist turning publisher not initialized. Set waist_turning_command_topic in config.")
+            return
+        
+        velocity_scale = max(min(velocity_scale, 1),-1)
+        
+        msg = Float64()
+        msg.data = velocity_scale
+        self.waist_turning_command_pub.publish(msg)
+        logger.debug(f"Published waist turning velocity_scale: {velocity_scale}")
     
     def send_left_hand_joint_positions(self, positions: List[float]) -> None:
         """Send target joint positions for left hand joints."""
@@ -1497,6 +1599,10 @@ class ROS2RobotInterface:
         if self.robot_description_sub:
             self.robot_description_sub.destroy()
             self.robot_description_sub = None
+
+        if self.body_current_target_sub:
+            self.body_current_target_sub.destroy()
+            self.body_current_target_sub = None
         
         # Cleanup arm handlers
         if self.left_arm_handler:
@@ -1551,6 +1657,14 @@ class ROS2RobotInterface:
         if self.unified_arm_joint_controller_pub:
             self.unified_arm_joint_controller_pub.destroy()
             self.unified_arm_joint_controller_pub = None
+
+        if self.waist_lifting_command_pub:
+            self.waist_lifting_command_pub.destroy()
+            self.waist_lifting_command_pub = None
+
+        if self.waist_turning_command_pub:
+            self.waist_turning_command_pub.destroy()
+            self.waist_turning_command_pub = None
 
         if self.robot_node:
             self.robot_node.destroy_node()
