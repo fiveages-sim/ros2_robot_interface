@@ -96,7 +96,7 @@ def main():
 
     # 发送腰部上升0.1m指令
     print("-" * 70)
-    print("[9] 发送腰部上升0.1m指令")
+    print("[9] 发送腰部上升0.1m指令, 并设置单次升降运动时间为10.0s, 缓慢上升")
     print("-" * 70)
     try:
         success = interface.set_node_parameters(
@@ -117,7 +117,7 @@ def main():
 
     # 发送腰部下降0.1m指令
     print("-" * 70)
-    print("[10] 发送腰部下降0.1m指令")
+    print("[10] 发送腰部下降0.1m指令, 并设置单次升降运动时间为3.0s, 较快速下降")
     print("-" * 70)
     try:
         success = interface.set_node_parameters(
