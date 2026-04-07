@@ -73,9 +73,18 @@ class GripperHandler:
         self.position_history: list[float] = []
         self.is_open: bool = False  # 开关状态：True=打开, False=关闭（用于target_command）
         
+        # 根据夹爪类型确定 target_percent 话题名称
+        if gripper_type == GripperType.LEFT:
+            self.target_percent_topic = config.left_gripper_target_percent_topic
+        else:  # RIGHT
+            self.target_percent_topic = config.right_gripper_target_percent_topic
+
         # Publisher（位置控制 - 保留原有功能）
         self.command_pub: Optional[Publisher] = None
-        
+
+        # Publisher（百分比控制）
+        self.target_percent_pub: Optional[Publisher] = None
+
         # Publisher 和 Subscription（开关控制 - 新功能）
         self.target_command_pub: Optional[Publisher] = None
         self.target_command_sub: Optional[Subscription] = None
@@ -108,7 +117,47 @@ class GripperHandler:
             self._target_command_callback, 10
         )
         logger.debug(f"{self.label}: Created target_command subscription for state sync")
+
+        # 创建百分比控制发布器（如果话题存在）
+        if self.target_percent_topic:
+            self.target_percent_pub = self.node.create_publisher(
+                Float64, self.target_percent_topic, 10
+            )
+            logger.debug(f"{self.label}: Created target_percent publisher for {self.target_percent_topic}")
     
+    def send_position_percent(self, percent: float) -> None:
+        """发送夹爪百分比控制命令
+
+        Args:
+            percent: 目标百分比，范围 0.0（完全关闭）~ 1.0（完全打开）
+
+        Raises:
+            ValueError: 如果 percent 不在 [0.0, 1.0] 范围内
+            ROS2NotConnectedError: 如果发布器未初始化（话题未检测到）
+        """
+        percent = float(percent)
+        if not (0.0 <= percent <= 1.0):
+            raise ValueError(f"{self.label}: Invalid percent {percent}, must be in [0.0, 1.0]")
+
+        if self.target_percent_pub is None:
+            raise ROS2NotConnectedError(
+                f"{self.label} target_percent publisher not initialized "
+                f"(topic not detected: {self.target_percent_topic})"
+            )
+
+        # 换算为实际行程位置并更新目标，清空历史记录（与 send_joint_positions 一致）
+        actual_position = (
+            self.config.gripper_min_position
+            + percent * (self.config.gripper_max_position - self.config.gripper_min_position)
+        )
+        self.target_position = actual_position
+        self.position_history.clear()
+
+        msg = Float64()
+        msg.data = percent
+        self.target_percent_pub.publish(msg)
+        logger.debug(f"Published {self.label.lower()} target_percent: {percent} (actual position: {actual_position:.4f})")
+
     def send_joint_positions(self, position: float) -> None:
         """发送夹爪关节位置命令
         
@@ -253,6 +302,9 @@ class GripperHandler:
         if self.command_pub:
             self.command_pub.destroy()
             self.command_pub = None
+        if self.target_percent_pub:
+            self.target_percent_pub.destroy()
+            self.target_percent_pub = None
         if self.target_command_pub:
             self.target_command_pub.destroy()
             self.target_command_pub = None

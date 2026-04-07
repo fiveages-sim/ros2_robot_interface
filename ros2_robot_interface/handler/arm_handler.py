@@ -172,31 +172,52 @@ class ArmHandler:
         self.target_pub.publish(pose)
         logger.debug(f"Published {self.label.lower()} target: {pose}")
     
-    def send_target_stamped(self, frame_id: str, pose: Pose) -> None:
+    def send_target_stamped(self, frame_id: str | Pose | None = None, pose: Optional[Pose] = None) -> None:
         """发送带坐标系的目标 pose
         
         Args:
-            frame_id: 坐标系 ID
-            pose: 目标 pose
+            frame_id: 坐标系 ID；也可省略，此时会回退到最近订阅到的 self.frame_id
+            pose: 目标 pose；也支持使用 send_target_stamped(pose) 的调用形式
             
         Raises:
             ROS2NotConnectedError: 如果发布器未初始化
+            ValueError: 如果未提供可用的 frame_id，或未提供 pose
         """
         if self.target_stamped_pub is None:
             raise ROS2NotConnectedError(f"{self.label} target stamped publisher not initialized")
+
+        # 兼容两种调用方式：
+        # 1. send_target_stamped("frame_id", pose)
+        # 2. send_target_stamped(pose)
+        if isinstance(frame_id, Pose):
+            if pose is not None:
+                raise ValueError(f"{self.label}: pose provided twice in send_target_stamped()")
+            pose = frame_id
+            frame_id = None
+
+        if pose is None:
+            raise ValueError(f"{self.label}: pose is required in send_target_stamped()")
+
+        resolved_frame_id = frame_id if isinstance(frame_id, str) and frame_id else self.frame_id
+        if not resolved_frame_id:
+            raise ValueError(
+                f"{self.label}: frame_id is required because no default frame_id is available yet"
+            )
         
         # 清除旧的 current target，避免在收到新目标前误判为已到达
         self.latest_target_pose = None
         
         # 创建 PoseStamped 消息
         pose_stamped = PoseStamped()
-        pose_stamped.header.frame_id = frame_id
+        pose_stamped.header.frame_id = resolved_frame_id
         pose_stamped.header.stamp = self.node.get_clock().now().to_msg()
         pose_stamped.pose = pose
         
         # 发布
         self.target_stamped_pub.publish(pose_stamped)
-        logger.debug(f"Published {self.label.lower()} target (stamped) in frame '{frame_id}': {pose}")
+        logger.debug(
+            f"Published {self.label.lower()} target (stamped) in frame '{resolved_frame_id}': {pose}"
+        )
     
     def get_target_pose(self) -> Optional[Pose]:
         if not self.current_target_topic:

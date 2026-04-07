@@ -225,7 +225,7 @@ python examples/test_tf_transform.py
 ```bash
 conda activate fa-ros2
 cd ~/libraries/ros2_robot_interface
-python examples/test_gripper.py
+python examples/test_gripper_command.py
 ```
 
 **注意事项：**
