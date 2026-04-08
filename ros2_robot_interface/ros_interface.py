@@ -331,7 +331,8 @@ class ROS2RobotInterface:
                 self.robot_node,
                 ArmType.LEFT,
                 self.config,
-                self.send_fsm_command
+                self.send_fsm_command,
+                self.get_fsm_command,
             )
             self.left_arm_handler.initialize()
             
@@ -341,7 +342,8 @@ class ROS2RobotInterface:
                     self.robot_node,
                     ArmType.RIGHT,
                     self.config,
-                    self.send_fsm_command
+                    self.send_fsm_command,
+                    self.get_fsm_command,
                 )
                 self.right_arm_handler.initialize()
                 self.target_path_pub = self.robot_node.create_publisher(Path, "/target_path", 10)
