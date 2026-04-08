@@ -35,7 +35,20 @@ def wait_for_arrival(handler, max_wait: float, interval: float, threshold: float
     while time.time() - start < max_wait:
         result = handler.check_arrival(pose_threshold=threshold)
         if result["arrived"]:
-            print(f"  ✓ 已到达目标（耗时 {time.time() - start:.1f}s）")
+            elapsed = time.time() - start
+            print(f"  ✓ 已到达目标（耗时 {elapsed:.1f}s）")
+            current_pose = handler.get_pose()
+            target_pose = handler.get_target_pose()
+            if current_pose:
+                print(
+                    f"    当前位姿: ({current_pose.position.x:.3f}, "
+                    f"{current_pose.position.y:.3f}, {current_pose.position.z:.3f})"
+                )
+            if target_pose:
+                print(
+                    f"    目标位姿: ({target_pose.position.x:.3f}, "
+                    f"{target_pose.position.y:.3f}, {target_pose.position.z:.3f})"
+                )
             return True
         time.sleep(interval)
 
