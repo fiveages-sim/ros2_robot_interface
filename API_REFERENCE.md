@@ -301,9 +301,10 @@ while True:
 **参数：**
 - `left_pose` (Pose): 左臂目标 pose（在 `frame_id` 指定的坐标系下）
 - `right_pose` (Pose): 右臂目标 pose（在 `frame_id` 指定的坐标系下）
-- `frame_id` (str): 坐标系 ID，默认 "arm_base"
+- `frame_id` (str, 可选): 坐标系 ID；省略时默认 `"arm_base"`（见下方说明）
 
 **说明：**
+- **坐标系默认值**：不传 `frame_id` 时默认使用 `"arm_base"`。若你的机器人 TF 或末端位姿话题中**没有**名为 `arm_base` 的坐标系，必须显式传入与实际一致的 `frame_id`（例如与 `left_arm_handler.get_frame_id()` 或当前 pose 消息的 `header.frame_id` 一致）。
 - 发布到 `/dual_target/stamped` topic（使用 `nav_msgs/Path` 消息类型，包含2个 `PoseStamped`：第一个是左臂，第二个是右臂）
 - **内部实现**：直接发布到 `/dual_target/stamped` topic，不调用 handler 的方法
 - 目标位姿会通过话题订阅获取（`/left_current_target` 和 `/right_current_target`），用于到达判断
