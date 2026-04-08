@@ -259,6 +259,7 @@ class ArmHandler:
         
         # 发送 FSM 命令切换到 MOVEJ 状态
         try:
+            self.fsm_command_callback(2)
             self.fsm_command_callback(4)
             logger.debug(f"{self.label}: Automatically switched to MOVEJ state for arm joint control")
             # 注意：状态切换是异步的，如果需要确保状态切换完成后再发送关节位置，
