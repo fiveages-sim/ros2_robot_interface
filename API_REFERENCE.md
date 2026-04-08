@@ -41,7 +41,7 @@
 
 ## 手臂控制 (Arm Handler)
 
-手臂控制通过 `left_arm_handler` 和 `right_arm_handler` 访问。
+手臂控制统一通过 `left_arm_handler` 和 `right_arm_handler` 访问。
 
 ### 访问方式
 
@@ -57,67 +57,77 @@ interface.right_arm_handler
 
 ### 发送命令
 
-#### `send_target_stamped(frame_id: str, pose: Pose) -> None` ⭐ **推荐使用**
 
-**功能：** 发送带坐标系的目标 pose（推荐使用）
+https://github.com/user-attachments/assets/f7fef847-4e6d-4905-93cb-176b4fc81c34
+
+
+#### `send_target_stamped(frame_id: Optional[str] = None, pose: Optional[Pose] = None) -> None` ⭐ 推荐使用
+
+**功能：** 发送带坐标系信息的目标位姿。
 
 **参数：**
-- `frame_id` (str): 坐标系 ID（如 `"arm_base"`, `"base_link"`, `"head_link2"`, `"left_eef"`, `"left_link6"` 等）
-- `pose` (Pose): 目标 pose 对象（在 `frame_id` 指定的坐标系下）
+- `frame_id` (`Optional[str]`): 目标位姿所在坐标系，如 `arm_base`、`base_link`、`head_link2`、`left_eef`；可省略，省略时回退到最近订阅到的 `self.frame_id`
+- `pose` (`Optional[Pose]`): 目标位姿
 
-**说明：**
-- 发布到 `/left_target/stamped` 或 `/right_target/stamped` topic
-- **会自动进行 TF 坐标转换**到 `base_frame`
-- 如果 `frame_id` 与 `base_frame` 不同，会自动转换
-- 目标位姿会通过话题订阅获取（`/left_current_target` 或 `/right_current_target`），用于到达判断
-
+**特点：**
+- 发布到 `/left_target/stamped` 或 `/right_target/stamped`
+- 会自动做 TF 变换，统一转换到 `base_frame`
+- 适合跨坐标系目标和相对位姿控制
+- 目标位姿后续会通过 `/left_current_target` 或 `/right_current_target` 订阅回来，用于到位判断
+- 兼容两种调用方式：`send_target_stamped("frame_id", pose)` 和 `send_target_stamped(pose)`
+- 如果省略 `frame_id` 且当前还没有可用的默认 `self.frame_id`，会抛出 `ValueError`
 
 **示例：**
 ```python
 from geometry_msgs.msg import Pose
 
-# 场景1：使用其他坐标系（如 head_link2）
+# 使用其他坐标系
 target_pose = Pose()
-target_pose.position.x = 0.5  # 在 head_link2 坐标系下
+target_pose.position.x = 0.5
 target_pose.position.y = 0.0
 target_pose.position.z = 0.3
 target_pose.orientation.w = 1.0
 interface.left_arm_handler.send_target_stamped("head_link2", target_pose)
 
-# 场景2：相对运动（使用末端执行器坐标系 left_eef）
+# 使用末端坐标系做相对运动
 relative_pose = Pose()
-relative_pose.position.x = 0.15   # 相对于当前末端向前 0.15m
+relative_pose.position.x = 0.15
 relative_pose.position.y = 0.0
 relative_pose.position.z = 0.0
 relative_pose.orientation.w = 1.0
 interface.left_arm_handler.send_target_stamped("left_eef", relative_pose)
+
+# 如果已经收到过 pose 订阅并缓存了 self.frame_id，也可以省略 frame_id
+interface.left_arm_handler.send_target_stamped(relative_pose)
 ```
 
 ---
 
+
+https://github.com/user-attachments/assets/b80e994e-e374-4580-b947-769c8c169ba2
+
+
 #### `send_target(pose: Pose) -> None`
 
-**功能：** 发送目标 pose（不带坐标系信息）
+**功能：** 发送不带坐标系信息的目标位姿。
 
 **参数：**
-- `pose` (Pose): 目标 pose 对象（应在 `base_frame` 坐标系下）
+- `pose` (`Pose`): 已经位于 `base_frame` 坐标系下的目标位姿
 
-**说明：**
-- 直接发布到 `/left_target` 或 `/right_target` topic
-- **不进行 TF 坐标转换**，假设传入的 pose 已经在 `base_frame` 坐标系下
-- 目标位姿会通过话题订阅获取（`/left_current_target` 或 `/right_current_target`），用于到达判断
+**特点：**
+- 直接发布到 `/left_target` 或 `/right_target`
+- 不做 TF 变换
+- 只适合你已经明确知道目标位姿就在 `base_frame` 下的场景
 
-**注意事项：**
-- ⚠️ 需要确保传入的 pose 在正确的坐标系下（`base_frame`）
-- ⚠️ 不支持其他坐标系，如果 pose 在其他坐标系下，应使用 `send_target_stamped()`
+**注意：**
+- 如果目标位姿不在 `base_frame` 下，应使用 `send_target_stamped()`
 
 **示例：**
 ```python
 from geometry_msgs.msg import Pose
 
-# 场景：目标位姿已经在 arm_base 坐标系下
 target_pose = Pose()
-target_pose.position.x = 0.5  # 在 arm_base 坐标系下
+target_pose.position.x = 0.5
 target_pose.position.y = 0.0
 target_pose.position.z = 0.3
 target_pose.orientation.w = 1.0
@@ -127,26 +137,28 @@ interface.left_arm_handler.send_target(target_pose)
 
 ---
 
+
+https://github.com/user-attachments/assets/eed9c1d2-6d9d-4c84-9152-1a9a472440a6
+
+
 #### `send_joint_positions(positions: List[float]) -> None`
 
-**功能：** 发送关节位置命令（MoveJ 模式）
+**功能：** 发送关节位置命令（MoveJ）。
 
 **参数：**
-- `positions` (List[float]): 目标关节位置列表（弧度）
+- `positions` (`List[float]`): 目标关节角列表，单位为弧度
 
-**说明：**
-- 自动切换到 MOVEJ 状态（FSM 命令 4）
-- 使用初始化时传入的 FSM 命令回调函数（在 `ROS2RobotInterface` 中自动配置）
-- 发布到关节控制器 topic（如 `/ocs2_wbc_controller/target_joint_position/left`）
-- 关节数量必须与配置一致
+**特点：**
+- 会自动切换到 MOVEJ 状态（FSM 命令 4）
+- 发布到对应关节控制器话题，如 `/ocs2_wbc_controller/target_joint_position/left`
+- 关节数量必须与当前配置一致
 
-**Raises:**
-- `ROS2NotConnectedError`: 如果发布器未初始化
-- `ValueError`: 如果初始化时未提供 FSM 命令回调函数
+**异常：**
+- `ROS2NotConnectedError`: 发布器未初始化
+- `ValueError`: 初始化时未提供 FSM 命令回调函数
 
 **示例：**
 ```python
-# 发送6个关节的位置（弧度）
 joint_positions = [0.0, 0.5, -1.57, 0.0, 1.57, 0.0]
 interface.left_arm_handler.send_joint_positions(joint_positions)
 ```
@@ -155,114 +167,123 @@ interface.left_arm_handler.send_joint_positions(joint_positions)
 
 ### 获取状态
 
-#### `get_pose() -> Optional[Pose]` ⭐ **最常用**
+#### `get_pose() -> Optional[Pose]` ⭐ 最常用
 
-**功能：** 获取当前 end-effector 的 pose（位置和姿态）
+**功能：** 获取当前末端执行器实际位姿。
 
 **返回值：**
-- `Pose` 对象：包含当前位置和姿态（在 `base_frame` 坐标系下）
-- `None`：如果数据过期或不存在
+- `Pose`：当前位置和姿态，位于 `base_frame` 坐标系下
+- `None`：数据不存在、过期或暂不可用
 
-**使用场景：**
-- **状态监控**：获取机器人末端执行器的当前实际位姿，用于显示或记录
-- **初始位姿保存**：保存初始位姿，用于后续计算相对运动
-- **内部调用**：`check_arrival()` 内部会调用此函数获取当前位姿进行比较
+**适用场景：**
+- 实时状态监控
+- 保存初始位姿，用于后续相对运动
+- 配合 `check_arrival()` 观察当前状态
 
 **示例：**
 ```python
-# 场景1：获取当前位姿用于显示
 current_pose = interface.left_arm_handler.get_pose()
 if current_pose:
     print(f"当前位置: ({current_pose.position.x}, {current_pose.position.y}, {current_pose.position.z})")
-    print(f"姿态: ({current_pose.orientation.x}, {current_pose.orientation.y}, {current_pose.orientation.z}, {current_pose.orientation.w})")
-
-# 场景2：保存初始位姿，用于后续计算相对运动
-left_initial_pose = interface.left_arm_handler.get_pose()
-# 然后基于初始位姿计算目标位姿
+    print(
+        f"姿态: ({current_pose.orientation.x}, {current_pose.orientation.y}, "
+        f"{current_pose.orientation.z}, {current_pose.orientation.w})"
+    )
 ```
 
 ---
 
 #### `get_target_pose() -> Optional[Pose]`
 
-**功能：** 获取当前设置的目标 pose
+**功能：** 获取当前目标位姿。
 
 **返回值：**
-- `Pose` 对象：目标位置和姿态（在 `base_frame` 坐标系下）
-- `None`：如果未设置目标或数据不可用
+- `Pose`：当前目标位姿，位于 `base_frame` 坐标系下
+- `None`：尚未设置目标，或未配置目标位姿订阅话题
 
 **说明：**
-- 从话题订阅获取目标位置（`/left_current_target` 或 `/right_current_target`）
-- 如果未配置目标位置话题，返回 `None`
-
-**使用场景：**
-- **查询目标**：查询当前的目标位姿（从话题订阅获取）
-- **调试验证**：验证目标位姿是否正确设置
-- **内部调用**：`check_arrival()` 内部会调用此函数获取目标位姿进行比较
+- 目标位姿来自 `/left_current_target` 或 `/right_current_target`
+- 常用于调试目标是否已正确下发
+- `check_arrival()` 内部也会使用这个目标位姿进行比较
 
 **示例：**
 ```python
-# 场景1：查询当前目标位姿
 target_pose = interface.left_arm_handler.get_target_pose()
 if target_pose:
     print(f"目标位置: ({target_pose.position.x}, {target_pose.position.y}, {target_pose.position.z})")
+else:
+    print("未设置目标位姿或目标位姿话题未配置")
+```
 
-# 场景2：验证目标是否已设置
-target_pose = interface.left_arm_handler.get_target_pose()
-if target_pose is None:
-    print("警告：未设置目标位姿或目标位置话题未配置")
+---
+
+#### `get_frame_id() -> Optional[str]`
+
+**功能：** 获取当前目标位姿对应的 `frame_id`。
+
+**返回值：**
+- `str`：当前目标位姿的坐标系 ID
+- `None`：未配置目标位姿订阅话题
+
+**说明：**
+- 该值与 `get_target_pose()` 配套使用
+- 常用于确认目标位姿最终使用的是哪个参考坐标系
+- 记录数据时也可以一起保存
+
+**示例：**
+```python
+frame_id = interface.left_arm_handler.get_frame_id()
+if frame_id is not None:
+    print(f"当前目标 frame_id: {frame_id}")
+else:
+    print("未配置目标位姿订阅话题，无法获取 frame_id")
 ```
 
 ---
 
 ### 检查到达
 
-#### `check_arrival(pose_threshold: float | None = None, orient_threshold: float | None = None) -> Dict[str, Any]` ⭐ **最常用**
+#### `check_arrival(pose_threshold: float | None = None, orient_threshold: float | None = None) -> Dict[str, Any]` ⭐ 最常用
 
-**功能：** 检查手臂是否到达目标位置
+**功能：** 检查手臂是否到达目标位姿。
 
 **参数：**
-- `pose_threshold` (float | None): 位置距离阈值（米），如果为 None 则使用 `config.pose_position_threshold`（默认 0.05）
-- `orient_threshold` (float | None): 姿态距离阈值，如果为 None 则使用 `config.pose_orientation_threshold`（默认 0.1）
+- `pose_threshold` (float | None): 位置距离阈值，单位米；为 `None` 时使用 `config.pose_position_threshold`
+- `orient_threshold` (float | None): 姿态距离阈值；为 `None` 时使用 `config.pose_orientation_threshold`
 
 **返回值：**
 ```python
 {
-    'arrived': bool,              # 是否到达目标位置
-    'distance': float,            # 总距离（位置 + 姿态）
-    'position_distance': float,   # 位置距离（米）
-    'orientation_distance': float,# 姿态距离
-    'status_message': str         # 状态消息
+    "arrived": bool,
+    "distance": float,
+    "position_distance": float,
+    "orientation_distance": float,
+    "status_message": str,
 }
 ```
 
-**说明：**
-- **内部调用**：自动调用 `get_pose()` 获取当前位姿，调用 `get_target_pose()` 获取目标位姿（从话题订阅）
-- **坐标系一致性**：比较的两个位姿都在 `base_frame` 坐标系下
-  - `get_pose()` 返回的是 `base_frame` 下的当前位姿
-  - `get_target_pose()` 返回的是 `base_frame` 下的目标位姿（从 `/left_current_target` 或 `/right_current_target` 话题订阅获取）
-- **位置距离**：欧氏距离（米）
-- **姿态距离**：基于四元数的点积计算
-- **默认阈值**：如果未指定参数，使用配置中的默认值（`config.pose_position_threshold` 和 `config.pose_orientation_threshold`）
-- **会打印详细的检查信息**
+**特点：**
+- 内部会自动读取当前位姿 `get_pose()` 和目标位姿 `get_target_pose()`
+- 比较的两个位姿都在 `base_frame` 下
+- 位置距离为欧氏距离，姿态距离基于四元数计算
+- 若未传阈值，则使用配置中的默认阈值
 
 **示例：**
 ```python
-# 场景1：使用默认阈值
+# 使用默认阈值
 result = interface.left_arm_handler.check_arrival()
-if result['arrived']:
+if result["arrived"]:
     print("手臂已到达目标位置")
 
-# 场景2：使用自定义阈值
+# 使用自定义阈值
 result = interface.left_arm_handler.check_arrival(
-    pose_threshold=0.05,      # 5厘米
-    orient_threshold=0.08     # 更严格的姿态要求
+    pose_threshold=0.05,
+    orient_threshold=0.08,
 )
 print(f"位置距离: {result['position_distance']:.4f} 米")
 print(f"姿态距离: {result['orientation_distance']:.4f}")
 
-# 场景3：完整的工作流程
-# 1. 发送目标（使用 send_target_stamped，自动转换到 base_frame）
+# 一个完整流程
 target_pose = Pose()
 target_pose.position.x = 0.15
 target_pose.position.y = 0.0
@@ -270,10 +291,9 @@ target_pose.position.z = 0.0
 target_pose.orientation.w = 1.0
 interface.left_arm_handler.send_target_stamped("left_eef", target_pose)
 
-# 2. 等待到达（内部会调用 get_pose() 和 get_target_pose()）
 while True:
     result = interface.left_arm_handler.check_arrival()
-    if result['arrived']:
+    if result["arrived"]:
         print("到达目标！")
         break
     print(f"距离目标: {result['position_distance']:.4f} 米")
@@ -293,9 +313,10 @@ while True:
 **参数：**
 - `left_pose` (Pose): 左臂目标 pose（在 `frame_id` 指定的坐标系下）
 - `right_pose` (Pose): 右臂目标 pose（在 `frame_id` 指定的坐标系下）
-- `frame_id` (str): 坐标系 ID，默认 "arm_base"
+- `frame_id` (str, 可选): 坐标系 ID；省略时默认 `"arm_base"`（见下方说明）
 
 **说明：**
+- **坐标系默认值**：不传 `frame_id` 时默认使用 `"arm_base"`。若你的机器人 TF 或末端位姿话题中**没有**名为 `arm_base` 的坐标系，必须显式传入与实际一致的 `frame_id`（例如与 `left_arm_handler.get_frame_id()` 或当前 pose 消息的 `header.frame_id` 一致）。
 - 发布到 `/dual_target/stamped` topic（使用 `nav_msgs/Path` 消息类型，包含2个 `PoseStamped`：第一个是左臂，第二个是右臂）
 - **内部实现**：直接发布到 `/dual_target/stamped` topic，不调用 handler 的方法
 - 目标位姿会通过话题订阅获取（`/left_current_target` 和 `/right_current_target`），用于到达判断
@@ -377,13 +398,30 @@ interface.send_dual_arm_joint_positions(left_positions, right_positions)
 
 夹爪控制通过 `left_gripper_handler` 和 `right_gripper_handler` 访问。
 
+> ⚠️ **重要：使用夹爪前必须正确配置行程范围**
+>
+> `ROS2RobotInterfaceConfig` 中的以下两个参数必须根据实际硬件设置，默认值仅为示例：
+>
+> ```python
+> config.gripper_min_position = 0.0
+> config.gripper_max_position = 0.0384
+> ```
+>
+> 这两个值会直接影响：
+> 1. `send_joint_positions()` 的位置限幅
+> 2. `send_position_percent()` 的百分比到实际行程换算
+> 3. `get_target_position()` 的内部目标值
+> 4. `check_arrival()`         的到位检测结果
+>
+> 不同夹爪型号的行程范围差异较大，请在使用前替换为实测值。
+
 ### 访问方式
 
 ```python
-# 左夹爪（如果启用）
+# 左夹爪（单臂模式下也使用这个）
 interface.left_gripper_handler
 
-# 右夹爪（双臂模式，如果启用）
+# 右夹爪（仅双臂模式）
 interface.right_gripper_handler
 ```
 
@@ -391,29 +429,35 @@ interface.right_gripper_handler
 
 ### 发送命令
 
-#### `send_target_command(target_value: int) -> None` ⭐ **推荐使用**
 
-**功能：** 发送夹爪开关控制命令（开关控制方式，使用 `target_command` 话题）
+https://github.com/user-attachments/assets/16c98f20-b795-4ef3-9872-06cc6ece01f1
+
+
+#### `interface.left(right)_gripper_handler.send_target_command(target_value: int) -> None`
+
+**功能：** 发送夹爪开关控制命令，使用 `target_command` 话题。
 
 **参数：**
-- `target_value` (int): 目标值，`0` = 关闭，`1` = 打开
+- `target_value` (int): `0` 表示关闭，`1` 表示打开
 
-**说明：**
-- 使用 `target_command` 话题进行开关控制，与 VR、RViz、Joystick 保持一致
-- **控制器名称自动检测**：系统会根据实际存在的 topic 自动检测控制器类型
-  - 灵巧手：`hand_controller` 或 `left_hand_controller` / `right_hand_controller`
-  - 夹爪：`gripper_controller` 或 `left_gripper_controller` / `right_gripper_controller`
-- 发布到对应的 `target_command` 话题（如 `/left_hand_controller/target_command` 或 `/left_gripper_controller/target_command`）
+**特点：**
+- 单臂模式统一使用 `interface.left_gripper_handler.send_target_command(...)`
 - 使用 `std_msgs/Int32` 消息类型
-- 会自动订阅相同话题以同步状态（通过回调更新 `is_open` 属性）
-- 如果传入的值不是 0 或 1，会发出警告并返回
+- 会自动订阅相同话题并同步 `is_open` 状态
+- 如果参数不是 `0` 或 `1`，会抛出 `ValueError`
+
+**自动检测到的话题：**
+- 双臂灵巧手：`/left_hand_controller/target_command`、`/right_hand_controller/target_command`
+- 双臂夹爪：`/left_gripper_controller/target_command`、`/right_gripper_controller/target_command`
+- 单臂灵巧手：`/hand_controller/target_command`
+- 单臂夹爪：`/gripper_controller/target_command`
 
 **示例：**
 ```python
-# 打开夹爪
+# 打开
 interface.left_gripper_handler.send_target_command(1)
 
-# 关闭夹爪
+# 关闭
 interface.left_gripper_handler.send_target_command(0)
 
 # 根据当前状态切换
@@ -422,69 +466,140 @@ target_value = 0 if current_state else 1
 interface.left_gripper_handler.send_target_command(target_value)
 ```
 
-**话题映射（自动检测）：**
-- **双臂模式 - 灵巧手：**
-  - 左夹爪：`/left_hand_controller/target_command`
-  - 右夹爪：`/right_hand_controller/target_command`
-- **双臂模式 - 夹爪：**
-  - 左夹爪：`/left_gripper_controller/target_command`
-  - 右夹爪：`/right_gripper_controller/target_command`
-- **单臂模式 - 灵巧手：**
-  - 夹爪：`/hand_controller/target_command`
-- **单臂模式 - 夹爪：**
-  - 夹爪：`/gripper_controller/target_command`
-
-**注意：** 控制器名称会在 `connect()` 时自动检测，无需手动配置。
-
 ---
 
-#### `send_joint_positions(position: float) -> None`
 
-**功能：** 发送夹爪关节位置命令（位置控制方式）
+https://github.com/user-attachments/assets/17ff1a2b-1496-4f19-aa37-cbce55c11c04
+
+
+#### `interface.left(right)_gripper_handler.send_joint_positions(position: float) -> None`
+
+**功能：** 发送夹爪实际行程位置命令，使用位置控制话题。
 
 **参数：**
-- `position` (float): 目标关节位置（夹爪通常只有一个关节）
+- `position` (float): 目标行程位置值
 
-**说明：**
-- 为了与手臂的 API 保持一致，使用相同的命名 `send_joint_positions()`
-- 夹爪通常只有一个关节，所以直接传入位置值即可
+**特点：**
+- 单臂模式统一使用 `interface.left_gripper_handler.send_joint_positions(...)`
 - 位置会自动限制在 `gripper_min_position` 和 `gripper_max_position` 之间
-- 发布到夹爪命令 topic（如 `/gripper_joint/position_command`）
-- 会自动更新目标位置并清空历史记录
+- 会更新内部 `target_position`，并清空位置历史
+- 这里的 `position` 是实际行程值，不是百分比
 
 **示例：**
 ```python
-# 完全闭合
-interface.left_gripper_handler.send_joint_positions(0.0)
+interface.left_gripper_handler.send_joint_positions(0.01)
+```
 
-# 50% 张开
-interface.left_gripper_handler.send_joint_positions(0.5)
+---
 
-# 完全张开
-interface.left_gripper_handler.send_joint_positions(1.0)
+
+https://github.com/user-attachments/assets/5e9842b9-376f-4167-8072-0ac6dab29ca0
+
+
+#### `interface.left(right)_gripper_handler.send_position_percent(percent: float) -> None`
+
+**功能：** 发送夹爪百分比位置控制命令，使用 `target_percent` 话题。
+
+**参数：**
+- `percent` (float): 百分比目标值，范围 `0.0` 到 `1.0`
+
+**特点：**
+- 单臂模式统一使用 `interface.left_gripper_handler.send_position_percent(...)`
+- 使用 `std_msgs/Float64` 消息类型
+- 传入 `int` 会自动转换为 `float`
+- 超出 `[0.0, 1.0]` 会抛出 `ValueError`
+- 如果 `target_percent` 话题未检测到，会抛出 `ROS2NotConnectedError`
+- 会按 `gripper_min_position ~ gripper_max_position` 线性换算并更新内部 `target_position`
+
+**自动检测到的话题：**
+- 双臂模式：`/left_gripper_controller/target_percent`、`/right_gripper_controller/target_percent`
+- 单臂模式：`/left_gripper_controller/target_percent`
+
+**可用性判断：**
+```python
+if interface.left_gripper_handler.target_percent_pub is not None:
+    interface.left_gripper_handler.send_position_percent(0.5)
+```
+
+**示例：**
+```python
+# 完全关闭
+interface.left_gripper_handler.send_position_percent(0.0)
+
+# 中间位置
+interface.left_gripper_handler.send_position_percent(0.5)
+
+# 完全打开
+interface.left_gripper_handler.send_position_percent(1.0)
+
+# 双臂模式右夹爪
+interface.right_gripper_handler.send_position_percent(0.75)
 ```
 
 ---
 
 ### 获取状态
 
+#### 获取夹爪当前位置
+
+夹爪当前位置从 `get_joint_state(categorized=True)` 返回的分类字典中读取。
+
+**单个夹爪分类数据结构：**
+```python
+{
+    "names": ["left_gripper_joint"],
+    "positions": [0.012],
+    "velocities": [0.0],
+    "efforts": [0.0],
+}
+```
+
+**单臂模式：**
+```python
+joint_state = interface.get_joint_state(categorized=True)
+if joint_state:
+    gripper_data = joint_state.get("gripper", {})
+    current_pos = gripper_data.get("positions", [None])[0]
+    print(f"夹爪当前位置: {current_pos}")
+```
+
+**双臂模式：**
+```python
+joint_state = interface.get_joint_state(categorized=True)
+if joint_state:
+    left_pos = joint_state.get("left_gripper", {}).get("positions", [None])[0]
+    right_pos = joint_state.get("right_gripper", {}).get("positions", [None])[0]
+    print(f"左夹爪: {left_pos}, 右夹爪: {right_pos}")
+```
+
+**通用写法：**
+```python
+is_dual_arm = interface.config.right_end_effector_pose_topic is not None
+joint_state = interface.get_joint_state(categorized=True)
+if joint_state:
+    key = "left_gripper" if is_dual_arm else "gripper"
+    current_pos = joint_state.get(key, {}).get("positions", [None])[0]
+```
+
+> **注意：** 如果 `current_pos` 为 `None`，说明 `/joint_states` 里还没有夹爪关节数据，通常在连接后等待 1~2 秒即可。
+
+---
+
 #### `get_target_position() -> Optional[float]`
 
-**功能：** 获取当前设置的目标位置
+**功能：** 获取当前内部维护的夹爪目标位置。
 
 **返回值：**
-- `float`：目标位置值
-- `None`：如果未设置目标
+- `float`: 当前目标位置
+- `None`: 尚未设置目标
 
 **说明：**
-- 目标位置是**内部存储**的变量 `self.target_position`（定义在 `GripperHandler.__init__()` 中，初始值为 `None`）
-- 通过以下方式设置：
-  1. **位置控制方式**：调用 `send_joint_positions(position)` 时（`gripper_handler.py:157`），会将位置限制在 `gripper_min_position` 和 `gripper_max_position` 之间，然后更新 `self.target_position = clamped_position`
-  2. **开关控制方式**：当订阅的 `target_command` 话题收到消息时（`gripper_handler.py:214-216`），会自动更新目标位置
-     - `msg.data == 1`（打开）→ `self.target_position = self.config.gripper_max_position`
-     - `msg.data == 0`（关闭）→ `self.target_position = self.config.gripper_min_position`
-- 与手臂的 `get_target_pose()` 不同，夹爪的目标位置不是从外部话题订阅获取的，而是内部维护的状态变量
-- 该变量在 `check_arrival()` 方法中用于与当前位置比较，判断是否到达目标
+- 这是 `GripperHandler` 内部维护的状态，不是单独从外部话题订阅得到的
+- 以下操作会更新它：
+  1. `send_joint_positions(position)`：更新为限幅后的实际位置
+  2. `send_position_percent(percent)`：先换算为实际位置，再更新
+  3. `send_target_command(0/1)` 对应话题回调：关闭时更新为 `gripper_min_position`，打开时更新为 `gripper_max_position`
+- `check_arrival()` 会使用该值与当前位置比较，判断是否到达目标
 
 **示例：**
 ```python
@@ -499,46 +614,40 @@ if target_position is not None:
 
 #### `check_arrival(current_position: Optional[float], threshold: float | None = None) -> Dict[str, Any]`
 
-**功能：** 检查夹爪是否到达目标位置
+**功能：** 检查夹爪是否到达目标位置。
 
 **参数：**
-- `current_position` (Optional[float]): 当前位置（需要从 `get_joint_state()` 获取）
-- `threshold` (float | None): 位置距离阈值，如果为 None 则使用 `config.gripper_position_threshold`（默认 0.01）
+- `current_position` (Optional[float]): 当前夹爪位置，需要从 `get_joint_state(categorized=True)` 中提取
+- `threshold` (float | None): 可选的距离阈值；为 `None` 时使用 `config.gripper_position_threshold`
 
 **返回值：**
 ```python
 {
-    'arrived': bool,      # 是否到达目标位置
-    'distance': float     # 位置距离
+    "arrived": bool,
+    "distance": float,
 }
 ```
 
-**说明：**
-- **需要手动传入当前位置**（从 joint_state 中提取）
-- **默认阈值**：如果未指定 `threshold` 参数，使用配置中的默认值（`config.gripper_position_threshold`）
-- 关闭时会考虑位置稳定性（可能已夹住物体）
-- 打开时只考虑距离阈值
-- 会打印详细的检查信息，包括位置历史
+**特点：**
+- 需要手动传入当前位置
+- 打开方向主要按距离阈值判断
+- 关闭方向除了距离阈值，还会结合位置历史的稳定性判断，适合夹住物体时使用
 
 **示例：**
 ```python
-# 1. 获取当前位置
 categorized_state = interface.get_joint_state(categorized=True)
-gripper_data = categorized_state.get('gripper', {})  # 单臂模式
-# 或
-gripper_data = categorized_state.get('left_gripper', {})  # 双臂模式
-current_position = gripper_data.get('positions', [None])[0]
+gripper_data = categorized_state.get("gripper", {})  # 单臂模式
+# gripper_data = categorized_state.get("left_gripper", {})  # 双臂模式
+current_position = gripper_data.get("positions", [None])[0]
 
-# 2. 检查到达状态
 if current_position is not None:
     result = interface.left_gripper_handler.check_arrival(current_position)
-    if result['arrived']:
+    if result["arrived"]:
         print("夹爪已到达目标位置")
 
-# 3. 使用自定义阈值
 result = interface.left_gripper_handler.check_arrival(
     current_position=current_position,
-    threshold=0.005  # 更严格的阈值
+    threshold=0.005,
 )
 ```
 
@@ -871,54 +980,50 @@ interface.send_right_hand_joint_positions([0.0, 0.3, 0.5, 0.2, 0.1, 0.0])
 
 ### 末端执行器位姿获取
 
-#### `get_end_effector_pose() -> Optional[Pose]`
+#### `interface.left_arm_handler.get_pose() -> Optional[Pose]`
 
-**功能：** 获取左臂末端执行器的当前位姿（便捷方法）
+**功能：** 获取左臂末端执行器的当前位姿。
 
 **返回值：**
 - `Pose` 对象：左臂末端执行器的当前位置和姿态（在 `base_frame` 坐标系下）
-- `None`：如果未连接或位姿不可用
+- `None`：如果位姿不可用
 
 **说明：**
-- 这是 `left_arm_handler.get_pose()` 的便捷方法
-- 如果接口未连接，返回 `None` 而不是抛出异常
 - 返回的位姿在 `base_frame` 坐标系下
 
 **示例：**
 ```python
 # 获取左臂末端执行器位姿
-pose = interface.get_end_effector_pose()
+pose = interface.left_arm_handler.get_pose()
 if pose:
     print(f"位置: ({pose.position.x}, {pose.position.y}, {pose.position.z})")
     print(f"姿态: ({pose.orientation.x}, {pose.orientation.y}, {pose.orientation.z}, {pose.orientation.w})")
 else:
-    print("未连接或位姿不可用")
+    print("位姿不可用")
 ```
 
 ---
 
-#### `get_right_end_effector_pose() -> Optional[Pose]`
+#### `interface.right_arm_handler.get_pose() -> Optional[Pose]`
 
-**功能：** 获取右臂末端执行器的当前位姿（双臂模式）
+**功能：** 获取右臂末端执行器的当前位姿（双臂模式）。
 
 **返回值：**
 - `Pose` 对象：右臂末端执行器的当前位置和姿态（在 `base_frame` 坐标系下）
-- `None`：如果未连接、非双臂模式或位姿不可用
+- `None`：如果位姿不可用
 
 **说明：**
-- 这是 `right_arm_handler.get_pose()` 的便捷方法
 - 仅在双臂模式下可用
-- 如果接口未连接，返回 `None` 而不是抛出异常
 - 返回的位姿在 `base_frame` 坐标系下
 
 **示例：**
 ```python
 # 获取右臂末端执行器位姿（双臂模式）
-pose = interface.get_right_end_effector_pose()
+pose = interface.right_arm_handler.get_pose()
 if pose:
     print(f"位置: ({pose.position.x}, {pose.position.y}, {pose.position.z})")
 else:
-    print("未连接、非双臂模式或位姿不可用")
+    print("位姿不可用")
 ```
 
 ---
@@ -1367,11 +1472,11 @@ execute_stage_sequence(
 1. **线程安全**：所有方法都是线程安全的，可以在多线程环境中使用。
 
 2. **连接检查**：
-   - **状态获取方法**（如 `get_end_effector_pose()`, `get_joint_state()`, `check_arrive()` 等）：如果接口未连接，会返回 `None` 而不是抛出异常，调用者需要检查返回值
-   - **命令发送方法**（如 `send_end_effector_target()`, `send_fsm_command()` 等）：如果接口未连接，会抛出 `ROS2NotConnectedError` 异常
+   - **状态获取方法**（如 `left_arm_handler.get_pose()`, `get_joint_state()`, `check_arrive()` 等）：如果接口未连接或数据不可用，可能返回 `None`，调用者需要检查返回值
+   - **命令发送方法**（如 `left_arm_handler.send_target()`, `send_fsm_command()` 等）：如果接口未连接，会抛出 `ROS2NotConnectedError` 异常
 
 3. **数据可用性**：
-   - `get_pose()`, `get_end_effector_pose()`, `get_joint_state()` 等状态获取方法可能返回 `None`（未连接、数据未到达或过期）
+   - `get_pose()`, `get_joint_state()` 等状态获取方法可能返回 `None`（未连接、数据未到达或过期）
    - `check_arrive()` 在未连接时返回 `None`，需要检查返回值
    - 夹爪的 `check_arrival()` 需要手动传入当前位置
    - 手臂的 `get_target_pose()` 需要配置目标位置话题（`/left_current_target` 或 `/right_current_target`）
