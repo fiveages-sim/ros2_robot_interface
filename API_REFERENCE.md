@@ -57,6 +57,10 @@ interface.right_arm_handler
 
 ### 发送命令
 
+
+https://github.com/user-attachments/assets/f7fef847-4e6d-4905-93cb-176b4fc81c34
+
+
 #### `send_target_stamped(frame_id: Optional[str] = None, pose: Optional[Pose] = None) -> None` ⭐ 推荐使用
 
 **功能：** 发送带坐标系信息的目标位姿。
@@ -99,6 +103,10 @@ interface.left_arm_handler.send_target_stamped(relative_pose)
 
 ---
 
+
+https://github.com/user-attachments/assets/b80e994e-e374-4580-b947-769c8c169ba2
+
+
 #### `send_target(pose: Pose) -> None`
 
 **功能：** 发送不带坐标系信息的目标位姿。
@@ -128,6 +136,10 @@ interface.left_arm_handler.send_target(target_pose)
 ```
 
 ---
+
+
+https://github.com/user-attachments/assets/eed9c1d2-6d9d-4c84-9152-1a9a472440a6
+
 
 #### `send_joint_positions(positions: List[float]) -> None`
 
@@ -417,6 +429,10 @@ interface.right_gripper_handler
 
 ### 发送命令
 
+
+https://github.com/user-attachments/assets/16c98f20-b795-4ef3-9872-06cc6ece01f1
+
+
 #### `interface.left(right)_gripper_handler.send_target_command(target_value: int) -> None`
 
 **功能：** 发送夹爪开关控制命令，使用 `target_command` 话题。
@@ -452,6 +468,10 @@ interface.left_gripper_handler.send_target_command(target_value)
 
 ---
 
+
+https://github.com/user-attachments/assets/17ff1a2b-1496-4f19-aa37-cbce55c11c04
+
+
 #### `interface.left(right)_gripper_handler.send_joint_positions(position: float) -> None`
 
 **功能：** 发送夹爪实际行程位置命令，使用位置控制话题。
@@ -471,6 +491,10 @@ interface.left_gripper_handler.send_joint_positions(0.01)
 ```
 
 ---
+
+
+https://github.com/user-attachments/assets/5e9842b9-376f-4167-8072-0ac6dab29ca0
+
 
 #### `interface.left(right)_gripper_handler.send_position_percent(percent: float) -> None`
 
