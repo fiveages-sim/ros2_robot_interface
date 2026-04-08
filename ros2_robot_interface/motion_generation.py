@@ -556,12 +556,12 @@ def _send_gripper_commands(
         if gripper_mode == GripperMode.TARGET_COMMAND:
             interface.left_gripper_handler.send_target_command(int(stage.left.gripper))
         else:
-            interface.send_gripper_command(stage.left.gripper)
+            interface.left_gripper_handler.send_joint_positions(stage.left.gripper)
     if stage.right and interface.right_gripper_handler:
         if gripper_mode == GripperMode.TARGET_COMMAND:
             interface.right_gripper_handler.send_target_command(int(stage.right.gripper))
         else:
-            interface.send_right_gripper_command(stage.right.gripper)
+            interface.right_gripper_handler.send_joint_positions(stage.right.gripper)
 
 
 # ---------------------------------------------------------------------------

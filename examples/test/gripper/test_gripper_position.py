@@ -53,7 +53,7 @@ def main():
         return 1
     
     # 测试目标位置
-    test_position = 0.2
+    test_position = 0.01
     
     print("-" * 70)
     print("开始夹爪位置到达测试")
