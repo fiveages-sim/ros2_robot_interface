@@ -225,6 +225,7 @@ def build_single_arm_pick_sequence(
         target_pose, offset=approach_clearance + retreat_direction_extra,
         direction_vec=direction_vec, orientation=grasp_orientation,
     )
+    retreat_pose.position.z += retreat_offset[2]
 
     return [
         (
