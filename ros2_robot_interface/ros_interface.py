@@ -101,7 +101,14 @@ class ROS2RobotInterface:
         # Gripper handlers
         self.left_gripper_handler: Optional[GripperHandler] = None
         self.right_gripper_handler: Optional[GripperHandler] = None
-    
+
+        # Nav2 navigation state（软依赖，connect() 时自动检测）
+        self._nav_enabled: bool = False
+        self._nav_action_client: Any = None   # rclpy.action.ActionClient 或 None
+        self._nav_goal_future: Any = None      # send_goal_async future
+        self._nav_goal_handle: Any = None      # GoalHandle
+        self._nav_result_future: Any = None    # get_result_async future
+
     @property
     def is_connected(self) -> bool:
         """Check if the interface is connected."""
@@ -192,7 +199,7 @@ class ROS2RobotInterface:
         if "/right_gripper_controller/target_percent" in topic_names:
             self.config.right_gripper_target_percent_topic = "/right_gripper_controller/target_percent"
             logger.info("Detected right gripper target_percent topic")
-        
+
         if "/head_joint_controller/target_joint_position" in topic_names:
             self.config.head_joint_controller_topic = "/head_joint_controller/target_joint_position"
         
@@ -460,7 +467,9 @@ class ROS2RobotInterface:
             self.executor.add_node(self.robot_node)
             self.executor_thread = threading.Thread(target=self.executor.spin, daemon=True)
             self.executor_thread.start()
-            
+
+            self._try_init_nav2()
+
             time.sleep(1.0)
             self._connected = True
             logger.info("Connected to ROS 2 robot interface")
@@ -1054,14 +1063,23 @@ class ROS2RobotInterface:
         self.right_hand_joint_controller_pub.publish(msg)
         logger.debug(f"Published right hand joint positions: {positions}")
 
-    def send_dual_arm_joint_positions(self, left_arm_positions: List[float], right_arm_positions: List[float]) -> None:
+    def send_dual_arm_joint_positions(
+        self,
+        left_arm_positions: List[float],
+        right_arm_positions: List[float],
+        body_positions: Optional[List[float]] = None,
+    ) -> None:
         """发送双臂关节位置命令（MoveJ 模式）
 
         同时控制左臂和右臂的所有关节，发布到统一的 topic。
+        对于 WBC 控制器（ocs2_wbc_controller），消息格式为
+        ``body_joints + left_arm_joints + right_arm_joints``。
 
         Args:
             left_arm_positions: 左臂关节位置列表（弧度）
             right_arm_positions: 右臂关节位置列表（弧度）
+            body_positions: 躯干关节目标位置列表（弧度），仅 WBC 控制器生效。
+                传入时直接使用该值；省略时从当前关节状态读取（保持躯干不动）。
 
         Raises:
             ROS2NotConnectedError: 如果接口未连接或发布器未初始化
@@ -1072,7 +1090,11 @@ class ROS2RobotInterface:
             # 左臂7个关节，右臂7个关节
             left_positions = [0.0, 0.5, -1.57, 0.0, 1.57, 0.0, 0.0]
             right_positions = [0.0, -0.5, 1.57, 0.0, -1.57, 0.0, 0.0]
+            # 只动手臂，躯干维持当前姿态
             interface.send_dual_arm_joint_positions(left_positions, right_positions)
+            # 同时指定躯干目标（全身 MoveJ）
+            body = [-1.353, -2.660, -1.307, 0.0]
+            interface.send_dual_arm_joint_positions(left_positions, right_positions, body_positions=body)
             ```
         """
         if not self.is_connected:
@@ -1112,22 +1134,21 @@ class ROS2RobotInterface:
         is_wbc_controller = unified_topic and "ocs2_wbc_controller" in unified_topic
 
         if is_wbc_controller:
-            # WBC 控制器需要身体关节 + 左臂 + 右臂
-            # 获取当前身体关节位置（如果可用）
-            body_positions = None
-            categorized_state = self.get_joint_state(categorized=True)
-            if categorized_state and categorized_state.get('body', {}).get('positions'):
-                body_positions = categorized_state['body']['positions']
-
-            if body_positions is None:
-                # 如果没有身体关节数据，使用零位置或默认值
+            resolved_body: Optional[List[float]] = body_positions
+            if resolved_body is None:
+                # 未指定目标时，读取当前状态以保持躯干不动
+                categorized_state = self.get_joint_state(categorized=True)
+                if categorized_state and categorized_state.get('body', {}).get('positions'):
+                    resolved_body = list(categorized_state['body']['positions'])
+            if resolved_body is None:
                 logger.warning("Body joint positions not available, using zeros for WBC controller")
-                # 尝试从配置中获取身体关节数量（通常是4个）
-                body_positions = [0.0] * 4  # 默认4个身体关节
+                resolved_body = [0.0] * 4
 
-            # 合并：身体关节 + 左臂 + 右臂
-            combined_positions = list(body_positions) + left_arm_positions + right_arm_positions
-            logger.debug(f"WBC controller: body={len(body_positions)}, left={len(left_arm_positions)}, right={len(right_arm_positions)}, total={len(combined_positions)}")
+            combined_positions = list(resolved_body) + left_arm_positions + right_arm_positions
+            logger.debug(
+                f"WBC controller: body={len(resolved_body)}, left={len(left_arm_positions)}, "
+                f"right={len(right_arm_positions)}, total={len(combined_positions)}"
+            )
         else:
             # ARM 控制器只需要左臂 + 右臂
             combined_positions = left_arm_positions + right_arm_positions
@@ -1444,6 +1465,7 @@ class ROS2RobotInterface:
         *,
         left_target_positions: Optional[List[float]] = None,
         right_target_positions: Optional[List[float]] = None,
+        body_target_positions: Optional[List[float]] = None,
         timeout: float = 3.0,
         poll_period: float = 0.05,
         joint_tolerance: float = 0.03,
@@ -1451,16 +1473,21 @@ class ROS2RobotInterface:
         sleep_fn: Optional[Callable[[float], None]] = None,
         on_poll: Optional[Callable[[Dict[str, Any], float], None]] = None,
     ) -> Dict[str, Any]:
-        """Wait until arm joints reach target positions (MoveJ-friendly)."""
+        """Wait until joints reach target positions (MoveJ-friendly).
+
+        Checks left arm, right arm, and optionally body joints.
+        All specified groups must be within ``joint_tolerance`` to be considered arrived.
+        """
         now_fn = time_now_fn or time.monotonic
         wait_fn = sleep_fn or time.sleep
 
-        if left_target_positions is None and right_target_positions is None:
+        if left_target_positions is None and right_target_positions is None and body_target_positions is None:
             return {
                 "arrived": False,
                 "elapsed": 0.0,
                 "left_error_max_abs": None,
                 "right_error_max_abs": None,
+                "body_error_max_abs": None,
                 "reason": "no_target",
             }
 
@@ -1471,12 +1498,21 @@ class ROS2RobotInterface:
                 return None
             return max(abs(float(c) - float(t)) for c, t in zip(current, target))
 
+        def _get_body_positions() -> Optional[List[float]]:
+            try:
+                state = self._get_joint_state_ref(categorized=True) or {}
+                positions = state.get("body", {}).get("positions")
+                return list(positions) if positions else None
+            except Exception:
+                return None
+
         start = now_fn()
         last_result: Dict[str, Any] = {
             "arrived": False,
             "elapsed": 0.0,
             "left_error_max_abs": None,
             "right_error_max_abs": None,
+            "body_error_max_abs": None,
             "left_current_len": 0,
             "right_current_len": 0,
             "left_target_len": len(left_target_positions) if left_target_positions is not None else 0,
@@ -1486,28 +1522,36 @@ class ROS2RobotInterface:
 
         while (now_fn() - start) <= timeout:
             left_current, right_current = self._get_current_arm_joint_positions()
-            left_err = _max_abs_error(left_current, left_target_positions)
+            body_current = _get_body_positions() if body_target_positions is not None else None
+
+            left_err  = _max_abs_error(left_current,  left_target_positions)
             right_err = _max_abs_error(right_current, right_target_positions)
-            left_ok = (left_err is not None and left_err <= joint_tolerance) if left_target_positions is not None else True
+            body_err  = _max_abs_error(body_current,  body_target_positions)
+
+            left_ok  = (left_err  is not None and left_err  <= joint_tolerance) if left_target_positions  is not None else True
             right_ok = (right_err is not None and right_err <= joint_tolerance) if right_target_positions is not None else True
+            body_ok  = (body_err  is not None and body_err  <= joint_tolerance) if body_target_positions  is not None else True
+
             elapsed = now_fn() - start
+            all_ok = bool(left_ok and right_ok and body_ok)
             last_result = {
-                "arrived": bool(left_ok and right_ok),
+                "arrived": all_ok,
                 "elapsed": elapsed,
                 "left_error_max_abs": left_err,
                 "right_error_max_abs": right_err,
+                "body_error_max_abs": body_err,
                 "left_current_len": len(left_current) if left_current is not None else 0,
                 "right_current_len": len(right_current) if right_current is not None else 0,
                 "left_target_len": len(left_target_positions) if left_target_positions is not None else 0,
                 "right_target_len": len(right_target_positions) if right_target_positions is not None else 0,
-                "reason": "ok" if (left_ok and right_ok) else "waiting",
+                "reason": "ok" if all_ok else "waiting",
             }
             if on_poll is not None:
                 try:
                     on_poll(last_result, elapsed)
                 except Exception:
                     pass
-            if left_ok and right_ok:
+            if all_ok:
                 return last_result
             wait_fn(max(0.0, poll_period))
 
@@ -1655,7 +1699,222 @@ class ROS2RobotInterface:
             raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
         
         logger.warning("Cartesian velocity control not implemented yet")
-    
+
+    # ============================================================================
+    # Nav2 导航支持
+    # ============================================================================
+
+    def _try_init_nav2(self) -> bool:
+        """尝试检测并初始化 Nav2 NavigateToPose action client。
+
+        检测条件（全部满足才启用）：
+          1. ``config.nav_enabled`` 不为 ``False``
+          2. ``nav2_msgs`` 已安装（否则 ImportError 静默跳过）
+          3. ROS 图中存在名称含 ``controller_server`` 的节点，或 ``config.nav_enabled=True`` 强制启用
+
+        返回 ``True`` 表示导航已启用。
+        """
+        if self.config.nav_enabled is False:
+            logger.info("Nav2 navigation disabled by config (nav_enabled=False)")
+            return False
+
+        try:
+            from nav2_msgs.action import NavigateToPose  # type: ignore[import]
+            from rclpy.action import ActionClient as _ActionClient  # type: ignore[import]
+        except ImportError:
+            logger.info("nav2_msgs not installed — navigation support disabled")
+            return False
+
+        if self.config.nav_enabled is not True:
+            # 自动检测：检查 controller_server 是否在运行
+            try:
+                nodes = self.list_nodes()
+                nav2_running = any(
+                    "controller_server" in (n.get("name") or "") for n in nodes
+                )
+            except Exception as e:
+                logger.warning(f"Nav2 node detection failed: {e}")
+                nav2_running = False
+
+            if not nav2_running:
+                logger.info(
+                    "Nav2 not detected (no controller_server node running) — navigation disabled"
+                )
+                return False
+
+        server = self.config.nav_action_server
+        self._nav_action_client = _ActionClient(
+            self.robot_node, NavigateToPose, server
+        )
+        self._nav_enabled = True
+        logger.info(f"✅ Nav2 detected — NavigateToPose action client ready (server={server!r})")
+        return True
+
+    @property
+    def nav_enabled(self) -> bool:
+        """True 表示 Nav2 已检测到并可用。"""
+        return self._nav_enabled
+
+    def send_nav_goal(
+        self,
+        x: float,
+        y: float,
+        yaw: float,
+        *,
+        frame_id: str = "map",
+    ) -> None:
+        """向 Nav2 发送导航目标（非阻塞，立即返回）。
+
+        与 ``send_end_effector_target`` 对称：发出后即返回，
+        用 ``check_nav_arrived`` 查询状态，或 ``wait_nav_arrived`` 阻塞等待。
+
+        Args:
+            x: 目标位置 X（米，map 坐标系）。
+            y: 目标位置 Y（米，map 坐标系）。
+            yaw: 目标朝向（弧度，绕 Z 轴）。
+            frame_id: 目标坐标所在的 TF 帧，默认 ``"map"``。
+
+        Raises:
+            RuntimeError: Nav2 未启用时抛出。
+        """
+        if not self._nav_enabled or self._nav_action_client is None:
+            raise RuntimeError(
+                "Navigation not available — nav2_msgs not installed or "
+                "controller_server not detected. Set nav_enabled=True in config to force-enable."
+            )
+
+        from geometry_msgs.msg import PoseStamped
+        import math
+
+        goal_pose = PoseStamped()
+        goal_pose.header.frame_id = frame_id
+        goal_pose.header.stamp = self.robot_node.get_clock().now().to_msg()
+        goal_pose.pose.position.x = float(x)
+        goal_pose.pose.position.y = float(y)
+        goal_pose.pose.position.z = 0.0
+        half = yaw / 2.0
+        goal_pose.pose.orientation.z = math.sin(half)
+        goal_pose.pose.orientation.w = math.cos(half)
+
+        try:
+            from nav2_msgs.action import NavigateToPose  # type: ignore[import]
+        except ImportError:
+            raise RuntimeError("nav2_msgs not available")
+
+        nav_goal = NavigateToPose.Goal()
+        nav_goal.pose = goal_pose
+
+        # 重置上一次的状态
+        self._nav_goal_handle = None
+        self._nav_result_future = None
+
+        self._nav_goal_future = self._nav_action_client.send_goal_async(nav_goal)
+        logger.info(f"Nav goal sent → x={x:.3f} y={y:.3f} yaw={yaw:.3f} frame={frame_id!r}")
+
+    def check_nav_arrived(self) -> Optional[bool]:
+        """非阻塞查询当前导航状态。
+
+        与 ``check_arrive`` 对称：可在任意时刻轮询，不阻塞调用线程。
+
+        Returns:
+            ``None``  — 尚未发送目标，或 goal 仍在被 action server 接受中，或仍在导航。
+            ``True``  — 导航成功到达（``STATUS_SUCCEEDED``）。
+            ``False`` — 导航失败或被中止（ABORTED / CANCELED）。
+        """
+        if self._nav_goal_future is None:
+            return None
+
+        # 等待 goal 被接受
+        if not self._nav_goal_future.done():
+            return None
+
+        if self._nav_goal_handle is None:
+            goal_handle = self._nav_goal_future.result()
+            if goal_handle is None or not goal_handle.accepted:
+                logger.warning("Nav2 goal was rejected by action server")
+                return False
+            self._nav_goal_handle = goal_handle
+            self._nav_result_future = goal_handle.get_result_async()
+
+        if self._nav_result_future is None or not self._nav_result_future.done():
+            return None
+
+        # 解析结果
+        try:
+            from action_msgs.msg import GoalStatus  # type: ignore[import]
+            result_response = self._nav_result_future.result()
+            status = result_response.status
+            if status == GoalStatus.STATUS_SUCCEEDED:
+                logger.info("Nav2 navigation SUCCEEDED")
+                return True
+            else:
+                logger.warning(f"Nav2 navigation ended with status={status}")
+                return False
+        except Exception as e:
+            logger.warning(f"Nav2 result parse error: {e}")
+            return False
+
+    def wait_nav_arrived(
+        self,
+        timeout: float = 60.0,
+        poll_period: float = 0.1,
+        time_now_fn: Optional[Callable[[], float]] = None,
+        sleep_fn: Optional[Callable[[float], None]] = None,
+    ) -> bool:
+        """阻塞等待导航完成（与 ``wait_until_arrive`` 对称）。
+
+        Args:
+            timeout: 最大等待时间（秒）。
+            poll_period: 轮询间隔（秒）。
+            time_now_fn: 自定义时钟函数（仿真时间场景使用）。
+            sleep_fn: 自定义 sleep 函数，与 ``time_now_fn`` 配套使用。
+
+        Returns:
+            ``True`` 表示成功到达，``False`` 表示超时或失败。
+        """
+        now_fn = time_now_fn or time.monotonic
+        wait_fn = sleep_fn or time.sleep
+
+        start = now_fn()
+        while (now_fn() - start) <= timeout:
+            status = self.check_nav_arrived()
+            if status is True:
+                return True
+            if status is False:
+                return False
+            wait_fn(max(0.0, poll_period))
+
+        logger.warning(f"Navigation timed out after {timeout:.1f}s")
+        return False
+
+    def navigate_to_pose(
+        self,
+        x: float,
+        y: float,
+        yaw: float,
+        *,
+        frame_id: str = "map",
+        timeout: float = 60.0,
+        poll_period: float = 0.1,
+        time_now_fn: Optional[Callable[[], float]] = None,
+        sleep_fn: Optional[Callable[[float], None]] = None,
+    ) -> bool:
+        """发送导航目标并阻塞等待到达（send_nav_goal + wait_nav_arrived 的便捷组合）。
+
+        顺序任务场景使用此方法；并行任务场景请分别调用
+        ``send_nav_goal`` 和 ``wait_nav_arrived``。
+
+        Returns:
+            ``True`` 表示成功到达，``False`` 表示超时或失败。
+        """
+        self.send_nav_goal(x, y, yaw, frame_id=frame_id)
+        return self.wait_nav_arrived(
+            timeout=timeout,
+            poll_period=poll_period,
+            time_now_fn=time_now_fn,
+            sleep_fn=sleep_fn,
+        )
+
     def disconnect(self) -> None:
         """Disconnect from ROS 2 and cleanup resources."""
         if self.tf_listener is not None:
@@ -1748,6 +2007,14 @@ class ROS2RobotInterface:
         if self.waist_turning_command_pub:
             self.waist_turning_command_pub.destroy()
             self.waist_turning_command_pub = None
+
+        if self._nav_action_client is not None:
+            self._nav_action_client.destroy()
+            self._nav_action_client = None
+        self._nav_enabled = False
+        self._nav_goal_future = None
+        self._nav_goal_handle = None
+        self._nav_result_future = None
 
         if self.robot_node:
             self.robot_node.destroy_node()

@@ -33,7 +33,6 @@
   - [坐标转换](#坐标转换)
   - [机器人描述与参数查询](#机器人描述与参数查询)
 - [常量 (Constants)](#常量-constants)
-- [运动生成功能 (motion_generation)](#运动生成功能-motion_generation)
 - [快速参考表](#快速参考表)
 - [注意事项](#注意事项)
 
@@ -1391,65 +1390,6 @@ print(f"参数设置结果: {ok}")
 ```python
 from ros2_robot_interface import FSM_HOME, FSM_OCS2
 interface.send_fsm_command(FSM_OCS2)
-```
-
----
-
-## 运动生成功能 (motion_generation)
-
-包顶层已导出可组合的动作序列构建与执行工具，适合 pick/place/handover 这类阶段化任务。
-
-### 主要类型
-
-- `ArmSide`: `LEFT` / `RIGHT`
-- `SendMode`: `UNSTAMPED` / `STAMPED` / `DUAL_ARM_STAMPED`
-- `GripperMode`: `JOINT_POSITION` / `TARGET_COMMAND`
-- `ArmTarget`: 单臂目标（`Pose + gripper`）
-- `StageTarget`: 单阶段目标（可含 left/right）
-
-### 主要函数
-
-- `build_single_arm_pick_sequence(...)`
-- `build_single_arm_place_sequence(...)`
-- `build_single_arm_return_home_sequence(...)`
-- `assign_to_arm(sequence, side)`
-- `compose_bimanual_synchronized_sequence(left_sequence, right_sequence)`
-- `build_handover_sequence(...)`
-- `execute_stage_sequence(interface=..., sequence=..., ...)`
-
-### 示例
-
-```python
-from ros2_robot_interface import (
-    ArmSide,
-    SendMode,
-    GripperMode,
-    build_single_arm_pick_sequence,
-    assign_to_arm,
-    execute_stage_sequence,
-)
-
-pick_seq = build_single_arm_pick_sequence(
-    target_pose=target_pose,
-    approach_clearance=0.12,
-    grasp_clearance=0.02,
-    grasp_orientation=(0.0, 1.0, 0.0, 0.0),
-    gripper_open=1.0,
-    gripper_closed=0.0,
-)
-stages = assign_to_arm(pick_seq, ArmSide.LEFT)
-
-execute_stage_sequence(
-    interface=interface,
-    sequence=stages,
-    send_mode=SendMode.STAMPED,
-    gripper_mode=GripperMode.TARGET_COMMAND,
-    arrival_timeout=3.0,
-    arrival_poll=0.05,
-    time_now_fn=time.monotonic,
-    sleep_fn=time.sleep,
-    gripper_action_wait=0.2,
-)
 ```
 
 ---
