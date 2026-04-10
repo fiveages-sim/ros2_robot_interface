@@ -3,56 +3,76 @@
 关节空间+圆弧轨迹 Service 客户端
 先使用关节空间移动到圆弧起点，再执行圆弧运动
 服务: 
-  - 关节移动: /ocs2_arm_controller/target_joint_position (topic)
+  - 关节移动: /ocs2_arm_controller/joint_trajectory_with_para (service)
   - 圆弧: /ocs2_arm_controller/execute_circle_use_ik (service)
 """
 
 import rclpy
 from rclpy.node import Node
+from rclpy.executors import SingleThreadedExecutor
 import time
 import sys
 import math
-from geometry_msgs.msg import Point, Quaternion, Vector3, Pose
-from std_msgs.msg import Float64MultiArray, Int32
+from geometry_msgs.msg import Point, Quaternion, Vector3
+from std_msgs.msg import Int32
 
 # 导入服务类型
-from arms_ros2_control_msgs.srv import MovecUseIK
-from arms_ros2_control_msgs.msg import CircleMessage
+from arms_ros2_control_msgs.srv import MovecUseIK, JointTrajectory
+from arms_ros2_control_msgs.msg import JointWaypoint, CircleMessage
+from ros2_robot_interface import ROS2RobotInterface, ROS2RobotInterfaceConfig
 
 
 class MoveJAndCircleClient(Node):
-    def __init__(self):
+    def __init__(self, interface=None):
         super().__init__('movej_and_circle_client')
+        
+        # 保存机器人接口
+        self.interface = interface
         
         # 创建圆弧服务客户端
         self.circle_client = self.create_client(MovecUseIK, '/ocs2_arm_controller/execute_circle_use_ik')
         
-        # 创建关节位置发布器
-        self.left_joint_pub = self.create_publisher(
-            Float64MultiArray, 
-            '/ocs2_arm_controller/target_joint_position',
-            10
+        # 创建关节轨迹服务客户端
+        self.joint_trajectory_client = self.create_client(
+            JointTrajectory, 
+            '/ocs2_arm_controller/joint_trajectory_with_para'
         )
-        self.right_joint_pub = self.create_publisher(
-            Float64MultiArray,
-            '/ocs2_arm_controller/target_joint_position_right',  # 右臂的话题，根据实际情况调整
-            10
-        )
+        
+        # 定义关节名称（g1机器人）
+        self.left_arm_joint_names = [
+            "left_shoulder_pitch_joint",
+            "left_shoulder_roll_joint", 
+            "left_shoulder_yaw_joint",
+            "left_elbow_joint",
+            "left_wrist_roll_joint",
+            "left_wrist_pitch_joint",
+            "left_wrist_yaw_joint"
+        ]
+        self.right_arm_joint_names = [
+            "right_shoulder_pitch_joint",
+            "right_shoulder_roll_joint",
+            "right_shoulder_yaw_joint",
+            "right_elbow_joint",
+            "right_wrist_roll_joint",
+            "right_wrist_pitch_joint",
+            "right_wrist_yaw_joint"
+        ]
         
     def wait_for_services(self, timeout=10.0):
         """等待服务可用"""
         circle_ready = self.circle_client.wait_for_service(timeout_sec=timeout)
+        trajectory_ready = self.joint_trajectory_client.wait_for_service(timeout_sec=timeout)
         
-        if circle_ready:
-            self.get_logger().info('圆弧服务可用')
+        if circle_ready and trajectory_ready:
+            self.get_logger().info('所有服务可用')
             return True
         else:
-            self.get_logger().error('圆弧服务不可用')
+            self.get_logger().error(f'服务不可用 - 圆弧: {circle_ready}, 轨迹: {trajectory_ready}')
             return False
 
-    def send_movej_command(self, arm_name="left", joint_positions=None, duration=3.0):
+    def send_movej_command(self, arm_name="left", joint_positions=None, duration=5.0):
         """
-        发送关节空间移动命令
+        使用JointTrajectory服务发送关节空间移动命令
         
         参数:
             arm_name: "left" 或 "right"
@@ -64,21 +84,85 @@ class MoveJAndCircleClient(Node):
             if arm_name == "left":
                 joint_positions = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
             else:
-                joint_positions = [0.-0.5468, -0.5792, 0.7379, -0.7889, -0.0640, 0.1741, 0.2269]
+                joint_positions = [-0.5468, -0.5792, 0.7379, -0.7889, -0.0640, 0.1741, 0.2269]
         
-        msg = Float64MultiArray()
-        msg.data = joint_positions
+        # 获取当前关节位置
+        current_positions = self.get_current_joint_positions(arm_name)
+        if current_positions is None:
+            self.get_logger().error('无法获取当前关节位置')
+            return False
         
+        # 构建完整的14个关节位置（双臂）
         if arm_name == "left":
-            self.left_joint_pub.publish(msg)
-            self.get_logger().info(f'发送左臂关节目标: {[f"{j:.3f}" for j in joint_positions[:3]]}...')
+            # 左臂移动到目标位置，右臂保持当前位置
+            dual_joint_positions = joint_positions + current_positions['right']
         else:
-            self.right_joint_pub.publish(msg)
-            self.get_logger().info(f'发送右臂关节目标: {[f"{j:.3f}" for j in joint_positions[:3]]}...')
+            # 右臂移动到目标位置，左臂保持当前位置
+            dual_joint_positions = current_positions['left'] + joint_positions
         
-        # 等待移动完成
-        time.sleep(duration)
-        return True
+        # 创建请求
+        req = JointTrajectory.Request()
+        req.joint_names = self.left_arm_joint_names + self.right_arm_joint_names
+        
+        # 创建轨迹点
+        wp = JointWaypoint()
+        wp.position = dual_joint_positions
+        wp.time_mode = True  # 使用总时间模式
+        wp.total_time = duration
+        
+        # 设置运动限制（可根据需要调整）
+        wp.max_velocity = [0.5] * 14  # 最大速度 rad/s
+        wp.max_acceleration = [1.0] * 14  # 最大加速度 rad/s²
+        wp.max_jerk = [2.0] * 14  # 最大加加速度 rad/s³
+        
+        req.waypoints = [wp]
+        
+        # 发送请求
+        self.get_logger().info(f'发送{arm_name}臂MoveJ命令，目标关节: {[f"{j:.3f}" for j in joint_positions[:3]]}...')
+        
+        future = self.joint_trajectory_client.call_async(req)
+        
+        # 等待结果
+        try:
+            rclpy.spin_until_future_complete(self, future, timeout_sec=duration + 2.0)
+            if future.result() and future.result().success:
+                planned_duration = future.result().planned_duration
+                self.get_logger().info(f'✓ MoveJ成功，规划时长: {planned_duration:.3f}秒')
+                
+                # 等待运动完成
+                wait_time = max(planned_duration, duration) + 0.5
+                self.get_logger().info(f'等待 {wait_time:.1f} 秒完成运动...')
+                time.sleep(wait_time)
+                return True
+            else:
+                error_msg = future.result().message if future.result() else '未知错误'
+                self.get_logger().error(f'✗ MoveJ失败: {error_msg}')
+                return False
+        except Exception as e:
+            self.get_logger().error(f'调用MoveJ服务失败: {e}')
+            return False
+
+    def get_current_joint_positions(self, arm_name="left"):
+        """获取当前关节位置"""
+        if self.interface is None:
+            self.get_logger().error('机器人接口未初始化')
+            return None
+        
+        joint_state = self.interface.get_joint_state(categorized=False)
+        if joint_state is None:
+            self.get_logger().error('无法获取关节状态')
+            return None
+        
+        # 创建名称到位置的映射
+        all_joint_names = joint_state.get('names', [])
+        all_joint_positions = joint_state.get('positions', [])
+        joint_name_to_position = dict(zip(all_joint_names, all_joint_positions))
+        
+        # 提取左臂和右臂位置
+        left_positions = [joint_name_to_position.get(name, 0.0) for name in self.left_arm_joint_names]
+        right_positions = [joint_name_to_position.get(name, 0.0) for name in self.right_arm_joint_names]
+        
+        return {'left': left_positions, 'right': right_positions}
 
     def get_default_joint_positions(self, arm_name="left", pose_name="home"):
         """
@@ -90,17 +174,17 @@ class MoveJAndCircleClient(Node):
         """
         if arm_name == "left":
             positions = {
-                "home": [0.0, 0.2, 0.0, 0.0, -0.2, 0.0, 0.0],
+                "home": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
                 "rest": [0.0, 0.2, 0.0, 1.57, 0.0, 0.0, 0.0],
                 "ready": [0.0, 0.3, 0.0, 0.5, 0.0, 0.0, 0.0],
-                "circle_start": [0.0, 0.2, 0.0, 0.3, 0.0, 0.0, 0.0]
+                "circle_start": [0.2, 0.3, 0.1, 0.5, 0.0, 0.0, 0.0]
             }
         else:
             positions = {
-                "home": [0.0, -0.2, 0.0, 0.0, 0.2, 0.0, 0.0],
+                "home": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
                 "rest": [0.0, -0.2, 0.0, 1.57, 0.0, 0.0, 0.0],
                 "ready": [0.0, -0.3, 0.0, 0.5, 0.0, 0.0, 0.0],
-                "circle_start": [0.0, -0.2, 0.0, 0.3, 0.0, 0.0, 0.0]
+                "circle_start": [0.2, -0.3, -0.1, 0.5, 0.0, 0.0, 0.0]
             }
         
         return positions.get(pose_name, positions["home"])
@@ -109,9 +193,7 @@ class MoveJAndCircleClient(Node):
                                            midpoint_x=0.2839, midpoint_y=0.5915, midpoint_z=-0.4104,
                                            endpoint_x=0.3214, endpoint_y=0.4782, endpoint_z=-0.2665,
                                            duration=5.0):
-        """
-        创建三点法圆弧请求
-        """
+        """创建三点法圆弧请求"""
         request = MovecUseIK.Request()
         circle = CircleMessage()
         
@@ -144,9 +226,7 @@ class MoveJAndCircleClient(Node):
                                           axis_x=0.9104, axis_y=0.4054, axis_z=0.0822,
                                           rotate_angle=3.9551,
                                           duration=5.0):
-        """
-        创建参数法圆弧请求
-        """
+        """创建参数法圆弧请求"""
         request = MovecUseIK.Request()
         circle = CircleMessage()
         
@@ -177,9 +257,7 @@ class MoveJAndCircleClient(Node):
     def create_planar_circle_request(self, arm_name="left", 
                                       center_x=0.3, center_y=0.0, center_z=-0.2,
                                       radius=0.12, duration=6.0):
-        """
-        创建平面画圆请求
-        """
+        """创建平面画圆请求"""
         request = MovecUseIK.Request()
         circle = CircleMessage()
         
@@ -222,32 +300,23 @@ class MoveJAndCircleClient(Node):
         
         future = self.circle_client.call_async(request)
         
-        start_time = time.time()
-        while rclpy.ok() and not future.done():
-            rclpy.spin_once(self, timeout_sec=0.1)
-            if time.time() - start_time > timeout:
-                self.get_logger().error('圆弧服务调用超时')
-                return None
-        
         try:
-            return future.result()
+            rclpy.spin_until_future_complete(self, future, timeout_sec=timeout)
+            if future.result() and future.result().success:
+                return future.result()
+            else:
+                error_msg = future.result().message if future.result() else '未知错误'
+                self.get_logger().error(f'圆弧服务调用失败: {error_msg}')
+                return None
         except Exception as e:
-            self.get_logger().error(f'获取圆弧响应失败: {e}')
+            self.get_logger().error(f'圆弧服务调用异常: {e}')
             return None
 
 
-def send_fsm_command(node, command, topic="/fsm_command"):
+def send_fsm_command(interface, command, wait_time=0.5):
     """发送FSM状态切换命令"""
-    publisher = node.create_publisher(Int32, topic, 10)
-    msg = Int32()
-    msg.data = command
-    
-    for _ in range(3):
-        publisher.publish(msg)
-        time.sleep(0.1)
-    
-    node.get_logger().info(f'发送FSM命令: {command}')
-    time.sleep(0.5)
+    interface.send_fsm_command(command)
+    time.sleep(wait_time)
 
 
 def main():
@@ -258,31 +327,75 @@ def main():
     print("步骤2: 使用 MoveC 执行圆弧运动")
     print("=" * 70)
     
+    # 初始化ROS 2
     rclpy.init()
-    client = MoveJAndCircleClient()
+    
+    # 创建ROS2RobotInterface配置
+    print("[1] 创建配置...")
+    config = ROS2RobotInterfaceConfig()
+    
+    print("[2] 创建ROS2RobotInterface实例...")
+    interface = ROS2RobotInterface(config)
+    
+    print("[3] 连接到ROS 2...")
+    try:
+        interface.connect()
+        print("    ✓ 接口连接成功!\n")
+    except Exception as e:
+        print(f"    ✗ 连接失败: {e}\n")
+        return 1
+    
+    # 检查是否为双臂模式
+    is_dual_arm = interface.config.right_end_effector_target_topic is not None
+    if not is_dual_arm:
+        print("    ✗ 错误: 此测试需要双臂模式，但未检测到右臂topic\n")
+        interface.disconnect()
+        return 1
+    
+    print("    ✓ 检测到双臂模式\n")
+    
+    # 等待数据到达
+    print("[4] 等待数据到达（2秒）...")
+    time.sleep(2.0)
+    print("    ✓ 数据收集已开始\n")
+    
+    # 创建客户端节点
+    client = MoveJAndCircleClient(interface)
     
     # 等待服务
-    print("[1] 等待服务...")
+    print("[5] 等待服务...")
     if not client.wait_for_services():
         print("✗ 服务不可用")
+        interface.disconnect()
         rclpy.shutdown()
         return 1
     print("✓ 服务已就绪")
     
-    # 创建FSM命令发布器
-    fsm_pub = client.create_publisher(Int32, '/fsm_command', 10)
-    
-    # 切换到MOVEJ状态
-    print("\n[2] 切换到MOVEJ状态...")
+    # 切换到HOLD状态
+    print("\n[6] 切换到HOLD状态...")
     try:
-        send_fsm_command(client, 2)  # HOLD
-        send_fsm_command(client, 1)  # HOME
-        print("  等待HOME完成 (5秒)...")
+        send_fsm_command(interface, 2)  # HOLD
+        print("✓ 已切换到HOLD状态")
+    except Exception as e:
+        print(f"✗ 状态切换失败: {e}")
+        return 1
+    
+    # 切换到HOME状态
+    print("\n[7] 切换到HOME状态...")
+    try:
+        send_fsm_command(interface, 1)  # HOME
+        print("等待HOME完成 (5秒)...")
         time.sleep(5.0)
-        send_fsm_command(client, 2)  # HOLD
-        send_fsm_command(client, 4)  # MOVEJ
-        time.sleep(1.0)
-        print("✓ 已切换到MOVEJ状态")
+        print("✓ 已回到HOME位置")
+    except Exception as e:
+        print(f"✗ 状态切换失败: {e}")
+        return 1
+    
+    # 切换到HOLD状态
+    print("\n[8] 切换到HOLD状态...")
+    try:
+        send_fsm_command(interface, 2)  # HOLD
+        print("✓ 已切换到HOLD状态")
     except Exception as e:
         print(f"✗ 状态切换失败: {e}")
         return 1
@@ -323,36 +436,46 @@ def main():
         }
     else:
         # 右臂圆弧起点的关节位置
-        start_joints = [0.2, -0.3, -0.1, 0.5, 0.0, 0.0, 0.0]
+        # start_joints = [0-0.5468, -0.5792, 0.7379, -0.7889, -0.0640, 0.1741, 0.2269]
+        start_joints = [0-0.038, -0.7525, 0.6852, -1.2189, -0.1843, 0.0396, 0.2568]
         circle_params = {
             'midpoint': (0.3493, -0.4327, -0.3228),
             'endpoint': (0.2915, -0.2474, -0.3614)
         }
         center_params = {
-            'center': (0.3302, -0.3467, -0.3885),
-            'axis': (-0.9345, -0.3227, -0.1502),
-            'angle': 3.6985
+            # 'center': (0.0748, -0.1274, -0.2670),
+            # 'axis': (0.7071, -0.7071, 0.0),
+            'center': (0.0748, -0.1274, 0.2670),
+            'axis': (1.0, 0.0, 0.0),
+            'angle': 2.0*math.pi
         }
     
+    # 切换到MOVEJ状态
+    print(f"\n[9] 切换到MOVEJ状态...")
+    try:
+        send_fsm_command(interface, 4)  # MOVEJ
+        print("✓ 已切换到MOVEJ状态")
+    except Exception as e:
+        print(f"✗ 状态切换失败: {e}")
+        return 1
+    
     # 先移动到HOME位置
-    print(f"\n[3] MoveJ移动到{arm_name}臂HOME位置...")
-    home_joints = client.get_default_joint_positions(arm_name, "home")
-    client.send_movej_command(arm_name, home_joints, duration=3.0)
+    # print(f"\n[10] MoveJ移动到{arm_name}臂HOME位置...")
+    # home_joints = client.get_default_joint_positions(arm_name, "home")
+    # if not client.send_movej_command(arm_name, home_joints, duration=3.0):
+    #     print("✗ MoveJ到HOME失败")
+    #     return 1
     
     # 关节空间移动到圆弧起点
     if choice not in ['8']:
-        print(f"\n[4] MoveJ移动到{arm_name}臂圆弧起点...")
-        client.send_movej_command(arm_name, start_joints, duration=3.0)
-    
-    # 切换到OCS2状态（圆弧运动需要OCS2状态）
-    print(f"\n[5] 切换到OCS2状态...")
-    send_fsm_command(client, 2)  # HOLD
-    send_fsm_command(client, 3)  # OCS2
-    time.sleep(1.0)
+        print(f"\n[11] MoveJ移动到{arm_name}臂圆弧起点...")
+        if not client.send_movej_command(arm_name, start_joints, duration=3.0):
+            print("✗ MoveJ到起点失败")
+            return 1
     
     # 执行圆弧运动
     if choice not in ['7']:
-        print(f"\n[6] 执行{arm_name}臂圆弧运动...")
+        print(f"\n[13] 执行{arm_name}臂圆弧运动...")
         
         if choice in ['1', '4']:
             circle_req = client.create_circle_request_three_point(
@@ -369,13 +492,13 @@ def main():
         elif choice in ['2', '5']:
             circle_req = client.create_circle_request_parametric(
                 arm_name=arm_name,
-                center_x=center_params['center'][0.0748],
-                center_y=center_params['center'][-0.1274],
-                center_z=center_params['center'][0.2670],
-                axis_x=center_params['axis'][0.7071],
-                axis_y=center_params['axis'][-0.7071],
-                axis_z=center_params['axis'][0],
-                rotate_angle=center_params['angle'][2.0*math.pi],
+                center_x=center_params['center'][0],
+                center_y=center_params['center'][1],
+                center_z=center_params['center'][2],
+                axis_x=center_params['axis'][0],
+                axis_y=center_params['axis'][1],
+                axis_z=center_params['axis'][2],
+                rotate_angle=center_params['angle'],
                 duration=6.0
             )
             method_name = "参数法"
@@ -410,17 +533,26 @@ def main():
             return 1
     
     # 清理
-    print("\n[7] 清理...")
+    print("\n[14] 清理...")
     
     # 切换回MOVEJ状态
-    send_fsm_command(client, 2)  # HOLD
-    time.sleep(0.5)
-    send_fsm_command(client, 4)  # MOVEJ
-    print("✓ 已切换回MOVEJ状态")
+    try:
+        send_fsm_command(interface, 2)  # HOLD
+        time.sleep(0.5)
+        send_fsm_command(interface, 4)  # MOVEJ
+        print("✓ 已切换回MOVEJ状态")
+    except Exception as e:
+        print(f"⚠ 状态切换失败: {e}")
     
+    # 断开连接
+    print("\n[15] 断开连接...")
+    interface.disconnect()
     client.destroy_node()
     rclpy.shutdown()
-    print("\n测试完成！")
+    
+    print("\n" + "=" * 70)
+    print("测试完成！")
+    print("=" * 70)
     return 0
 
 
