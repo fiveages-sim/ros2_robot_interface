@@ -6,7 +6,7 @@ ROS 2 机器人接口的配置类。
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, Sequence
 
 
 class ControlType(Enum):
@@ -67,6 +67,10 @@ class ROS2RobotInterfaceConfig:
     body_joint_controller_topic: str | None = None  # 【可自动检测】身体关节控制器话题，例如 "/body_joint_controller/target_joint_position"
     left_hand_joint_controller_topic: str | None = None  # 【可自动检测】左灵巧手关节控制器话题，例如 "/left_hand_controller/target_joint_position"
     right_hand_joint_controller_topic: str | None = None  # 【可自动检测】右灵巧手关节控制器话题，例如 "/right_hand_controller/target_joint_position"
+    waist_lifting_topic: str | None = None  # 【可自动检测】腰部升降相对位置控制话题，例如 "/body_joint_controller/waist_lifting"
+    waist_lifting_command_topic: str | None = None  # 【可自动检测】腰部升降速度控制话题，例如 "/body_joint_controller/waist_lifting_command"
+    waist_turning_command_topic: str | None = None  # 【可自动检测】腰部旋转速度控制话题，例如 "/body_joint_controller/waist_turning_command"
+    body_joint_current_target_topic: str | None = None  # 【可自动检测】腰部关节控制器话题，例如 "/body_joint_controller/target_joint_position"
     
     # ============================================================================
     # 手臂关节控制器话题（自动检测，无需手动配置）
@@ -92,11 +96,19 @@ class ROS2RobotInterfaceConfig:
     gripper_joint_name: str = "gripper_joint"  # 【未使用】夹爪关节名称（预留，目前代码使用从 /joint_states topic 接收的实际关节名称）
     gripper_state_topic: str = "/gripper_state"  # 【未使用】夹爪状态订阅话题（预留，目前未实现单独的状态话题订阅）
     gripper_command_topic: str = "/gripper_joint/position_command"  # 【自动检测到会覆盖当前值】夹爪控制发布话题（必需，用于夹爪控制）
-    gripper_min_position: float = 0.0  # 夹爪闭合位置（最小开度）
-    gripper_max_position: float = 0.0384  # 夹爪打开位置（最大开度）
+    # ⚠️ 重要：使用夹爪前必须根据实际硬件正确配置以下两个参数。
+    # 这两个值直接影响：
+    #   1. send_joint_positions() 的位置限幅（clamping）
+    #   2. send_position_percent() 的百分比 → 实际行程换算
+    #   3. check_arrival() / wait_until_arrive() 的到位检测精度
+    # 默认值仅为示例，不同夹爪型号的行程范围差异较大，请务必替换为实测值。
+    gripper_min_position: float = 0.0     # 夹爪完全闭合时的关节位置（最小行程，单位：rad 或 m，取决于硬件）
+    gripper_max_position: float = 0.0384  # 夹爪完全打开时的关节位置（最大行程，单位：rad 或 m，取决于硬件）
     # 【自动检测】夹爪控制器名称（系统会在 connect() 时自动检测，不应手动设置）
     left_gripper_controller_name: str | None = None  # 【自动检测】左臂夹爪控制器名称（自动检测：hand_controller、left_hand_controller 或 left_gripper_controller）
     right_gripper_controller_name: str | None = None  # 【自动检测】右臂夹爪控制器名称（自动检测：right_hand_controller 或 right_gripper_controller）
+    left_gripper_target_percent_topic: str | None = None  # 【自动检测】左臂夹爪百分比控制话题，例如 "/left_gripper_controller/target_percent"
+    right_gripper_target_percent_topic: str | None = None  # 【自动检测】右臂夹爪百分比控制话题，例如 "/right_gripper_controller/target_percent"
     
     # ============================================================================
     # 控制参数（未使用，预留）
@@ -125,6 +137,11 @@ class ROS2RobotInterfaceConfig:
     end_effector_pose_timeout: float = 0.0  # 【可选】末端执行器位姿超时时间（单位：秒）
     
     # ============================================================================
+    # 状态机切换（可选，手动配置）
+    # ============================================================================
+    fsm_state_switch_settle_time: float = 0.3  # 【可选】发送 FSM 状态切换命令后的等待时间（单位：秒），用于确保对端完成状态切换
+    
+    # ============================================================================
     # ROS 2 节点配置（可选，手动配置）
     # ============================================================================
     namespace: str = ""  # 【可选】ROS 2 节点命名空间，默认为空字符串
@@ -140,5 +157,75 @@ class ROS2RobotInterfaceConfig:
     pose_orientation_threshold: float = 0.1  # 【可选】位姿姿态阈值（单位：四元数距离），用于 arm_handler.check_arrival 检查末端执行器姿态是否到达目标
     gripper_stability_history_size: int = 20  # 【可选】夹爪位置历史记录数量，用于夹爪稳定性检查
     gripper_stability_threshold: float = 0.0001  # 【可选】夹爪位置稳定性阈值，用于判断夹爪位置是否稳定
+
+    @classmethod
+    def default_single_arm(
+        cls,
+        *,
+        joint_states_topic: str = "/joint_states",
+        current_pose_topic: str = "/left_current_pose",
+        target_pose_topic: str = "/left_target",
+        current_target_topic: str | None = "/left_current_target",
+        joint_names: Sequence[str] | None = None,
+        gripper_joint_name: str = "left_gripper_joint",
+        gripper_command_topic: str = "/left_gripper_joint/position_command",
+        **kwargs: object,
+    ) -> "ROS2RobotInterfaceConfig":
+        """Create a practical default preset for single-arm robots.
+
+        Extra keyword arguments are forwarded to the dataclass constructor,
+        allowing overrides such as ``pose_position_threshold``.
+        """
+        return cls(
+            joint_states_topic=joint_states_topic,
+            end_effector_pose_topic=current_pose_topic,
+            end_effector_target_topic=target_pose_topic,
+            end_effector_current_target_topic=current_target_topic,
+            joint_names=list(joint_names) if joint_names is not None else [],
+            gripper_enabled=True,
+            gripper_joint_name=gripper_joint_name,
+            gripper_command_topic=gripper_command_topic,
+            control_type=ControlType.CARTESIAN_POSE,
+            **kwargs,
+        )
+
+    @classmethod
+    def default_bimanual(
+        cls,
+        *,
+        joint_states_topic: str = "/joint_states",
+        left_current_pose_topic: str = "/left_current_pose",
+        right_current_pose_topic: str = "/right_current_pose",
+        left_target_topic: str = "/left_target",
+        right_target_topic: str = "/right_target",
+        left_current_target_topic: str | None = "/left_current_target",
+        right_current_target_topic: str | None = "/right_current_target",
+        joint_names: Sequence[str] | None = None,
+        left_gripper_joint_name: str = "left_gripper_joint",
+        left_gripper_command_topic: str = "/left_gripper_joint/position_command",
+        right_gripper_command_topic: str = "/right_gripper_joint/position_command",
+        **kwargs: object,
+    ) -> "ROS2RobotInterfaceConfig":
+        """Create a practical default preset for bimanual robots.
+
+        Extra keyword arguments are forwarded to the dataclass constructor,
+        allowing overrides such as ``pose_position_threshold``.
+        """
+        return cls(
+            joint_states_topic=joint_states_topic,
+            end_effector_pose_topic=left_current_pose_topic,
+            end_effector_target_topic=left_target_topic,
+            right_end_effector_pose_topic=right_current_pose_topic,
+            right_end_effector_target_topic=right_target_topic,
+            end_effector_current_target_topic=left_current_target_topic,
+            right_end_effector_current_target_topic=right_current_target_topic,
+            joint_names=list(joint_names) if joint_names is not None else [],
+            gripper_enabled=True,
+            gripper_joint_name=left_gripper_joint_name,
+            gripper_command_topic=left_gripper_command_topic,
+            right_gripper_command_topic=right_gripper_command_topic,
+            control_type=ControlType.CARTESIAN_POSE,
+            **kwargs,
+        )
     
 

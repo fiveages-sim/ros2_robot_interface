@@ -15,6 +15,7 @@ from rclpy.publisher import Publisher
 from rclpy.subscription import Subscription
 from std_msgs.msg import Float64MultiArray
 
+from ..constants import FSM_MOVEJ
 from ..utils.exceptions import ROS2NotConnectedError
 
 logger = logging.getLogger(__name__)
@@ -39,7 +40,8 @@ class ArmHandler:
         node: Node,
         arm_type: ArmType,
         config: 'ROS2RobotInterfaceConfig',
-        fsm_command_callback: Optional[Callable[[int], None]] = None
+        fsm_command_callback: Optional[Callable[[int], None]] = None,
+        fsm_command_query: Optional[Callable[[], int]] = None,
     ):
         """
         初始化单臂处理器
@@ -49,11 +51,14 @@ class ArmHandler:
             arm_type: 手臂类型（LEFT 或 RIGHT）
             config: ROS2RobotInterfaceConfig 配置对象
             fsm_command_callback: 可选的 FSM 命令回调函数，用于切换状态（传入命令值）
+            fsm_command_query: 可选，返回当前 FSM 命令值（1–4，与 ``ROS2RobotInterface.get_fsm_command`` 一致）。
+                若提供，``send_joint_positions`` 在已为 MOVEJ 时可跳过重复的状态切换。
         """
         self.node = node
         self.arm_type = arm_type
         self.config = config
         self.fsm_command_callback = fsm_command_callback
+        self._fsm_command_query = fsm_command_query
         
         # 根据手臂类型确定 topic 名称和标签
         if arm_type == ArmType.LEFT:
@@ -172,31 +177,52 @@ class ArmHandler:
         self.target_pub.publish(pose)
         logger.debug(f"Published {self.label.lower()} target: {pose}")
     
-    def send_target_stamped(self, frame_id: str, pose: Pose) -> None:
+    def send_target_stamped(self, frame_id: str | Pose | None = None, pose: Optional[Pose] = None) -> None:
         """发送带坐标系的目标 pose
         
         Args:
-            frame_id: 坐标系 ID
-            pose: 目标 pose
+            frame_id: 坐标系 ID；也可省略，此时会回退到最近订阅到的 self.frame_id
+            pose: 目标 pose；也支持使用 send_target_stamped(pose) 的调用形式
             
         Raises:
             ROS2NotConnectedError: 如果发布器未初始化
+            ValueError: 如果未提供可用的 frame_id，或未提供 pose
         """
         if self.target_stamped_pub is None:
             raise ROS2NotConnectedError(f"{self.label} target stamped publisher not initialized")
+
+        # 兼容两种调用方式：
+        # 1. send_target_stamped("frame_id", pose)
+        # 2. send_target_stamped(pose)
+        if isinstance(frame_id, Pose):
+            if pose is not None:
+                raise ValueError(f"{self.label}: pose provided twice in send_target_stamped()")
+            pose = frame_id
+            frame_id = None
+
+        if pose is None:
+            raise ValueError(f"{self.label}: pose is required in send_target_stamped()")
+
+        resolved_frame_id = frame_id if isinstance(frame_id, str) and frame_id else self.frame_id
+        if not resolved_frame_id:
+            raise ValueError(
+                f"{self.label}: frame_id is required because no default frame_id is available yet"
+            )
         
         # 清除旧的 current target，避免在收到新目标前误判为已到达
         self.latest_target_pose = None
         
         # 创建 PoseStamped 消息
         pose_stamped = PoseStamped()
-        pose_stamped.header.frame_id = frame_id
+        pose_stamped.header.frame_id = resolved_frame_id
         pose_stamped.header.stamp = self.node.get_clock().now().to_msg()
         pose_stamped.pose = pose
         
         # 发布
         self.target_stamped_pub.publish(pose_stamped)
-        logger.debug(f"Published {self.label.lower()} target (stamped) in frame '{frame_id}': {pose}")
+        logger.debug(
+            f"Published {self.label.lower()} target (stamped) in frame '{resolved_frame_id}': {pose}"
+        )
     
     def get_target_pose(self) -> Optional[Pose]:
         if not self.current_target_topic:
@@ -213,8 +239,25 @@ class ArmHandler:
         # 直接返回 frame_id，在 Python 中单个对象引用读取是原子的
         return self.frame_id
     
+    def query_fsm_command(self) -> Optional[int]:
+        """若构造时传入了 ``fsm_command_query``，返回当前记录的 FSM 命令值；否则为 ``None``。
+        
+        与 ``ROS2RobotInterface.get_fsm_command`` 使用同一套取值（1=HOME, 2=HOLD, 3=OCS2, 4=MOVEJ）。
+        查询失败时记录 debug 日志并返回 ``None``。
+        """
+        if self._fsm_command_query is None:
+            return None
+        try:
+            return int(self._fsm_command_query())
+        except Exception as e:
+            logger.debug(f"{self.label}: fsm_command_query failed: {e}")
+            return None
+    
     def send_joint_positions(self, positions: List[float]) -> None:
         """发送关节位置命令（MoveJ 模式）
+        
+        若构造时传入了 ``fsm_command_query`` 且当前已为 MOVEJ，则不再发送 HOLD/MOVEJ 切换命令，
+        以减少重复切换与 ``fsm_state_switch_settle_time`` 等待。
         
         Args:
             positions: 目标关节位置列表
@@ -236,19 +279,32 @@ class ArmHandler:
                 f"Please initialize ArmHandler with fsm_command_callback."
             )
         
-        # 发送 FSM 命令切换到 MOVEJ 状态
-        try:
-            self.fsm_command_callback(4)
-            logger.debug(f"{self.label}: Automatically switched to MOVEJ state for arm joint control")
-            # 注意：状态切换是异步的，如果需要确保状态切换完成后再发送关节位置，
-            # 可以在调用此函数后自行等待，或确保当前已在 MOVEJ 状态
-        except Exception as e:
-            logger.warning(f"{self.label}: Failed to switch to MOVEJ state: {e}")
+        # 发送 FSM 命令切换到 MOVEJ 状态（若已查询到当前为 MOVEJ 则跳过，避免重复切换与等待）
+        skip_fsm = False
+        current = self.query_fsm_command()
+        if current is not None and current == FSM_MOVEJ:
+            skip_fsm = True
+            print(
+                f"{self.label}: FSM already MOVEJ (command={current}), skipping HOLD/MOVEJ switch",
+                flush=True,
+            )
+        if not skip_fsm:
+            try:
+                self.fsm_command_callback(2)
+                self.fsm_command_callback(4)
+                print(
+                    f"{self.label}: Automatically switched to MOVEJ state for arm joint control",
+                    flush=True,
+                )
+                # 注意：状态切换是异步的，如果需要确保状态切换完成后再发送关节位置，
+                # 可以在调用此函数后自行等待，或确保当前已在 MOVEJ 状态
+            except Exception as e:
+                print(f"{self.label}: Failed to switch to MOVEJ state: {e}", flush=True)
         
         msg = Float64MultiArray()
         msg.data = positions
         self.joint_controller_pub.publish(msg)
-        logger.info(f"Published {self.label.lower()} joint positions: {positions}")
+        print(f"Published {self.label.lower()} joint positions: {positions}", flush=True)
     
     def check_arrival(self, pose_threshold: float | None = None, 
                      orient_threshold: float | None = None) -> Dict[str, Any]:
@@ -290,14 +346,6 @@ class ArmHandler:
             arrived = (pos_dist < pose_threshold and orient_dist < orient_threshold)
             
             status_msg = f"{self.label}已到达目标位置" if arrived else f"{self.label}未到达目标位置"
-            print(f"  [位置检查-{self.label}] 当前位置: ({current_pose.position.x:.4f}, {current_pose.position.y:.4f}, {current_pose.position.z:.4f})")
-            print(f"  [位置检查-{self.label}] 目标位置: ({target_pose.position.x:.4f}, {target_pose.position.y:.4f}, {target_pose.position.z:.4f})")
-            print(f"  [位置检查-{self.label}] 位置距离: {pos_dist:.4f} 米 (阈值: {pose_threshold:.4f})")
-            print(f"  [位置检查-{self.label}] 姿态距离: {orient_dist:.4f} (阈值: {orient_threshold:.4f})")
-            print(f"  [位置检查-{self.label}] {'✓ 已到达目标位置' if arrived else '✗ 未到达目标位置'}")
-            if arrived:
-                print(f"  [OCS2] → {status_msg}，等待中...")
-            print()
         
         return {
             'arrived': arrived,

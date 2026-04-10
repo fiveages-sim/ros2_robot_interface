@@ -9,7 +9,7 @@ import logging
 import sys
 import threading
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import rclpy
@@ -17,6 +17,7 @@ from geometry_msgs.msg import Pose, PoseStamped, TransformStamped, Twist
 from nav_msgs.msg import Path
 from rclpy.duration import Duration
 from rclpy.executors import SingleThreadedExecutor
+from rclpy.client import Client
 from rclpy.node import Node
 from rclpy.publisher import Publisher
 from rclpy.subscription import Subscription
@@ -27,6 +28,9 @@ from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 import tf2_ros
 from tf2_ros import TransformException
 from tf2_geometry_msgs import do_transform_pose
+
+from arms_ros2_control_msgs.srv import ExecutePath
+
 from .config import ControlType, ROS2RobotInterfaceConfig
 from .utils.exceptions import ROS2AlreadyConnectedError, ROS2NotConnectedError
 from .handler import ArmHandler, ArmType, GripperHandler, GripperType
@@ -53,7 +57,9 @@ class ROS2RobotInterface:
         self.joint_state_sub: Subscription | None = None
         self.fsm_command_sub: Subscription | None = None
         self.robot_description_sub: Subscription | None = None
+        self.body_current_target_sub: Subscription | None = None
         self.target_path_pub: Publisher | None = None
+        self.execute_path_client: Client | None = None
         self.dual_target_stamped_pub: Publisher | None = None
         self.fsm_command_pub: Publisher | None = None
         self.head_joint_controller_pub: Publisher | None = None
@@ -62,6 +68,9 @@ class ROS2RobotInterface:
         self.right_hand_joint_controller_pub: Publisher | None = None
         self.arm_trajectory_pub: Publisher | None = None  # Unified trajectory publisher for both arms
         self.unified_arm_joint_controller_pub: Publisher | None = None  # Unified joint position publisher for both arms
+
+        self.waist_lifting_command_pub: Publisher | None = None
+        self.waist_turning_command_pub: Publisher | None = None
 
         self.latest_joint_state: Dict[str, Any] | None = None
         self.latest_categorized_joint_state: Dict[str, Any] | None = None  # Cached categorized state
@@ -80,6 +89,7 @@ class ROS2RobotInterface:
         
         self.head_target_positions: Optional[List[float]] = None
         self.body_target_positions: Optional[List[float]] = None
+        self.body_current_target: Optional[List[float]] = None
         
         self.tf_buffer: Optional[tf2_ros.Buffer] = None
         self.tf_listener: Optional[tf2_ros.TransformListener] = None
@@ -174,12 +184,32 @@ class ROS2RobotInterface:
         elif "/right_gripper_controller/target_command" in topic_names:
             self.config.right_gripper_controller_name = "right_gripper_controller"
             logger.info("Detected right gripper controller: right_gripper_controller")
+
+        # 检测 target_percent 话题（百分比控制）
+        if "/left_gripper_controller/target_percent" in topic_names:
+            self.config.left_gripper_target_percent_topic = "/left_gripper_controller/target_percent"
+            logger.info("Detected left gripper target_percent topic")
+        if "/right_gripper_controller/target_percent" in topic_names:
+            self.config.right_gripper_target_percent_topic = "/right_gripper_controller/target_percent"
+            logger.info("Detected right gripper target_percent topic")
         
         if "/head_joint_controller/target_joint_position" in topic_names:
             self.config.head_joint_controller_topic = "/head_joint_controller/target_joint_position"
         
         if "/body_joint_controller/target_joint_position" in topic_names:
             self.config.body_joint_controller_topic = "/body_joint_controller/target_joint_position"
+
+        if "/body_joint_controller/current_target_joint" in topic_names:
+            self.config.body_joint_current_target_topic = "/body_joint_controller/current_target_joint"
+
+        if "/body_joint_controller/waist_lifting" in topic_names:
+            self.config.waist_lifting_topic = "/body_joint_controller/waist_lifting"
+
+        if "/body_joint_controller/waist_lifting_command" in topic_names:
+            self.config.waist_lifting_command_topic = "/body_joint_controller/waist_lifting_command"
+
+        if "/body_joint_controller/waist_turning_command" in topic_names:
+            self.config.waist_turning_command_topic = "/body_joint_controller/waist_turning_command"
         
         # 检测灵巧手关节控制器 topic
         if "/left_hand_controller/target_joint_position" in topic_names:
@@ -281,6 +311,16 @@ class ROS2RobotInterface:
                 robot_desc_qos
             )
             logger.info("✅ Subscribed to /robot_description for URDF tracking")
+
+            if self.config.body_joint_current_target_topic:
+                # Subscribe to current target body joints
+                self.body_current_target_sub = self.robot_node.create_subscription(
+                    Float64MultiArray,
+                    self.config.body_joint_current_target_topic,
+                    self._body_current_target_callback,
+                    10
+                )
+                logger.info("✅ Subscribed to {} for body target tracking".format(self.config.body_joint_current_target_topic))
             
             # Initialize TF buffer first (needed by ArmHandler)
             self.tf_buffer = tf2_ros.Buffer()
@@ -291,7 +331,8 @@ class ROS2RobotInterface:
                 self.robot_node,
                 ArmType.LEFT,
                 self.config,
-                self.send_fsm_command
+                self.send_fsm_command,
+                self.get_fsm_command,
             )
             self.left_arm_handler.initialize()
             
@@ -301,10 +342,14 @@ class ROS2RobotInterface:
                     self.robot_node,
                     ArmType.RIGHT,
                     self.config,
-                    self.send_fsm_command
+                    self.send_fsm_command,
+                    self.get_fsm_command,
                 )
                 self.right_arm_handler.initialize()
                 self.target_path_pub = self.robot_node.create_publisher(Path, "/target_path", 10)
+                self.execute_path_client = self.robot_node.create_client(
+                    ExecutePath, "execute_path"
+                )
                 self.dual_target_stamped_pub = self.robot_node.create_publisher(Path, "/dual_target/stamped", 10)
             
             # Create left gripper handler (if enabled and controller detected)
@@ -345,6 +390,21 @@ class ROS2RobotInterface:
             if self.config.body_joint_controller_topic:
                 self.body_joint_controller_pub = self.robot_node.create_publisher(
                     Float64MultiArray, self.config.body_joint_controller_topic, 10
+                )
+
+            if self.config.waist_lifting_topic:
+                self.waist_lifting_pub = self.robot_node.create_publisher(
+                    Float64, self.config.waist_lifting_topic, 10
+                )
+
+            if self.config.waist_lifting_command_topic:
+                self.waist_lifting_command_pub = self.robot_node.create_publisher(
+                    Float64, self.config.waist_lifting_command_topic, 10
+                )
+
+            if self.config.waist_turning_command_topic:
+                self.waist_turning_command_pub = self.robot_node.create_publisher(
+                    Float64, self.config.waist_turning_command_topic, 10
                 )
             
             if self.config.left_hand_joint_controller_topic:
@@ -428,6 +488,14 @@ class ROS2RobotInterface:
         except Exception as e:
             logger.error(f"Error in robot description callback: {e}", exc_info=True)
     
+    def _body_current_target_callback(self, msg: Float64MultiArray) -> None:
+        """Callback for body current target joint messages."""
+        try:
+            self.body_current_target = list(msg.data) if msg.data else None
+            logger.debug(f"Body current target updated: {self.body_current_target}")
+        except Exception as e:
+            logger.error(f"Error in body current target callback: {e}", exc_info=True)
+
     def _joint_state_callback(self, msg: JointState) -> None:
         """Callback for joint state messages."""
         current_time = time.time()
@@ -624,71 +692,11 @@ class ROS2RobotInterface:
         
         return self.last_joint_state_time if self.last_joint_state_time > 0.0 else None
 
-    def get_end_effector_pose(self) -> Optional[Pose]:
-        """Get the latest left end-effector pose."""
-        if not self.is_connected:
+    def get_body_current_target(self) -> Optional[List[float]]:
+        """Get latest body current target."""
+        if self.body_current_target is None:
             return None
-
-        if self.left_arm_handler is None:
-            logger.warning("Left arm handler not initialized")
-            return None
-
-        return self.left_arm_handler.get_pose()
-
-    def get_right_end_effector_pose(self) -> Optional[Pose]:
-        """Get the latest right end-effector pose (dual-arm only)."""
-        if not self.is_connected:
-            return None
-
-        if self.right_arm_handler is None:
-            logger.warning("Right arm handler not initialized")
-            return None
-
-        return self.right_arm_handler.get_pose()
-
-    def send_end_effector_target(self, pose: Pose) -> None:
-        """Send a target pose for the left arm end-effector."""
-        if not self.is_connected:
-            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
-
-        if self.left_arm_handler is None or self.left_arm_handler.target_pub is None:
-            logger.warning("Left arm target publisher not initialized")
-            return
-
-        self.left_arm_handler.send_target(pose)
-
-    def send_right_end_effector_target(self, pose: Pose) -> None:
-        """Send a target pose for the right arm end-effector (dual-arm only)."""
-        if not self.is_connected:
-            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
-
-        if self.right_arm_handler is None or self.right_arm_handler.target_pub is None:
-            logger.warning("Right arm target publisher not initialized")
-            return
-
-        self.right_arm_handler.send_target(pose)
-
-    def send_gripper_command(self, position: float) -> None:
-        """Send a target position for the left gripper."""
-        if not self.is_connected:
-            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
-
-        if self.left_gripper_handler is None:
-            logger.warning("Left gripper handler not initialized")
-            return
-
-        self.left_gripper_handler.send_joint_positions(position)
-
-    def send_right_gripper_command(self, position: float) -> None:
-        """Send a target position for the right gripper (dual-arm only)."""
-        if not self.is_connected:
-            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
-
-        if self.right_gripper_handler is None:
-            logger.warning("Right gripper handler not initialized")
-            return
-
-        self.right_gripper_handler.send_joint_positions(position)
+        return list(self.body_current_target)
 
     def _copy_pose(self, src: Pose, dst: Pose) -> None:
         """Copy pose data from src to dst."""
@@ -752,7 +760,68 @@ class ROS2RobotInterface:
         self.target_path_pub.publish(path_msg)
         logger.info(f"Published target path with {len(left_poses)} left arm waypoints and {len(right_poses)} right arm waypoints (total: {len(path_msg.poses)})")
         logger.debug(f"Path frame_id: {path_msg.header.frame_id}")
-    
+
+    def execute_path(
+        self,
+        left_poses: List[Pose | PoseStamped],
+        right_poses: List[Pose | PoseStamped],
+        trajectory_duration: float = 0.0,
+        frame_id: Optional[str] = None,
+    ) -> bool:
+        """Send unequal-waypoint dual-arm path via ExecutePath service."""
+        if not self.is_connected:
+            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+
+        if not self.config.right_end_effector_target_topic:
+            raise ROS2NotConnectedError(
+                "ExecutePath requires dual-arm mode. Right end-effector target topic not configured."
+            )
+
+        if self.execute_path_client is None:
+            raise ROS2NotConnectedError("ExecutePath client not initialized")
+
+        if not self.execute_path_client.service_is_ready():
+            raise ROS2NotConnectedError("ExecutePath service not available")
+
+        def to_pose_stamped(pose: Pose | PoseStamped) -> PoseStamped:
+            ps = PoseStamped()
+            if frame_id is not None:
+                ps.header.frame_id = frame_id
+            elif isinstance(pose, PoseStamped):
+                ps.header.frame_id = pose.header.frame_id
+            else:
+                ps.header.frame_id = ""
+            ps.header.stamp = self.robot_node.get_clock().now().to_msg()
+            ps.pose = pose.pose if isinstance(pose, PoseStamped) else pose
+            return ps
+
+        request = ExecutePath.Request()
+        request.left_arm_path.poses = [to_pose_stamped(p) for p in left_poses]
+        request.right_arm_path.poses = [to_pose_stamped(p) for p in right_poses]
+        request.trajectory_duration = trajectory_duration
+
+        if left_poses and self.left_arm_handler:
+            self.left_arm_handler.latest_target_pose = None
+        if right_poses and self.right_arm_handler:
+            self.right_arm_handler.latest_target_pose = None
+
+        future = self.execute_path_client.call_async(request)
+
+        event = threading.Event()
+        future.add_done_callback(lambda _: event.set())
+        if not event.wait(timeout=5.0):
+            raise ROS2NotConnectedError("ExecutePath service call timed out")
+
+        if future.result() is None:
+            raise ROS2NotConnectedError("ExecutePath service call failed")
+
+        response = future.result()
+        logger.info(
+            f"ExecutePath: success={response.success}, "
+            f"duration={response.estimated_duration:.2f}s, msg={response.message}"
+        )
+        return response.success
+
     def send_dual_arm_target_stamped(self, left_pose: Pose, right_pose: Pose, frame_id: str = "arm_base") -> None:
         """Send dual-arm target poses to /dual_target/stamped topic."""
         if not self.is_connected:
@@ -815,6 +884,9 @@ class ROS2RobotInterface:
             self._current_fsm_command = command
         else:
             logger.debug(f"FSM command {command} is a special command, not updating internal state")
+        
+        # 等待状态机完成切换，避免后续指令在旧状态下执行
+        time.sleep(self.config.fsm_state_switch_settle_time)
     
     def get_fsm_command(self) -> int:
         """Get current FSM command.
@@ -891,6 +963,52 @@ class ROS2RobotInterface:
         logger.debug(f"Published body joint positions: {positions}")
         
         self.body_target_positions = positions.copy() if positions else None
+
+    def send_waist_lifting_relative_position(self, position: float) -> None:
+        """Send target relative position for waist lifting."""
+        if not self.is_connected:
+            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+        
+        if self.waist_lifting_pub is None:
+            logger.warning("Waist lifting publisher not initialized. Set waist_lifting_topic in config.")
+            return
+        
+        msg = Float64()
+        msg.data = position
+        self.waist_lifting_pub.publish(msg)
+        logger.debug(f"Published waist lifting relative position: {position}")
+
+    def send_waist_lifting_velocity_scale(self, velocity_scale: float) -> None:
+        """Send target velocity for waist lifting."""
+        if not self.is_connected:
+            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+        
+        if self.waist_lifting_pub is None:
+            logger.warning("Waist lifting publisher not initialized. Set waist_lifting_command_topic in config.")
+            return
+        
+        velocity_scale = max(min(velocity_scale, 1),-1)
+        
+        msg = Float64()
+        msg.data = velocity_scale
+        self.waist_lifting_command_pub.publish(msg)
+        logger.debug(f"Published waist lifting velocity_scale: {velocity_scale}")
+
+    def send_waist_turning_velocity_scale(self, velocity_scale: float) -> None:
+        """Send target velocity for waist turning."""
+        if not self.is_connected:
+            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+        
+        if self.waist_lifting_pub is None:
+            logger.warning("Waist turning publisher not initialized. Set waist_turning_command_topic in config.")
+            return
+        
+        velocity_scale = max(min(velocity_scale, 1),-1)
+        
+        msg = Float64()
+        msg.data = velocity_scale
+        self.waist_turning_command_pub.publish(msg)
+        logger.debug(f"Published waist turning velocity_scale: {velocity_scale}")
     
     def send_left_hand_joint_positions(self, positions: List[float]) -> None:
         """Send target joint positions for left hand joints."""
@@ -1180,6 +1298,81 @@ class ROS2RobotInterface:
                 result['right_gripper'] = right_gripper_result
         
         return result
+
+    def wait_until_arrive(
+        self,
+        part: str = "arm",
+        timeout: float = 3.0,
+        poll_period: float = 0.05,
+        position_threshold: Optional[float] = None,
+        time_now_fn: Optional[Callable[[], float]] = None,
+        sleep_fn: Optional[Callable[[float], None]] = None,
+        wall_timeout_guard: Optional[float] = None,
+        on_poll: Optional[Callable[[Optional[Dict[str, Any]], float], None]] = None,
+    ) -> Dict[str, Any]:
+        """Wait until the specified part arrives at target.
+
+        This method wraps ``check_arrive`` with a polling loop and timeout control.
+        It prefers arrival checks over fixed sleeps, while still providing a timeout
+        safeguard for unstable communication or unreachable targets.
+
+        Args:
+            part: Part name accepted by ``check_arrive`` (e.g. ``arm``, ``gripper``,
+                ``left_arm``, ``left_gripper``).
+            timeout: Maximum wait time in seconds.
+            poll_period: Polling interval in seconds.
+            position_threshold: Optional threshold forwarded to ``check_arrive``.
+            time_now_fn: Optional custom clock function. Use this when timeout should
+                follow simulation time instead of wall time.
+            sleep_fn: Optional sleep function paired with ``time_now_fn``.
+            wall_timeout_guard: Optional wall-time guard (seconds) to prevent hard
+                hangs when simulation clock is paused forever.
+
+        Returns:
+            Dict containing:
+            - ``arrived`` (bool): Whether target was reached.
+            - ``elapsed`` (float): Elapsed wait time in seconds.
+            - ``result`` (dict | None): Last result from ``check_arrive``.
+        """
+        now_fn = time_now_fn or time.monotonic
+        wait_fn = sleep_fn or time.sleep
+
+        if timeout <= 0.0:
+            result = self.check_arrive(part=part, position_threshold=position_threshold)
+            return {"arrived": bool(result and result.get("arrived", False)), "elapsed": 0.0, "result": result}
+
+        start = now_fn()
+        wall_start = time.monotonic()
+        last_result: Optional[Dict[str, Any]] = None
+        while (now_fn() - start) <= timeout:
+            result = self.check_arrive(part=part, position_threshold=position_threshold)
+            if isinstance(result, dict):
+                last_result = result
+                if on_poll is not None:
+                    try:
+                        on_poll(result, now_fn() - start)
+                    except Exception:
+                        pass
+                if result.get("arrived", False):
+                    return {
+                        "arrived": True,
+                        "elapsed": now_fn() - start,
+                        "result": result,
+                    }
+            elif on_poll is not None:
+                try:
+                    on_poll(None, now_fn() - start)
+                except Exception:
+                    pass
+            if wall_timeout_guard is not None and (time.monotonic() - wall_start) > wall_timeout_guard:
+                break
+            wait_fn(max(0.0, poll_period))
+
+        return {
+            "arrived": False,
+            "elapsed": now_fn() - start,
+            "result": last_result,
+        }
     
     def lookup_transform(self, target_frame: str, source_frame: str, 
                         timeout: Optional[float] = None) -> Optional[TransformStamped]:
@@ -1350,6 +1543,10 @@ class ROS2RobotInterface:
         if self.robot_description_sub:
             self.robot_description_sub.destroy()
             self.robot_description_sub = None
+
+        if self.body_current_target_sub:
+            self.body_current_target_sub.destroy()
+            self.body_current_target_sub = None
         
         # Cleanup arm handlers
         if self.left_arm_handler:
@@ -1363,7 +1560,11 @@ class ROS2RobotInterface:
         if self.target_path_pub:
             self.target_path_pub.destroy()
             self.target_path_pub = None
-        
+
+        if self.execute_path_client:
+            self.execute_path_client.destroy()
+            self.execute_path_client = None
+
         if self.dual_target_stamped_pub:
             self.dual_target_stamped_pub.destroy()
             self.dual_target_stamped_pub = None
@@ -1400,6 +1601,14 @@ class ROS2RobotInterface:
         if self.unified_arm_joint_controller_pub:
             self.unified_arm_joint_controller_pub.destroy()
             self.unified_arm_joint_controller_pub = None
+
+        if self.waist_lifting_command_pub:
+            self.waist_lifting_command_pub.destroy()
+            self.waist_lifting_command_pub = None
+
+        if self.waist_turning_command_pub:
+            self.waist_turning_command_pub.destroy()
+            self.waist_turning_command_pub = None
 
         if self.robot_node:
             self.robot_node.destroy_node()
