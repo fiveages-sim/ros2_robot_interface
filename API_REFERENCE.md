@@ -33,6 +33,7 @@
   - [坐标转换](#坐标转换)
   - [机器人描述与参数查询](#机器人描述与参数查询)
 - [常量 (Constants)](#常量-constants)
+- [几何与四元数 (utils.quat_pose)](#几何与四元数-utilsquat_pose)
 - [快速参考表](#快速参考表)
 - [注意事项](#注意事项)
 
@@ -1446,3 +1447,21 @@ interface.send_fsm_command(FSM_OCS2)
 8. **目标位置获取**：
    - 手臂的目标位置通过话题订阅获取（`/left_current_target` 或 `/right_current_target`）
    - 如果未配置这些话题，`get_target_pose()` 和 `check_arrival()` 将无法正常工作
+
+---
+
+## 几何与四元数 (utils.quat_pose)
+
+模块路径：`ros2_robot_interface.utils.quat_pose`（也可从 `ros2_robot_interface.utils` 导入已导出符号）。
+
+四元数为 **scalar-last (x, y, z, w)**，与 `geometry_msgs/Pose.orientation` 一致。
+
+| 函数 | 说明 |
+|------|------|
+| `quat_multiply(q1, q2)` | 四元数乘积 |
+| `quat_conjugate(q)` | 共轭 |
+| `quat_normalize(q)` | 单位化（近零时回退为 `(0,0,0,1)`） |
+| `rotate_vector_by_quat_inverse(vec, quat_xyzw)` | 用 `quat` 的逆旋转三维向量 |
+| `pose_from_tuple(position, orientation_xyzw)` | 元组 → `geometry_msgs.msg.Pose` |
+
+与 LeRobot 扁平 action/观测键相关的 `action_from_pose` / `obs_to_pose` 仍见 **`lerobot_robot_ros2.utils.pose_utils`**。
