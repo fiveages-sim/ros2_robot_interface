@@ -185,3 +185,50 @@ pip install -e .
 ## License
 
 Apache-2.0
+
+## Launch scripts (fa-deploy-ws)
+
+Helper scripts live under **`examples/`**. Full table, path rules, **quick verify** steps, and presets are documented in **[`examples/README.md`](examples/README.md)**.
+
+Prerequisite:
+
+```bash
+cd /path/to/fa-deploy-ws
+source install/setup.bash
+```
+
+Quick copy-paste:
+
+```bash
+# Fast integration test: sim + optional ros2 control recovery + reachability scan
+python3 ros2_robot_interface/examples/test/dual_arm_reachability_scan.py --quick-verify single
+
+# Sim only (no scan)
+python3 ros2_robot_interface/examples/fa_sim_launch.py --domains 11 --preset split-rg75-headless
+```
+
+Reachability / OCS2 CLI: `python3 ros2_robot_interface/examples/test/dual_arm_reachability_scan.py --help`.
+
+## Test examples
+
+### Whole-body target + error (with IK check)
+
+This repo includes a runnable test script:
+
+- `examples/test/wbc_target_error_test.py`
+
+It will:
+- check whether the target pose has an IK solution (best-effort: MoveIt2 `/compute_ik` service)
+- send the target pose (stamped) to the arm target topic
+- wait for arrival / timeout
+- compute final position + orientation error
+
+Example:
+
+```bash
+python examples/test/wbc_target_error_test.py \
+  --arm left \
+  --x 0.45 --y 0.10 --z 0.30 \
+  --qx 0 --qy 0 --qz 0 --qw 1 \
+  --ik-service /compute_ik --ik-group arm
+```
