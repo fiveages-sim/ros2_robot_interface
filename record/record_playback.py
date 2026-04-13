@@ -132,7 +132,7 @@ class JointRecorder:
             }
         
         # 获取并保存末端执行器pose
-        left_pose = self.interface.get_end_effector_pose()
+        left_pose = self.interface.left_arm_handler.get_pose() if self.interface.left_arm_handler else None
         if left_pose and self.interface.left_arm_handler:
             left_frame_id = self.interface.left_arm_handler.get_frame_id()
             node_data['left_end_effector_pose'] = {
@@ -151,7 +151,7 @@ class JointRecorder:
             }
         
         if self.is_dual_arm:
-            right_pose = self.interface.get_right_end_effector_pose()
+            right_pose = self.interface.right_arm_handler.get_pose() if self.interface.right_arm_handler else None
             if right_pose and self.interface.right_arm_handler:
                 right_frame_id = self.interface.right_arm_handler.get_frame_id()
                 node_data['right_end_effector_pose'] = {

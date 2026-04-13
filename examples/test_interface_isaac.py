@@ -125,7 +125,7 @@ def main():
     
     # 测试：获取末端执行器位姿（位置和方向）
     print("-" * 70)
-    print("[7] 测试 get_end_effector_pose() - 获取末端执行器位姿")
+    print("[7] 测试 left/right_arm_handler.get_pose() - 获取末端执行器位姿")
     print("-" * 70)
     
     # 左臂/主臂位姿

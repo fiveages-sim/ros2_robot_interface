@@ -184,6 +184,14 @@ class ROS2RobotInterface:
         elif "/right_gripper_controller/target_command" in topic_names:
             self.config.right_gripper_controller_name = "right_gripper_controller"
             logger.info("Detected right gripper controller: right_gripper_controller")
+
+        # 检测 target_percent 话题（百分比控制）
+        if "/left_gripper_controller/target_percent" in topic_names:
+            self.config.left_gripper_target_percent_topic = "/left_gripper_controller/target_percent"
+            logger.info("Detected left gripper target_percent topic")
+        if "/right_gripper_controller/target_percent" in topic_names:
+            self.config.right_gripper_target_percent_topic = "/right_gripper_controller/target_percent"
+            logger.info("Detected right gripper target_percent topic")
         
         if "/head_joint_controller/target_joint_position" in topic_names:
             self.config.head_joint_controller_topic = "/head_joint_controller/target_joint_position"
@@ -328,7 +336,8 @@ class ROS2RobotInterface:
                 self.robot_node,
                 ArmType.LEFT,
                 self.config,
-                self.send_fsm_command
+                self.send_fsm_command,
+                self.get_fsm_command,
             )
             self.left_arm_handler.initialize()
             
@@ -338,7 +347,8 @@ class ROS2RobotInterface:
                     self.robot_node,
                     ArmType.RIGHT,
                     self.config,
-                    self.send_fsm_command
+                    self.send_fsm_command,
+                    self.get_fsm_command,
                 )
                 self.right_arm_handler.initialize()
                 self.target_path_pub = self.robot_node.create_publisher(Path, "/target_path", 10)
@@ -682,77 +692,11 @@ class ROS2RobotInterface:
         
         return self.last_joint_state_time if self.last_joint_state_time > 0.0 else None
 
-    def get_end_effector_pose(self) -> Optional[Pose]:
-        """Get the latest left end-effector pose."""
-        if not self.is_connected:
-            return None
-
-        if self.left_arm_handler is None:
-            logger.warning("Left arm handler not initialized")
-            return None
-
-        return self.left_arm_handler.get_pose()
-
-    def get_right_end_effector_pose(self) -> Optional[Pose]:
-        """Get the latest right end-effector pose (dual-arm only)."""
-        if not self.is_connected:
-            return None
-
-        if self.right_arm_handler is None:
-            logger.warning("Right arm handler not initialized")
-            return None
-
-        return self.right_arm_handler.get_pose()
-    
     def get_body_current_target(self) -> Optional[List[float]]:
         """Get latest body current target."""
         if self.body_current_target is None:
             return None
         return list(self.body_current_target)
-
-    def send_end_effector_target(self, pose: Pose) -> None:
-        """Send a target pose for the left arm end-effector."""
-        if not self.is_connected:
-            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
-
-        if self.left_arm_handler is None or self.left_arm_handler.target_pub is None:
-            logger.warning("Left arm target publisher not initialized")
-            return
-
-        self.left_arm_handler.send_target(pose)
-
-    def send_right_end_effector_target(self, pose: Pose) -> None:
-        """Send a target pose for the right arm end-effector (dual-arm only)."""
-        if not self.is_connected:
-            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
-
-        if self.right_arm_handler is None or self.right_arm_handler.target_pub is None:
-            logger.warning("Right arm target publisher not initialized")
-            return
-
-        self.right_arm_handler.send_target(pose)
-
-    def send_gripper_command(self, position: float) -> None:
-        """Send a target position for the left gripper."""
-        if not self.is_connected:
-            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
-
-        if self.left_gripper_handler is None:
-            logger.warning("Left gripper handler not initialized")
-            return
-
-        self.left_gripper_handler.send_joint_positions(position)
-
-    def send_right_gripper_command(self, position: float) -> None:
-        """Send a target position for the right gripper (dual-arm only)."""
-        if not self.is_connected:
-            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
-
-        if self.right_gripper_handler is None:
-            logger.warning("Right gripper handler not initialized")
-            return
-
-        self.right_gripper_handler.send_joint_positions(position)
 
     def _copy_pose(self, src: Pose, dst: Pose) -> None:
         """Copy pose data from src to dst."""

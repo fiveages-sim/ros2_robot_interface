@@ -47,7 +47,7 @@ if joint_state:
     print(f"Joint positions: {joint_state['positions']}")
 
 # Get end-effector pose (returns None if not connected)
-pose = interface.get_end_effector_pose()
+pose = interface.left_arm_handler.get_pose()
 if pose:
     print(f"End-effector position: ({pose.position.x}, {pose.position.y}, {pose.position.z})")
 else:
@@ -59,10 +59,10 @@ target_pose.position.x = 0.5
 target_pose.position.y = 0.0
 target_pose.position.z = 0.3
 target_pose.orientation.w = 1.0
-interface.send_end_effector_target(target_pose)
+interface.left_arm_handler.send_target(target_pose)
 
 # Control gripper
-interface.send_gripper_command(0.5)  # 50% open
+interface.left_gripper_handler.send_joint_positions(0.5)  # 行程/开度目标值为 0.5（非“50%百分比”语义）
 
 # Disconnect
 interface.disconnect()
@@ -142,7 +142,7 @@ config = ROS2RobotInterfaceConfig(
 - `get_pose()` - 获取当前 pose
 - `get_target_pose()` - 获取目标 pose
 - `send_target(pose)` - 发送目标 pose
-- `send_target_stamped(frame_id, pose)` - 发送带坐标系的目标 pose
+- `send_target_stamped(frame_id, pose)` / `send_target_stamped(pose)` - 发送带坐标系的目标 pose
 - `send_joint_positions(positions)` - 发送关节位置（MoveJ 模式）
 - `check_arrival(pose_threshold, orient_threshold)` - 检查到达状态
 

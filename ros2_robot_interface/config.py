@@ -96,11 +96,19 @@ class ROS2RobotInterfaceConfig:
     gripper_joint_name: str = "gripper_joint"  # 【未使用】夹爪关节名称（预留，目前代码使用从 /joint_states topic 接收的实际关节名称）
     gripper_state_topic: str = "/gripper_state"  # 【未使用】夹爪状态订阅话题（预留，目前未实现单独的状态话题订阅）
     gripper_command_topic: str = "/gripper_joint/position_command"  # 【自动检测到会覆盖当前值】夹爪控制发布话题（必需，用于夹爪控制）
-    gripper_min_position: float = 0.0  # 夹爪闭合位置（最小开度）
-    gripper_max_position: float = 0.0384  # 夹爪打开位置（最大开度）
+    # ⚠️ 重要：使用夹爪前必须根据实际硬件正确配置以下两个参数。
+    # 这两个值直接影响：
+    #   1. send_joint_positions() 的位置限幅（clamping）
+    #   2. send_position_percent() 的百分比 → 实际行程换算
+    #   3. check_arrival() / wait_until_arrive() 的到位检测精度
+    # 默认值仅为示例，不同夹爪型号的行程范围差异较大，请务必替换为实测值。
+    gripper_min_position: float = 0.0     # 夹爪完全闭合时的关节位置（最小行程，单位：rad 或 m，取决于硬件）
+    gripper_max_position: float = 0.0384  # 夹爪完全打开时的关节位置（最大行程，单位：rad 或 m，取决于硬件）
     # 【自动检测】夹爪控制器名称（系统会在 connect() 时自动检测，不应手动设置）
     left_gripper_controller_name: str | None = None  # 【自动检测】左臂夹爪控制器名称（自动检测：hand_controller、left_hand_controller 或 left_gripper_controller）
     right_gripper_controller_name: str | None = None  # 【自动检测】右臂夹爪控制器名称（自动检测：right_hand_controller 或 right_gripper_controller）
+    left_gripper_target_percent_topic: str | None = None  # 【自动检测】左臂夹爪百分比控制话题，例如 "/left_gripper_controller/target_percent"
+    right_gripper_target_percent_topic: str | None = None  # 【自动检测】右臂夹爪百分比控制话题，例如 "/right_gripper_controller/target_percent"
     
     # ============================================================================
     # 控制参数（未使用，预留）

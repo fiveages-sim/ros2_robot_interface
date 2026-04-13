@@ -125,7 +125,7 @@ def main():
     
     # 测试：获取末端执行器位姿（位置和方向）
     print("-" * 70)
-    print("[7] 测试 get_end_effector_pose() - 获取末端执行器位姿")
+    print("[7] 测试 left/right_arm_handler.get_pose() - 获取末端执行器位姿")
     print("-" * 70)
     
     # 左臂/主臂位姿
@@ -334,7 +334,7 @@ def main():
                     # left_target.position.y = left_initial_pose.position.y
                     # left_target.position.z = left_initial_pose.position.z
                     # left_target.orientation = left_initial_pose.orientation  # 保持初始姿态
-                    # interface.send_end_effector_target(left_target)
+                    # interface.left_arm_handler.send_target(left_target)
                     print(f"  [OCS2] → 左臂向前伸出（向前 {extend_distance}m）...")
                 
                 # 状态机：左臂伸出中
@@ -368,7 +368,7 @@ def main():
                         #     left_retract.position.y = left_initial_pose.position.y
                         #     left_retract.position.z = left_initial_pose.position.z
                         #     left_retract.orientation = left_initial_pose.orientation  # 保持初始姿态
-                        #     interface.send_end_effector_target(left_retract)
+                        #     interface.left_arm_handler.send_target(left_retract)
                         print(f"  [OCS2] → 左臂收回中（向后 {extend_distance}m）...")
                 
                 # 状态机：左臂收回中
@@ -397,7 +397,7 @@ def main():
                         #     right_target.position.y = right_initial_pose.position.y
                         #     right_target.position.z = right_initial_pose.position.z
                         #     right_target.orientation = right_initial_pose.orientation  # 保持初始姿态
-                        #     interface.send_right_end_effector_target(right_target)
+                        #     interface.right_arm_handler.send_target(right_target)
                         print(f"  [OCS2] → 右臂向前伸出（向前 {extend_distance}m）...")
                 
                 # 状态机：右臂伸出中
@@ -431,7 +431,7 @@ def main():
                         #     right_retract.position.y = right_initial_pose.position.y
                         #     right_retract.position.z = right_initial_pose.position.z
                         #     right_retract.orientation = right_initial_pose.orientation  # 保持初始姿态
-                        #     interface.send_right_end_effector_target(right_retract)
+                        #     interface.right_arm_handler.send_target(right_retract)
                         print(f"  [OCS2] → 右臂收回中（向后 {extend_distance}m）...")
                 
                 # 状态机：右臂收回中
