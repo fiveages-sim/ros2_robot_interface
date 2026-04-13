@@ -56,6 +56,7 @@ class ROS2RobotInterface:
         
         self.joint_state_sub: Subscription | None = None
         self.fsm_command_sub: Subscription | None = None
+        self.fsm_state_sub: Subscription | None = None
         self.robot_description_sub: Subscription | None = None
         self.body_current_target_sub: Subscription | None = None
         self.target_path_pub: Publisher | None = None
@@ -77,6 +78,8 @@ class ROS2RobotInterface:
         
         # FSM state tracking
         self._current_fsm_command: int = 2  # Default to HOLD
+        self._current_fsm_state: str = "HOLD"
+        self._has_fsm_state_topic_data: bool = False
         
         # Robot description tracking
         self.latest_robot_description: Optional[str] = None
@@ -287,9 +290,23 @@ class ROS2RobotInterface:
                 10
             )
             logger.info("✅ Subscribed to /fsm_command for FSM state tracking")
-            
+
             # Subscribe to robot description for URDF tracking
             from rclpy.qos import QoSProfile, DurabilityPolicy, HistoryPolicy, ReliabilityPolicy
+            fsm_state_qos = QoSProfile(
+                depth=1,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                reliability=ReliabilityPolicy.RELIABLE,
+                history=HistoryPolicy.KEEP_LAST
+            )
+            self.fsm_state_sub = self.robot_node.create_subscription(
+                String,
+                "/fsm_state",
+                self._fsm_state_callback,
+                fsm_state_qos
+            )
+            logger.info("✅ Subscribed to /fsm_state for actual FSM state tracking")
+
             robot_desc_qos = QoSProfile(
                 depth=10,
                 durability=DurabilityPolicy.TRANSIENT_LOCAL,  # Receive latched messages
@@ -463,11 +480,43 @@ class ROS2RobotInterface:
             valid_state_commands = {1, 2, 3, 4}
             if command in valid_state_commands:
                 self._current_fsm_command = command
+                # Fallback: if /fsm_state has not been received yet, infer from command.
+                if not self._has_fsm_state_topic_data:
+                    cmd_to_state = {
+                        1: "HOME",
+                        2: "HOLD",
+                        3: "OCS2",
+                        4: "MOVEJ",
+                    }
+                    self._current_fsm_state = cmd_to_state.get(command, self._current_fsm_state)
                 logger.debug(f"FSM command received: {command} (state updated)")
             else:
                 logger.debug(f"FSM command received: {command} (special command, state not updated)")
         except Exception as e:
             logger.error(f"Error in FSM command callback: {e}", exc_info=True)
+
+    def _fsm_state_callback(self, msg: String) -> None:
+        """Callback for FSM state topic (/fsm_state)."""
+        try:
+            state = (msg.data or "").strip().upper()
+            valid_states = {"HOME", "HOLD", "OCS2", "MOVEJ"}
+            if state not in valid_states:
+                logger.debug(f"Ignored unknown FSM state from /fsm_state: {msg.data!r}")
+                return
+
+            self._current_fsm_state = state
+            self._has_fsm_state_topic_data = True
+
+            state_to_cmd = {
+                "HOME": 1,
+                "HOLD": 2,
+                "OCS2": 3,
+                "MOVEJ": 4,
+            }
+            self._current_fsm_command = state_to_cmd[state]
+            logger.debug(f"FSM state received: {state}")
+        except Exception as e:
+            logger.error(f"Error in FSM state callback: {e}", exc_info=True)
     
     def _robot_description_callback(self, msg: String) -> None:
         """Callback for robot description (URDF) messages."""
@@ -962,15 +1011,7 @@ class ROS2RobotInterface:
         Returns:
             Current FSM state name: "HOME", "HOLD", "OCS2", or "MOVEJ"
         """
-        command = self._current_fsm_command
-        
-        state_map = {
-            1: "HOME",
-            2: "HOLD",
-            3: "OCS2",
-            4: "MOVEJ",
-        }
-        return state_map.get(command, "HOLD")
+        return self._current_fsm_state
     
     def get_robot_description(self) -> Optional[str]:
         """Get the latest robot description (URDF).
@@ -1595,6 +1636,10 @@ class ROS2RobotInterface:
         if self.fsm_command_sub:
             self.fsm_command_sub.destroy()
             self.fsm_command_sub = None
+
+        if self.fsm_state_sub:
+            self.fsm_state_sub.destroy()
+            self.fsm_state_sub = None
         
         if self.robot_description_sub:
             self.robot_description_sub.destroy()
@@ -1680,4 +1725,3 @@ class ROS2RobotInterface:
 
         
         logger.info("Disconnected from ROS 2 robot interface")
-
