@@ -76,7 +76,7 @@ class ROS2RobotInterface:
         self.latest_categorized_joint_state: Dict[str, Any] | None = None  # Cached categorized state
         
         # FSM state tracking
-        self._current_fsm_state: str = "HOLD"
+        self._current_fsm_state: int = 2  # Default to HOLD
         
         # Robot description tracking
         self.latest_robot_description: Optional[str] = None
@@ -296,7 +296,7 @@ class ROS2RobotInterface:
                 history=HistoryPolicy.KEEP_LAST
             )
             self.fsm_state_sub = self.robot_node.create_subscription(
-                String,
+                Int32,
                 "/fsm_state",
                 self._fsm_state_callback,
                 fsm_state_qos
@@ -337,7 +337,7 @@ class ROS2RobotInterface:
                 ArmType.LEFT,
                 self.config,
                 self.send_fsm_command,
-                self.get_fsm_command,
+                self.get_fsm_state,
             )
             self.left_arm_handler.initialize()
             
@@ -348,7 +348,7 @@ class ROS2RobotInterface:
                     ArmType.RIGHT,
                     self.config,
                     self.send_fsm_command,
-                    self.get_fsm_command,
+                    self.get_fsm_state,
                 )
                 self.right_arm_handler.initialize()
                 self.target_path_pub = self.robot_node.create_publisher(Path, "/target_path", 10)
@@ -465,17 +465,17 @@ class ROS2RobotInterface:
             self.disconnect()
             raise
     
-    def _fsm_state_callback(self, msg: String) -> None:
+    def _fsm_state_callback(self, msg: Int32) -> None:
         """Callback for FSM state topic (/fsm_state)."""
         try:
-            state = (msg.data or "").strip().upper()
-            valid_states = {"HOME", "HOLD", "OCS2", "MOVEJ"}
-            if state not in valid_states:
-                logger.debug(f"Ignored unknown FSM state from /fsm_state: {msg.data!r}")
+            state_code = int(msg.data)
+            valid_state_codes = {1, 2, 3, 4}
+            if state_code not in valid_state_codes:
+                logger.debug(f"Ignored unknown FSM state code from /fsm_state: {state_code}")
                 return
 
-            self._current_fsm_state = state
-            logger.debug(f"FSM state received: {state}")
+            self._current_fsm_state = state_code
+            logger.debug(f"FSM state received (code={state_code})")
         except Exception as e:
             logger.error(f"Error in FSM state callback: {e}", exc_info=True)
     
@@ -880,11 +880,15 @@ class ROS2RobotInterface:
         # 等待状态机完成切换，避免后续指令在旧状态下执行
         time.sleep(self.config.fsm_state_switch_settle_time)
     
-    def get_fsm_state(self) -> str:
-        """Get current FSM state name.
+    def get_fsm_state(self) -> int:
+        """Get current FSM state code.
         
         Returns:
-            Current FSM state name: "HOME", "HOLD", "OCS2", or "MOVEJ"
+            Current FSM state code:
+            - 1: HOME
+            - 2: HOLD
+            - 3: OCS2
+            - 4: MOVEJ
         """
         return self._current_fsm_state
     
