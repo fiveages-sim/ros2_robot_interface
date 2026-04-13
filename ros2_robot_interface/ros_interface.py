@@ -55,7 +55,6 @@ class ROS2RobotInterface:
         self.executor_thread: threading.Thread | None = None
         
         self.joint_state_sub: Subscription | None = None
-        self.fsm_command_sub: Subscription | None = None
         self.fsm_state_sub: Subscription | None = None
         self.robot_description_sub: Subscription | None = None
         self.body_current_target_sub: Subscription | None = None
@@ -77,9 +76,7 @@ class ROS2RobotInterface:
         self.latest_categorized_joint_state: Dict[str, Any] | None = None  # Cached categorized state
         
         # FSM state tracking
-        self._current_fsm_command: int = 2  # Default to HOLD
         self._current_fsm_state: str = "HOLD"
-        self._has_fsm_state_topic_data: bool = False
         
         # Robot description tracking
         self.latest_robot_description: Optional[str] = None
@@ -282,15 +279,6 @@ class ROS2RobotInterface:
                 10
             )
             
-            # Subscribe to FSM command for state tracking
-            self.fsm_command_sub = self.robot_node.create_subscription(
-                Int32,
-                "/fsm_command",
-                self._fsm_command_callback,
-                10
-            )
-            logger.info("✅ Subscribed to /fsm_command for FSM state tracking")
-
             # Subscribe to robot description for URDF tracking
             from rclpy.qos import QoSProfile, DurabilityPolicy, HistoryPolicy, ReliabilityPolicy
             fsm_state_qos = QoSProfile(
@@ -467,34 +455,6 @@ class ROS2RobotInterface:
             self.disconnect()
             raise
     
-    def _fsm_command_callback(self, msg: Int32) -> None:
-        """Callback for FSM command messages to track current state.
-        
-        Only updates internal state for valid state commands (1-4).
-        Special commands (0, 100, etc.) are published but do not change the displayed state.
-        """
-        try:
-            command = msg.data
-            # Only update internal state for valid state commands (1-4)
-            # Special commands (0, 100, etc.) should not change the displayed state
-            valid_state_commands = {1, 2, 3, 4}
-            if command in valid_state_commands:
-                self._current_fsm_command = command
-                # Fallback: if /fsm_state has not been received yet, infer from command.
-                if not self._has_fsm_state_topic_data:
-                    cmd_to_state = {
-                        1: "HOME",
-                        2: "HOLD",
-                        3: "OCS2",
-                        4: "MOVEJ",
-                    }
-                    self._current_fsm_state = cmd_to_state.get(command, self._current_fsm_state)
-                logger.debug(f"FSM command received: {command} (state updated)")
-            else:
-                logger.debug(f"FSM command received: {command} (special command, state not updated)")
-        except Exception as e:
-            logger.error(f"Error in FSM command callback: {e}", exc_info=True)
-
     def _fsm_state_callback(self, msg: String) -> None:
         """Callback for FSM state topic (/fsm_state)."""
         try:
@@ -505,15 +465,6 @@ class ROS2RobotInterface:
                 return
 
             self._current_fsm_state = state
-            self._has_fsm_state_topic_data = True
-
-            state_to_cmd = {
-                "HOME": 1,
-                "HOLD": 2,
-                "OCS2": 3,
-                "MOVEJ": 4,
-            }
-            self._current_fsm_command = state_to_cmd[state]
             logger.debug(f"FSM state received: {state}")
         except Exception as e:
             logger.error(f"Error in FSM state callback: {e}", exc_info=True)
@@ -982,28 +933,8 @@ class ROS2RobotInterface:
         fsm_msg.data = command
         self.fsm_command_pub.publish(fsm_msg)
         
-        # Only update internal state for valid state commands (1-4)
-        # Special commands (0, 100, etc.) should not change the displayed state
-        valid_state_commands = {1, 2, 3, 4}
-        if command in valid_state_commands:
-            self._current_fsm_command = command
-        else:
-            logger.debug(f"FSM command {command} is a special command, not updating internal state")
-        
         # 等待状态机完成切换，避免后续指令在旧状态下执行
         time.sleep(self.config.fsm_state_switch_settle_time)
-    
-    def get_fsm_command(self) -> int:
-        """Get current FSM command.
-        
-        Returns:
-            Current FSM command value:
-            - 1: HOME
-            - 2: HOLD
-            - 3: OCS2
-            - 4: MOVEJ
-        """
-        return self._current_fsm_command
     
     def get_fsm_state(self) -> str:
         """Get current FSM state name.
@@ -1633,10 +1564,6 @@ class ROS2RobotInterface:
             self.joint_state_sub.destroy()
             self.joint_state_sub = None
         
-        if self.fsm_command_sub:
-            self.fsm_command_sub.destroy()
-            self.fsm_command_sub = None
-
         if self.fsm_state_sub:
             self.fsm_state_sub.destroy()
             self.fsm_state_sub = None
