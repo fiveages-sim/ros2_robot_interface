@@ -1253,13 +1253,22 @@ class ROS2RobotInterface:
         
         return {'arrived': arrived, 'distance': distance}
     
-    def check_arrive(self, part: Optional[str] = None, position_threshold: Optional[float] = None) -> Optional[Dict[str, Any]]:
+    def check_arrive(
+        self,
+        part: Optional[str] = None,
+        position_threshold: Optional[float] = None,
+        *,
+        arm_pose_threshold: Optional[float] = None,
+        arm_orient_threshold: Optional[float] = None,
+    ) -> Optional[Dict[str, Any]]:
         """Check if head, body joints, arm poses, or grippers have arrived at target positions/poses.
         
         Args:
             part: 要检查的部分，可选值：None（所有部分）、'head'、'body'、'left_arm'、'right_arm'、
                   'left_gripper'、'right_gripper'、'arm'（单臂模式）、'gripper'（单臂模式）
             position_threshold: 关节位置阈值（仅用于 head 和 body），如果为 None 则使用默认值
+            arm_pose_threshold: 笛卡尔末端位置容差（米），传给左右臂 ``check_arrival``；None 用 handler 默认
+            arm_orient_threshold: 笛卡尔末端姿态容差；None 用 handler 默认
         
         Returns:
             包含到达状态和距离信息的字典，如果未连接则返回 None
@@ -1296,15 +1305,13 @@ class ROS2RobotInterface:
             result['body'] = body_result
         
         if part is None or part == 'left_arm':
-            # 使用 handler 的默认阈值
-            arm_result = self.left_arm_handler.check_arrival()
+            arm_result = self.left_arm_handler.check_arrival(arm_pose_threshold, arm_orient_threshold)
             if part == 'left_arm':
                 return arm_result
             result['left_arm' if is_dual_arm else 'arm'] = arm_result
         
         if is_dual_arm and (part is None or part == 'right_arm'):
-            # 使用 handler 的默认阈值
-            right_arm_result = self.right_arm_handler.check_arrival()
+            right_arm_result = self.right_arm_handler.check_arrival(arm_pose_threshold, arm_orient_threshold)
             if part == 'right_arm':
                 return right_arm_result
             result['right_arm'] = right_arm_result
@@ -1342,6 +1349,9 @@ class ROS2RobotInterface:
         timeout: float = 3.0,
         poll_period: float = 0.05,
         position_threshold: Optional[float] = None,
+        *,
+        arm_pose_threshold: Optional[float] = None,
+        arm_orient_threshold: Optional[float] = None,
         time_now_fn: Optional[Callable[[], float]] = None,
         sleep_fn: Optional[Callable[[float], None]] = None,
         wall_timeout_guard: Optional[float] = None,
@@ -1358,7 +1368,9 @@ class ROS2RobotInterface:
                 ``left_arm``, ``left_gripper``).
             timeout: Maximum wait time in seconds.
             poll_period: Polling interval in seconds.
-            position_threshold: Optional threshold forwarded to ``check_arrive``.
+            position_threshold: Optional threshold forwarded to ``check_arrive`` (head/body 关节)。
+            arm_pose_threshold: 左右臂笛卡尔到位：位置阈值（米），见 ``check_arrive``。
+            arm_orient_threshold: 左右臂笛卡尔到位：姿态阈值，见 ``check_arrive``。
             time_now_fn: Optional custom clock function. Use this when timeout should
                 follow simulation time instead of wall time.
             sleep_fn: Optional sleep function paired with ``time_now_fn``.
@@ -1375,14 +1387,24 @@ class ROS2RobotInterface:
         wait_fn = sleep_fn or time.sleep
 
         if timeout <= 0.0:
-            result = self.check_arrive(part=part, position_threshold=position_threshold)
+            result = self.check_arrive(
+                part=part,
+                position_threshold=position_threshold,
+                arm_pose_threshold=arm_pose_threshold,
+                arm_orient_threshold=arm_orient_threshold,
+            )
             return {"arrived": bool(result and result.get("arrived", False)), "elapsed": 0.0, "result": result}
 
         start = now_fn()
         wall_start = time.monotonic()
         last_result: Optional[Dict[str, Any]] = None
         while (now_fn() - start) <= timeout:
-            result = self.check_arrive(part=part, position_threshold=position_threshold)
+            result = self.check_arrive(
+                part=part,
+                position_threshold=position_threshold,
+                arm_pose_threshold=arm_pose_threshold,
+                arm_orient_threshold=arm_orient_threshold,
+            )
             if isinstance(result, dict):
                 last_result = result
                 if on_poll is not None:
