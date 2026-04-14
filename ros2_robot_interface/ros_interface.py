@@ -32,6 +32,7 @@ from tf2_geometry_msgs import do_transform_pose
 from arms_ros2_control_msgs.srv import ExecutePath
 
 from .config import ControlType, ROS2RobotInterfaceConfig
+from .constants import FSM_HOLD, FSM_HOME, FSM_MOVEJ, FSM_OCS2
 from .utils.exceptions import ROS2AlreadyConnectedError, ROS2NotConnectedError
 from .handler import ArmHandler, ArmType, GripperHandler, GripperType
 from .utils.discovery import (
@@ -55,7 +56,7 @@ class ROS2RobotInterface:
         self.executor_thread: threading.Thread | None = None
         
         self.joint_state_sub: Subscription | None = None
-        self.fsm_command_sub: Subscription | None = None
+        self.fsm_state_sub: Subscription | None = None
         self.robot_description_sub: Subscription | None = None
         self.body_current_target_sub: Subscription | None = None
         self.target_path_pub: Publisher | None = None
@@ -76,7 +77,9 @@ class ROS2RobotInterface:
         self.latest_categorized_joint_state: Dict[str, Any] | None = None  # Cached categorized state
         
         # FSM state tracking
-        self._current_fsm_command: int = 2  # Default to HOLD
+        self._current_fsm_state: int = 2  # Default to HOLD
+        self._auto_switch_fsm_before_control: bool = bool(self.config.auto_switch_fsm_before_control)
+        self.is_wbc: bool = False
         
         # Robot description tracking
         self.latest_robot_description: Optional[str] = None
@@ -148,6 +151,7 @@ class ROS2RobotInterface:
     def _auto_detect_configuration(self, topic_names: List[str]) -> bool:
         """Auto-detect robot configuration from topics. Returns True if dual-arm detected."""
         is_dual_arm = False
+        self.is_wbc = False
         
         if "/right_target" in topic_names or "/right_current_pose" in topic_names:
             is_dual_arm = True
@@ -242,6 +246,9 @@ class ROS2RobotInterface:
 
         # 检测统一的双臂关节控制器 topic（仅双臂模式，且可以与分开的 topic 同时存在）
         # 单臂模式下无后缀的 topic 应该设置为 left_arm_joint_controller_topic，而不是统一 topic
+        if "/ocs2_wbc_controller/target_joint_position" in topic_names:
+            self.is_wbc = True
+
         if is_dual_arm:
             # 双臂模式：检测统一 topic（优先检测 /ocs2_wbc_controller/target_joint_position，其次 /ocs2_arm_controller/target_joint_position）
             if "/ocs2_wbc_controller/target_joint_position" in topic_names:
@@ -304,17 +311,22 @@ class ROS2RobotInterface:
                 10
             )
             
-            # Subscribe to FSM command for state tracking
-            self.fsm_command_sub = self.robot_node.create_subscription(
-                Int32,
-                "/fsm_command",
-                self._fsm_command_callback,
-                10
-            )
-            logger.info("✅ Subscribed to /fsm_command for FSM state tracking")
-            
             # Subscribe to robot description for URDF tracking
             from rclpy.qos import QoSProfile, DurabilityPolicy, HistoryPolicy, ReliabilityPolicy
+            fsm_state_qos = QoSProfile(
+                depth=1,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                reliability=ReliabilityPolicy.RELIABLE,
+                history=HistoryPolicy.KEEP_LAST
+            )
+            self.fsm_state_sub = self.robot_node.create_subscription(
+                Int32,
+                "/fsm_state",
+                self._fsm_state_callback,
+                fsm_state_qos
+            )
+            logger.info("✅ Subscribed to /fsm_state for actual FSM state tracking")
+
             robot_desc_qos = QoSProfile(
                 depth=10,
                 durability=DurabilityPolicy.TRANSIENT_LOCAL,  # Receive latched messages
@@ -349,7 +361,7 @@ class ROS2RobotInterface:
                 ArmType.LEFT,
                 self.config,
                 self.send_fsm_command,
-                self.get_fsm_command,
+                self.get_fsm_state,
             )
             self.left_arm_handler.initialize()
             
@@ -360,7 +372,7 @@ class ROS2RobotInterface:
                     ArmType.RIGHT,
                     self.config,
                     self.send_fsm_command,
-                    self.get_fsm_command,
+                    self.get_fsm_state,
                 )
                 self.right_arm_handler.initialize()
                 self.target_path_pub = self.robot_node.create_publisher(Path, "/target_path", 10)
@@ -479,24 +491,19 @@ class ROS2RobotInterface:
             self.disconnect()
             raise
     
-    def _fsm_command_callback(self, msg: Int32) -> None:
-        """Callback for FSM command messages to track current state.
-        
-        Only updates internal state for valid state commands (1-4).
-        Special commands (0, 100, etc.) are published but do not change the displayed state.
-        """
+    def _fsm_state_callback(self, msg: Int32) -> None:
+        """Callback for FSM state topic (/fsm_state)."""
         try:
-            command = msg.data
-            # Only update internal state for valid state commands (1-4)
-            # Special commands (0, 100, etc.) should not change the displayed state
-            valid_state_commands = {1, 2, 3, 4}
-            if command in valid_state_commands:
-                self._current_fsm_command = command
-                logger.debug(f"FSM command received: {command} (state updated)")
-            else:
-                logger.debug(f"FSM command received: {command} (special command, state not updated)")
+            state_code = int(msg.data)
+            valid_state_codes = {1, 2, 3, 4}
+            if state_code not in valid_state_codes:
+                logger.debug(f"Ignored unknown FSM state code from /fsm_state: {state_code}")
+                return
+
+            self._current_fsm_state = state_code
+            logger.debug(f"FSM state received (code={state_code})")
         except Exception as e:
-            logger.error(f"Error in FSM command callback: {e}", exc_info=True)
+            logger.error(f"Error in FSM state callback: {e}", exc_info=True)
     
     def _robot_description_callback(self, msg: String) -> None:
         """Callback for robot description (URDF) messages."""
@@ -746,6 +753,8 @@ class ROS2RobotInterface:
         
         if not left_poses and not right_poses:
             raise ValueError("At least one of left_poses or right_poses must not be empty")
+
+        self.auto_switch_fsm_for_control("arm_pose")
         
         path_msg = Path()
         path_msg.header.stamp = self.robot_node.get_clock().now().to_msg()
@@ -808,6 +817,8 @@ class ROS2RobotInterface:
         if not self.execute_path_client.service_is_ready():
             raise ROS2NotConnectedError("ExecutePath service not available")
 
+        self.auto_switch_fsm_for_control("arm_pose")
+
         def to_pose_stamped(pose: Pose | PoseStamped) -> PoseStamped:
             ps = PoseStamped()
             if frame_id is not None:
@@ -855,6 +866,8 @@ class ROS2RobotInterface:
             raise ROS2NotConnectedError("Dual arm target requires dual-arm mode. Right end-effector target topic not configured.")
         if self.dual_target_stamped_pub is None:
             raise ROS2NotConnectedError("Dual target stamped publisher not initialized")
+
+        self.auto_switch_fsm_for_control("arm_pose")
         
         stamp = self.robot_node.get_clock().now().to_msg()
         path_msg = Path()
@@ -897,49 +910,101 @@ class ROS2RobotInterface:
         if self.fsm_command_pub is None:
             logger.warning("FSM command publisher not initialized")
             return
-        
-        fsm_msg = Int32()
-        fsm_msg.data = command
-        self.fsm_command_pub.publish(fsm_msg)
-        
-        # Only update internal state for valid state commands (1-4)
-        # Special commands (0, 100, etc.) should not change the displayed state
-        valid_state_commands = {1, 2, 3, 4}
-        if command in valid_state_commands:
-            self._current_fsm_command = command
-        else:
-            logger.debug(f"FSM command {command} is a special command, not updating internal state")
-        
-        # 等待状态机完成切换，避免后续指令在旧状态下执行
-        time.sleep(self.config.fsm_state_switch_settle_time)
+
+        def _publish_and_wait(cmd: int) -> None:
+            fsm_msg = Int32()
+            fsm_msg.data = cmd
+            self.fsm_command_pub.publish(fsm_msg)
+            # 等待状态机完成切换，避免后续指令在旧状态下执行
+            time.sleep(self.config.fsm_state_switch_settle_time)
+
+        # 约束：HOME/OCS2/MOVEJ 只能由 HOLD 切换而来
+        hold_required_targets = {FSM_HOME, FSM_OCS2, FSM_MOVEJ}
+        current_state = self.get_fsm_state()
+        if (
+            command in hold_required_targets
+            and current_state != FSM_HOLD
+            and current_state != command
+        ):
+            logger.debug(
+                f"FSM transition requires HOLD first: current={current_state}, target={command}"
+            )
+            _publish_and_wait(FSM_HOLD)
+
+        _publish_and_wait(command)
+
+    def auto_switch_fsm_state(self, target_state: int) -> bool:
+        """Automatically switch FSM state only when needed.
+
+        Args:
+            target_state: Target FSM state code (1=HOME, 2=HOLD, 3=OCS2, 4=MOVEJ)
+
+        Returns:
+            True if a switch command was sent, False if already in target state.
+
+        Raises:
+            ValueError: If target_state is not a valid FSM state code.
+            ROS2NotConnectedError: If interface is not connected.
+        """
+        valid_state_codes = {1, 2, 3, 4}
+        if target_state not in valid_state_codes:
+            raise ValueError(
+                f"Invalid target_state={target_state}, must be one of {sorted(valid_state_codes)}"
+            )
+
+        current_state = self.get_fsm_state()
+        if current_state == target_state:
+            logger.debug(f"FSM already in target state {target_state}, skipping switch")
+            return False
+
+        self.send_fsm_command(target_state)
+        logger.debug(f"Auto-switched FSM state: {current_state} -> {target_state}")
+        return True
+
+    def auto_switch_fsm_for_control(self, control_type: str) -> bool:
+        """Auto-switch FSM state based on control category rules."""
+        if not self._auto_switch_fsm_before_control:
+            return False
+
+        normalized_type = control_type.strip().lower()
+        valid_types = {"arm_pose", "arm_joint", "body_joint", "head_joint", "other"}
+        if normalized_type not in valid_types:
+            raise ValueError(
+                f"Invalid control_type='{control_type}', must be one of {sorted(valid_types)}"
+            )
+
+        if normalized_type == "other":
+            return False
+
+        if normalized_type == "arm_pose":
+            return self.auto_switch_fsm_state(FSM_OCS2)
+
+        if normalized_type == "arm_joint":
+            return self.auto_switch_fsm_state(FSM_MOVEJ)
+
+        if self.is_wbc:
+            return self.auto_switch_fsm_state(FSM_MOVEJ)
+
+        # Non-WBC: MOVEJ or OCS2 are both acceptable; MOVEJ is preferred when switching is needed.
+        current_state = self.get_fsm_state()
+        if current_state in (FSM_MOVEJ, FSM_OCS2):
+            logger.debug(
+                f"FSM state {current_state} is acceptable for {normalized_type} in non-WBC mode"
+            )
+            return False
+        return self.auto_switch_fsm_state(FSM_MOVEJ)
     
-    def get_fsm_command(self) -> int:
-        """Get current FSM command.
+    def get_fsm_state(self) -> int:
+        """Get current FSM state code.
         
         Returns:
-            Current FSM command value:
+            Current FSM state code:
             - 1: HOME
             - 2: HOLD
             - 3: OCS2
             - 4: MOVEJ
         """
-        return self._current_fsm_command
-    
-    def get_fsm_state(self) -> str:
-        """Get current FSM state name.
-        
-        Returns:
-            Current FSM state name: "HOME", "HOLD", "OCS2", or "MOVEJ"
-        """
-        command = self._current_fsm_command
-        
-        state_map = {
-            1: "HOME",
-            2: "HOLD",
-            3: "OCS2",
-            4: "MOVEJ",
-        }
-        return state_map.get(command, "HOLD")
+        return self._current_fsm_state
     
     def get_robot_description(self) -> Optional[str]:
         """Get the latest robot description (URDF).
@@ -965,6 +1030,8 @@ class ROS2RobotInterface:
         if self.head_joint_controller_pub is None:
             logger.warning("Head joint controller publisher not initialized. Set head_joint_controller_topic in config.")
             return
+
+        self.auto_switch_fsm_for_control("head_joint")
         
         msg = Float64MultiArray()
         msg.data = positions
@@ -981,6 +1048,8 @@ class ROS2RobotInterface:
         if self.body_joint_controller_pub is None:
             logger.warning("Body joint controller publisher not initialized. Set body_joint_controller_topic in config.")
             return
+
+        self.auto_switch_fsm_for_control("body_joint")
         
         msg = Float64MultiArray()
         msg.data = positions
@@ -997,6 +1066,8 @@ class ROS2RobotInterface:
         if self.waist_lifting_pub is None:
             logger.warning("Waist lifting publisher not initialized. Set waist_lifting_topic in config.")
             return
+
+        self.auto_switch_fsm_for_control("body_joint")
         
         msg = Float64()
         msg.data = position
@@ -1011,6 +1082,8 @@ class ROS2RobotInterface:
         if self.waist_lifting_pub is None:
             logger.warning("Waist lifting publisher not initialized. Set waist_lifting_command_topic in config.")
             return
+
+        self.auto_switch_fsm_for_control("body_joint")
         
         velocity_scale = max(min(velocity_scale, 1),-1)
         
@@ -1027,6 +1100,8 @@ class ROS2RobotInterface:
         if self.waist_lifting_pub is None:
             logger.warning("Waist turning publisher not initialized. Set waist_turning_command_topic in config.")
             return
+
+        self.auto_switch_fsm_for_control("body_joint")
         
         velocity_scale = max(min(velocity_scale, 1),-1)
         
@@ -1120,12 +1195,7 @@ class ROS2RobotInterface:
                 f"Got {len(left_arm_positions)} and {len(right_arm_positions)}"
             )
 
-        # 发送 FSM 命令切换到 MOVEJ 状态
-        try:
-            self.send_fsm_command(4)
-            logger.debug("Automatically switched to MOVEJ state for dual-arm joint control")
-        except Exception as e:
-            logger.warning(f"Failed to switch to MOVEJ state: {e}")
+        self.auto_switch_fsm_for_control("arm_joint")
 
         # 根据 topic 类型决定是否需要添加身体关节
         # ocs2_wbc_controller 需要：body_joints + left_arm_joints + right_arm_joints
@@ -1192,6 +1262,8 @@ class ROS2RobotInterface:
         if self.arm_trajectory_pub is None:
             raise ROS2NotConnectedError("Arm trajectory publisher not initialized. "
                                        "Arm joint controller topic not configured.")
+
+        self.auto_switch_fsm_for_control("arm_joint")
         
         # Check waypoint dimensions
         for i, waypoint in enumerate(waypoints):
@@ -1956,9 +2028,9 @@ class ROS2RobotInterface:
             self.joint_state_sub.destroy()
             self.joint_state_sub = None
         
-        if self.fsm_command_sub:
-            self.fsm_command_sub.destroy()
-            self.fsm_command_sub = None
+        if self.fsm_state_sub:
+            self.fsm_state_sub.destroy()
+            self.fsm_state_sub = None
         
         if self.robot_description_sub:
             self.robot_description_sub.destroy()
@@ -2052,4 +2124,3 @@ class ROS2RobotInterface:
 
         
         logger.info("Disconnected from ROS 2 robot interface")
-
