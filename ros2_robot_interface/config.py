@@ -86,7 +86,26 @@ class ROS2RobotInterfaceConfig:
     # 【未使用】此参数目前未被代码使用，代码实际使用的是从 ROS 2 topic 接收到的关节名称
     # 保留此参数用于未来可能的验证或过滤功能
     joint_names: list[str] = field(default_factory=lambda: [
-        "joint1", "joint2", "joint3", "joint4", "joint5", "joint6"
+                    "body_joint1",
+                    "body_joint2",
+                    "body_joint3",
+                    "body_joint4",
+                    "left_joint1",
+                    "left_joint2",
+                    "left_joint3",
+                    "left_joint4",
+                    "left_joint5",
+                    "left_joint6",
+                    "left_joint7",
+                    "right_joint1",
+                    "right_joint2",
+                    "right_joint3",
+                    "right_joint4",
+                    "right_joint5",
+                    "right_joint6",
+                    "right_joint7",
+                    "head_joint1",
+                    "head_joint2",      
     ])  # 【未使用】关节名称列表（预留，目前代码使用从 /joint_states topic 接收的实际关节名称）
     
     # ============================================================================
