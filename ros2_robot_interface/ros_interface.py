@@ -1143,18 +1143,22 @@ class ROS2RobotInterface:
         left_arm_positions: List[float],
         right_arm_positions: List[float],
         body_positions: Optional[List[float]] = None,
+        head_positions: Optional[List[float]] = None,
     ) -> None:
         """发送双臂关节位置命令（MoveJ 模式）
 
         同时控制左臂和右臂的所有关节，发布到统一的 topic。
         对于 WBC 控制器（ocs2_wbc_controller），消息格式为
-        ``body_joints + left_arm_joints + right_arm_joints``。
+        ``body_joints + left_arm_joints + right_arm_joints + head_joints``，
+        且顺序与 ``/joint_states`` 一致。
 
         Args:
             left_arm_positions: 左臂关节位置列表（弧度）
             right_arm_positions: 右臂关节位置列表（弧度）
             body_positions: 躯干关节目标位置列表（弧度），仅 WBC 控制器生效。
                 传入时直接使用该值；省略时从当前关节状态读取（保持躯干不动）。
+            head_positions: 头部关节目标位置列表（弧度），仅 WBC 控制器生效。
+                传入时直接使用该值；省略时从当前关节状态读取（保持头部不动）。
 
         Raises:
             ROS2NotConnectedError: 如果接口未连接或发布器未初始化
@@ -1170,6 +1174,11 @@ class ROS2RobotInterface:
             # 同时指定躯干目标（全身 MoveJ）
             body = [-1.353, -2.660, -1.307, 0.0]
             interface.send_dual_arm_joint_positions(left_positions, right_positions, body_positions=body)
+            # 可选指定头部目标（未指定时保持当前头部姿态）
+            head = [0.1, -0.1]
+            interface.send_dual_arm_joint_positions(
+                left_positions, right_positions, body_positions=body, head_positions=head
+            )
             ```
         """
         if not self.is_connected:
@@ -1204,20 +1213,140 @@ class ROS2RobotInterface:
         is_wbc_controller = unified_topic and "ocs2_wbc_controller" in unified_topic
 
         if is_wbc_controller:
-            resolved_body: Optional[List[float]] = body_positions
-            if resolved_body is None:
-                # 未指定目标时，读取当前状态以保持躯干不动
-                categorized_state = self.get_joint_state(categorized=True)
-                if categorized_state and categorized_state.get('body', {}).get('positions'):
-                    resolved_body = list(categorized_state['body']['positions'])
-            if resolved_body is None:
-                logger.warning("Body joint positions not available, using zeros for WBC controller")
-                resolved_body = [0.0] * 4
+            configured_joint_names = list(self.config.joint_names or [])
+            if not configured_joint_names:
+                logger.warning(
+                    "config.joint_names is empty for WBC controller, falling back to "
+                    "body + left + right ordering (head joints will be ignored)"
+                )
+                resolved_body: Optional[List[float]] = body_positions
+                if resolved_body is None:
+                    categorized_state = self.get_joint_state(categorized=True)
+                    if categorized_state and categorized_state.get('body', {}).get('positions'):
+                        resolved_body = list(categorized_state['body']['positions'])
+                if resolved_body is None:
+                    logger.warning("Body joint positions not available, using zeros for WBC controller")
+                    resolved_body = [0.0] * 4
+                combined_positions = list(resolved_body) + left_arm_positions + right_arm_positions
+            else:
+                body_joint_names: List[str] = []
+                left_arm_joint_names: List[str] = []
+                right_arm_joint_names: List[str] = []
+                head_joint_names: List[str] = []
+                ignored_joint_names: List[str] = []
 
-            combined_positions = list(resolved_body) + left_arm_positions + right_arm_positions
+                for joint_name in configured_joint_names:
+                    name_lower = joint_name.lower()
+                    if "gripper" in name_lower or "hand" in name_lower:
+                        continue
+                    if name_lower.startswith("left_"):
+                        left_arm_joint_names.append(joint_name)
+                    elif name_lower.startswith("right_"):
+                        right_arm_joint_names.append(joint_name)
+                    elif "body" in name_lower:
+                        body_joint_names.append(joint_name)
+                    elif "head" in name_lower:
+                        head_joint_names.append(joint_name)
+                    else:
+                        ignored_joint_names.append(joint_name)
+
+                if ignored_joint_names:
+                    logger.warning(
+                        "Ignoring unsupported joint names in config.joint_names for WBC: %s",
+                        ignored_joint_names,
+                    )
+
+                if len(left_arm_positions) != len(left_arm_joint_names):
+                    raise ValueError(
+                        "Left arm position count does not match config.joint_names: "
+                        f"got {len(left_arm_positions)}, expected {len(left_arm_joint_names)}"
+                    )
+                if len(right_arm_positions) != len(right_arm_joint_names):
+                    raise ValueError(
+                        "Right arm position count does not match config.joint_names: "
+                        f"got {len(right_arm_positions)}, expected {len(right_arm_joint_names)}"
+                    )
+
+                if body_positions is not None and len(body_positions) != len(body_joint_names):
+                    raise ValueError(
+                        "Body position count does not match config.joint_names: "
+                        f"got {len(body_positions)}, expected {len(body_joint_names)}"
+                    )
+                if head_positions is not None and len(head_positions) != len(head_joint_names):
+                    raise ValueError(
+                        "Head position count does not match config.joint_names: "
+                        f"got {len(head_positions)}, expected {len(head_joint_names)}"
+                    )
+
+                latest_state = self.get_joint_state(categorized=False)
+                state_name_to_pos: Dict[str, float] = {}
+                state_joint_names: List[str] = []
+                if latest_state:
+                    names = latest_state.get("names", [])
+                    positions = latest_state.get("positions", [])
+                    state_joint_names = list(names)
+                    for i, name in enumerate(names):
+                        if i < len(positions):
+                            state_name_to_pos[name] = positions[i]
+
+                left_name_to_cmd = dict(zip(left_arm_joint_names, left_arm_positions))
+                right_name_to_cmd = dict(zip(right_arm_joint_names, right_arm_positions))
+                body_name_to_cmd = dict(zip(body_joint_names, body_positions or []))
+                head_name_to_cmd = dict(zip(head_joint_names, head_positions or []))
+
+                target_joint_names = (
+                    body_joint_names + left_arm_joint_names + right_arm_joint_names + head_joint_names
+                )
+                target_joint_set = set(target_joint_names)
+
+                ordered_joint_names: List[str] = []
+                if state_joint_names:
+                    ordered_joint_names.extend([n for n in state_joint_names if n in target_joint_set])
+                ordered_joint_names.extend([n for n in target_joint_names if n not in ordered_joint_names])
+
+                missing_in_state = [n for n in ordered_joint_names if n not in state_name_to_pos]
+                if missing_in_state:
+                    logger.warning(
+                        "Some WBC joints are missing in latest joint_states, using config order fallback "
+                        "and/or zeros for: %s",
+                        missing_in_state,
+                    )
+
+                combined_positions = []
+                for joint_name in ordered_joint_names:
+                    if joint_name in left_name_to_cmd:
+                        combined_positions.append(left_name_to_cmd[joint_name])
+                    elif joint_name in right_name_to_cmd:
+                        combined_positions.append(right_name_to_cmd[joint_name])
+                    elif joint_name in body_name_to_cmd:
+                        combined_positions.append(body_name_to_cmd[joint_name])
+                    elif joint_name in head_name_to_cmd:
+                        combined_positions.append(head_name_to_cmd[joint_name])
+                    elif joint_name in state_name_to_pos:
+                        combined_positions.append(state_name_to_pos[joint_name])
+                    else:
+                        logger.warning("Joint '%s' unavailable, using 0.0 for WBC command", joint_name)
+                        combined_positions.append(0.0)
+
+                expected_total = len(target_joint_names)
+                if len(combined_positions) != expected_total:
+                    raise ValueError(
+                        "WBC command dimension mismatch: "
+                        f"got {len(combined_positions)}, expected {expected_total}"
+                    )
+                if expected_total != 20:
+                    logger.warning(
+                        "WBC command dimension is %s (expected 20 for FiveAges W2 profile)",
+                        expected_total,
+                    )
+
             logger.debug(
-                f"WBC controller: body={len(resolved_body)}, left={len(left_arm_positions)}, "
-                f"right={len(right_arm_positions)}, total={len(combined_positions)}"
+                "WBC controller: left=%s, right=%s, body=%s, head=%s, total=%s",
+                len(left_arm_positions),
+                len(right_arm_positions),
+                len(body_positions) if body_positions is not None else "auto",
+                len(head_positions) if head_positions is not None else "auto",
+                len(combined_positions),
             )
         else:
             # ARM 控制器只需要左臂 + 右臂
