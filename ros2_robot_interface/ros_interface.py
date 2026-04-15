@@ -1150,7 +1150,7 @@ class ROS2RobotInterface:
         同时控制左臂和右臂的所有关节，发布到统一的 topic。
         对于 WBC 控制器（ocs2_wbc_controller），消息格式为
         ``body_joints + left_arm_joints + right_arm_joints + head_joints``，
-        且顺序与 ``/joint_states`` 一致。
+        且顺序优先遵循 ``config.joint_names``。
 
         Args:
             left_arm_positions: 左臂关节位置列表（弧度）
@@ -1214,6 +1214,7 @@ class ROS2RobotInterface:
 
         if is_wbc_controller:
             configured_joint_names = list(self.config.joint_names or [])
+            print(f"Configured joint names for WBC controller: {configured_joint_names}")
             if not configured_joint_names:
                 logger.warning(
                     "config.joint_names is empty for WBC controller, falling back to "
@@ -1280,11 +1281,9 @@ class ROS2RobotInterface:
 
                 latest_state = self.get_joint_state(categorized=False)
                 state_name_to_pos: Dict[str, float] = {}
-                state_joint_names: List[str] = []
                 if latest_state:
                     names = latest_state.get("names", [])
                     positions = latest_state.get("positions", [])
-                    state_joint_names = list(names)
                     for i, name in enumerate(names):
                         if i < len(positions):
                             state_name_to_pos[name] = positions[i]
@@ -1297,12 +1296,7 @@ class ROS2RobotInterface:
                 target_joint_names = (
                     body_joint_names + left_arm_joint_names + right_arm_joint_names + head_joint_names
                 )
-                target_joint_set = set(target_joint_names)
-
-                ordered_joint_names: List[str] = []
-                if state_joint_names:
-                    ordered_joint_names.extend([n for n in state_joint_names if n in target_joint_set])
-                ordered_joint_names.extend([n for n in target_joint_names if n not in ordered_joint_names])
+                ordered_joint_names: List[str] = list(target_joint_names)
 
                 missing_in_state = [n for n in ordered_joint_names if n not in state_name_to_pos]
                 if missing_in_state:
@@ -1313,6 +1307,7 @@ class ROS2RobotInterface:
                     )
 
                 combined_positions = []
+                print(f"Ordered WBC joint names: {ordered_joint_names}")
                 for joint_name in ordered_joint_names:
                     if joint_name in left_name_to_cmd:
                         combined_positions.append(left_name_to_cmd[joint_name])
