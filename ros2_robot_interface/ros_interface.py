@@ -1214,7 +1214,6 @@ class ROS2RobotInterface:
 
         if is_wbc_controller:
             configured_joint_names = list(self.config.joint_names or [])
-            print(f"Configured joint names for WBC controller: {configured_joint_names}")
             if not configured_joint_names:
                 logger.warning(
                     "config.joint_names is empty for WBC controller, falling back to "
@@ -1307,7 +1306,6 @@ class ROS2RobotInterface:
                     )
 
                 combined_positions = []
-                print(f"Ordered WBC joint names: {ordered_joint_names}")
                 for joint_name in ordered_joint_names:
                     if joint_name in left_name_to_cmd:
                         combined_positions.append(left_name_to_cmd[joint_name])
