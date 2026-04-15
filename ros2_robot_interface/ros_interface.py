@@ -116,6 +116,27 @@ class ROS2RobotInterface:
     def is_connected(self) -> bool:
         """Check if the interface is connected."""
         return self._connected and self.robot_node is not None
+
+    @staticmethod
+    def _controller_node_from_topic(topic: str | None) -> str:
+        if not isinstance(topic, str):
+            return ""
+        t = topic.strip()
+        if not t:
+            return ""
+        suffix = "/target_joint_position"
+        if t.endswith(suffix):
+            node = t[: -len(suffix)]
+            return node if node else ""
+        i = t.rfind("/")
+        if i <= 0:
+            return ""
+        return t[:i]
+
+    @property
+    def body_joint_controller_node(self) -> str:
+        """Body joint controller node name inferred from current interface config."""
+        return self._controller_node_from_topic(self.config.body_joint_controller_topic)
     
     def list_nodes(self) -> List[Dict[str, str]]:
         """查询当前运行的 ROS 2 节点列表。详见 utils.discovery.list_nodes() 的文档。"""
