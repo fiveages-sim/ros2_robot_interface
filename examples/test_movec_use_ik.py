@@ -5,6 +5,7 @@
 服务: 
   - 关节移动: /ocs2_arm_controller/joint_trajectory_with_para (service)
   - 圆弧: /ocs2_arm_controller/execute_circle_use_ik (service)
+  - 运动学: /kinematics_service (service)
 """
 
 import rclpy
@@ -13,11 +14,12 @@ from rclpy.executors import SingleThreadedExecutor
 import time
 import sys
 import math
-from geometry_msgs.msg import Point, Quaternion, Vector3
+import numpy as np
+from geometry_msgs.msg import Point, Quaternion, Vector3, Pose
 from std_msgs.msg import Int32
 
 # 导入服务类型
-from arms_ros2_control_msgs.srv import MovecUseIK, JointTrajectory
+from arms_ros2_control_msgs.srv import MovecUseIK, JointTrajectory, KinematicsService
 from arms_ros2_control_msgs.msg import JointWaypoint, CircleMessage
 from ros2_robot_interface import ROS2RobotInterface, ROS2RobotInterfaceConfig
 
@@ -38,37 +40,97 @@ class MoveJAndCircleClient(Node):
             '/ocs2_arm_controller/joint_trajectory_with_para'
         )
         
+        # 创建运动学服务客户端
+        self.kinematics_client = self.create_client(
+            KinematicsService,
+            '/kinematics_service'
+        )
+        
         # 定义关节名称（g1机器人）
         self.left_arm_joint_names = [
-            "left_shoulder_pitch_joint",
-            "left_shoulder_roll_joint", 
-            "left_shoulder_yaw_joint",
-            "left_elbow_joint",
-            "left_wrist_roll_joint",
-            "left_wrist_pitch_joint",
-            "left_wrist_yaw_joint"
+            "left_joint1",
+            "left_joint2", 
+            "left_joint3",
+            "left_joint4",
+            "left_joint5",
+            "left_joint6",
+            "left_joint7"
         ]
         self.right_arm_joint_names = [
-            "right_shoulder_pitch_joint",
-            "right_shoulder_roll_joint",
-            "right_shoulder_yaw_joint",
-            "right_elbow_joint",
-            "right_wrist_roll_joint",
-            "right_wrist_pitch_joint",
-            "right_wrist_yaw_joint"
+            "right_joint1",
+            "right_joint2",
+            "right_joint3",
+            "right_joint4",
+            "right_joint5",
+            "right_joint6",
+            "right_joint7"
         ]
         
     def wait_for_services(self, timeout=10.0):
         """等待服务可用"""
         circle_ready = self.circle_client.wait_for_service(timeout_sec=timeout)
         trajectory_ready = self.joint_trajectory_client.wait_for_service(timeout_sec=timeout)
+        kinematics_ready = self.kinematics_client.wait_for_service(timeout_sec=timeout)
         
-        if circle_ready and trajectory_ready:
+        if circle_ready and trajectory_ready and kinematics_ready:
             self.get_logger().info('所有服务可用')
             return True
         else:
-            self.get_logger().error(f'服务不可用 - 圆弧: {circle_ready}, 轨迹: {trajectory_ready}')
+            self.get_logger().error(f'服务不可用 - 圆弧: {circle_ready}, 轨迹: {trajectory_ready}, 运动学: {kinematics_ready}')
             return False
+
+    def get_current_pose_from_kinematics(self, arm_name="right", joint_positions=None):
+        """
+        通过运动学服务获取当前关节角对应的末端位姿
+        
+        参数:
+            arm_name: "left" 或 "right"
+            joint_positions: 7个关节的位置列表（如果为None，则从当前机器人状态获取）
+        
+        返回:
+            pose: geometry_msgs/Pose 对象，包含位置和四元数
+        """
+        if joint_positions is None:
+            # 从当前机器人状态获取关节位置
+            current_positions = self.get_current_joint_positions(arm_name)
+            if current_positions is None:
+                self.get_logger().error('无法获取当前关节位置')
+                return None
+            joint_positions = current_positions[arm_name]
+        
+        # 创建运动学请求
+        req = KinematicsService.Request()
+        req.operation_type = "fk"  # 正运动学
+        req.arm_type = arm_name
+        req.joint_angles = joint_positions
+        
+        # 等待服务
+        if not self.kinematics_client.wait_for_service(timeout_sec=1.0):
+            self.get_logger().error('运动学服务不可用')
+            return None
+        
+        # 调用服务
+        future = self.kinematics_client.call_async(req)
+        
+        try:
+            rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
+            if future.result() and future.result().success:
+                response = future.result()
+                if response.result_poses:
+                    pose = response.result_poses[0]
+                    self.get_logger().info(f'✓ 获取到位姿: 位置[{pose.position.x:.3f}, {pose.position.y:.3f}, {pose.position.z:.3f}], '
+                                          f'四元数[{pose.orientation.x:.3f}, {pose.orientation.y:.3f}, {pose.orientation.z:.3f}, {pose.orientation.w:.3f}]')
+                    return pose
+                else:
+                    self.get_logger().error('运动学服务返回空位姿')
+                    return None
+            else:
+                error_msg = future.result().message if future.result() else '未知错误'
+                self.get_logger().error(f'运动学服务调用失败: {error_msg}')
+                return None
+        except Exception as e:
+            self.get_logger().error(f'运动学服务调用异常: {e}')
+            return None
 
     def send_movej_command(self, arm_name="left", joint_positions=None, duration=5.0):
         """
@@ -190,9 +252,11 @@ class MoveJAndCircleClient(Node):
         return positions.get(pose_name, positions["home"])
 
     def create_circle_request_three_point(self, arm_name="left", 
-                                           midpoint_x=0.2839, midpoint_y=0.5915, midpoint_z=-0.4104,
-                                           endpoint_x=0.3214, endpoint_y=0.4782, endpoint_z=-0.2665,
-                                           duration=5.0):
+                                           midpoint_x=0.2839, midpoint_y=0.5915, midpoint_z=-0.4104,midpoint_qw=1.0,
+                                           midpoint_qx=0.0,midpoint_qy=0.0,midpoint_qz=0.0,
+                                           endpoint_x=0.3214, endpoint_y=0.4782, endpoint_z=-0.2665,endpoint_qw=1.0,
+                                           endpoint_qx=0.0,endpoint_qy=0.0,endpoint_qz=0.0,
+                                           rotate_angle=3.9551,duration=5.0):
         """创建三点法圆弧请求"""
         request = MovecUseIK.Request()
         circle = CircleMessage()
@@ -215,9 +279,9 @@ class MoveJAndCircleClient(Node):
         circle.midpoint.position = Point(x=midpoint_x, y=midpoint_y, z=midpoint_z)
         circle.endpoint.position = Point(x=endpoint_x, y=endpoint_y, z=endpoint_z)
         
-        circle.midpoint.orientation = Quaternion(x=0.0, y=0.0, z=0.0, w=1.0)
-        circle.endpoint.orientation = Quaternion(x=0.0, y=0.0, z=0.0, w=1.0)
-        
+        circle.midpoint.orientation = Quaternion(x=midpoint_qx, y=midpoint_qy, z=midpoint_qz, w=midpoint_qw)
+        circle.endpoint.orientation = Quaternion(x=endpoint_qx, y=endpoint_qy, z=endpoint_qz, w=endpoint_qw)
+        circle.rotate_angle = rotate_angle
         request.circle_params = circle
         return request
 
@@ -225,13 +289,19 @@ class MoveJAndCircleClient(Node):
                                           center_x=0.3279, center_y=0.4871, center_z=-0.3826,
                                           axis_x=0.9104, axis_y=0.4054, axis_z=0.0822,
                                           rotate_angle=3.9551,
-                                          duration=5.0):
-        """创建参数法圆弧请求"""
+                                          duration=5.0,
+                                          end_pose=None):
+        """
+        创建参数法圆弧请求
+        
+        参数:
+            end_pose: geometry_msgs/Pose 终点姿态（如果提供，将使用其中的四元数）
+        """
         request = MovecUseIK.Request()
         circle = CircleMessage()
         
         circle.use_three_point_method = False
-        circle.use_slerp_for_orientation = False
+        circle.use_slerp_for_orientation = True  # 使用姿态插值
         circle.time_mode = True
         circle.frame_id = "base_link"
         circle.arm_name = arm_name
@@ -248,49 +318,22 @@ class MoveJAndCircleClient(Node):
         circle.axis = Vector3(x=axis_x, y=axis_y, z=axis_z)
         circle.rotate_angle = rotate_angle
         
+        # 设置终点位置
         circle.endpoint.position = Point(x=0.0, y=0.0, z=0.0)
-        circle.endpoint.orientation = Quaternion(x=0.0, y=0.0, z=0.0, w=1.0)
+        
+        # 如果提供了终点姿态，使用它；否则使用默认四元数
+        if end_pose is not None:
+            circle.endpoint.orientation = end_pose.orientation
+            self.get_logger().info(f'使用运动学计算的终点姿态: '
+                                  f'四元数[{end_pose.orientation.x:.3f}, {end_pose.orientation.y:.3f}, '
+                                  f'{end_pose.orientation.z:.3f}, {end_pose.orientation.w:.3f}]')
+        else:
+            circle.endpoint.orientation = Quaternion(x=0.0, y=0.0, z=0.0, w=1.0)
+            self.get_logger().warn('未提供终点姿态，使用默认四元数')
         
         request.circle_params = circle
         return request
 
-    def create_planar_circle_request(self, arm_name="left", 
-                                      center_x=0.3, center_y=0.0, center_z=-0.2,
-                                      radius=0.12, duration=6.0):
-        """创建平面画圆请求"""
-        request = MovecUseIK.Request()
-        circle = CircleMessage()
-        
-        circle.use_three_point_method = True
-        circle.use_slerp_for_orientation = True
-        circle.time_mode = True
-        circle.frame_id = "base_link"
-        circle.arm_name = arm_name
-        circle.duration = duration
-        
-        circle.max_linear_velocity = 0.2
-        circle.max_linear_acceleration = 0.3
-        circle.max_linear_jerk = 2.0
-        circle.max_angular_velocity = 0.8
-        circle.max_angular_acceleration = 1.5
-        circle.max_angular_jerk = 4.0
-        
-        circle.midpoint.position = Point(
-            x=center_x + radius, 
-            y=center_y, 
-            z=center_z
-        )
-        circle.endpoint.position = Point(
-            x=center_x, 
-            y=center_y, 
-            z=center_z + radius
-        )
-        
-        circle.midpoint.orientation = Quaternion(x=0.0, y=0.0, z=0.0, w=1.0)
-        circle.endpoint.orientation = Quaternion(x=0.0, y=0.0, z=0.0, w=1.0)
-        
-        request.circle_params = circle
-        return request
 
     def call_circle_service(self, request, timeout=15.0):
         """调用圆弧服务"""
@@ -402,53 +445,46 @@ def main():
     
     # 选择测试模式
     print("\n选择测试模式:")
-    print("1. 左臂 - MoveJ到起点 + 三点法圆弧")
-    print("2. 左臂 - MoveJ到起点 + 参数法圆弧")
-    print("3. 左臂 - MoveJ到起点 + 平面画圆")
-    print("4. 右臂 - MoveJ到起点 + 三点法圆弧")
-    print("5. 右臂 - MoveJ到起点 + 参数法圆弧")
-    print("6. 右臂 - MoveJ到起点 + 平面画圆")
-    print("7. 仅MoveJ移动（测试）")
-    print("8. 仅圆弧运动（需要已在起点）")
-    
-    choice = input("请选择(1-8): ").strip()
-    
-    if choice in ['1', '2', '3']:
-        arm_name = 'left'
-    elif choice in ['4', '5', '6', '7', '8']:
-        arm_name = 'right'
-    else:
-        print("无效选择")
-        return 1
-    
-    # 根据手臂设置起点关节位置和圆弧参数
-    if arm_name == 'left':
-        # 左臂圆弧起点的关节位置
-        start_joints = [0.2, 0.3, 0.1, 0.5, 0.0, 0.0, 0.0]
-        circle_params = {
-            'midpoint': (0.2839, 0.5915, -0.4104),
-            'endpoint': (0.3214, 0.4782, -0.2665)
-        }
+    print("1. 右臂 - MoveJ到起点 + 三点法圆弧")
+    print("2. 右臂 - MoveJ到起点 + 参数法圆弧")
+    print("3. 仅MoveJ移动（测试）")
+    print("4. 仅圆弧运动（需要已在起点）")
+    #这里我测试了右臂，想要使用左臂画圆，这里的名字改成'left'
+    arm_name = 'right'
+
+    choice = input("请选择(1-4): ").strip()
+
+
+    # 右臂圆弧起点的关节位置
+    #这个是参数法，但是姿态是手朝着前面，
+
+    if choice in ['2','4']:
+        #这个是宇树的一个右臂在侧面画圆的任务
+        start_joints = [0.1606, -0.4771, -0.5085, 0.1539, 0.4943, -0.0472, 0.5657]
         center_params = {
-            'center': (0.3279, 0.4871, -0.3826),
-            'axis': (0.9104, 0.4054, 0.0822),
-            'angle': 3.9551
+            'center': (0.076, -0.344, 0.118),
+            'axis': (0.0, 1.0, 0.0),
+            'angle': 2.0 * math.pi
         }
-    else:
-        # 右臂圆弧起点的关节位置
-        # start_joints = [0-0.5468, -0.5792, 0.7379, -0.7889, -0.0640, 0.1741, 0.2269]
-        start_joints = [0-0.038, -0.7525, 0.6852, -1.2189, -0.1843, 0.0396, 0.2568]
+    elif choice in ['1']:
+        ###下面的参数是宇树圆心[0.126298 -0.366388 0.135205],转轴：[-0.786041   0.616464 -0.0459511] 半径0.071357
+        # start_joints = [0.1722, -0.2144, -0.4844, -0.0738, 0.2343, 0.017, -0.2333]
+        # circle_params = {
+        #     'midpoint': (0.125121, -0.373182, 0.064187,0.931845,-0.015346 ,0.012323, -0.362322),# [x,y,z,qw,qx,qy,qz]
+        #     'endpoint': (0.082612, -0.421051, 0.149154,0.931845,-0.015346,0.012323,-0.362322),
+        #     'angle': 2.0 * math.pi #如果是0就会运动到第三个点的位置，不是整圆
+        # }
+
+        ###w2
+        start_joints = [- -2.5525263057797845, -1.1249598606701328, 2.5473227808375523, -1.5346063925166669, 1.069090431182381, -0.20523837383751672, 0.08554285164549756]
         circle_params = {
-            'midpoint': (0.3493, -0.4327, -0.3228),
-            'endpoint': (0.2915, -0.2474, -0.3614)
+            'midpoint': (0.13203639837136372, -0.5825973794950948, -0.3808212752144813 ,0.26094605327831755, 0.6660176596825279, -0.3133487326164676, 0.6246120444220806),# [x,y,z,qw,qx,qy,qz]
+            'endpoint': (0.24306383780112217, -0.4972110949413654, -0.26287523894449244, 0.25966739735320343, 0.6654666924157311, -0.3095591837918198, 0.6276145598751057),
+            'angle': 0.0 * math.pi #如果是0就会运动到第三个点的位置，不是整圆
         }
-        center_params = {
-            # 'center': (0.0748, -0.1274, -0.2670),
-            # 'axis': (0.7071, -0.7071, 0.0),
-            'center': (0.0748, -0.1274, 0.2670),
-            'axis': (1.0, 0.0, 0.0),
-            'angle': 2.0*math.pi
-        }
+  
+
+    
     
     # 切换到MOVEJ状态
     print(f"\n[9] 切换到MOVEJ状态...")
@@ -459,37 +495,48 @@ def main():
         print(f"✗ 状态切换失败: {e}")
         return 1
     
-    # 先移动到HOME位置
-    # print(f"\n[10] MoveJ移动到{arm_name}臂HOME位置...")
-    # home_joints = client.get_default_joint_positions(arm_name, "home")
-    # if not client.send_movej_command(arm_name, home_joints, duration=3.0):
-    #     print("✗ MoveJ到HOME失败")
-    #     return 1
-    
     # 关节空间移动到圆弧起点
-    if choice not in ['8']:
+    if choice not in ['4']:
         print(f"\n[11] MoveJ移动到{arm_name}臂圆弧起点...")
         if not client.send_movej_command(arm_name, start_joints, duration=3.0):
             print("✗ MoveJ到起点失败")
             return 1
     
+    # 对于参数法圆弧，先获取当前位姿用于终点姿态
+    end_pose = None
+    if choice in ['2']:
+        print(f"\n[12] 获取{arm_name}臂当前位姿（用于圆弧终点姿态）...")
+        # 获取当前关节角对应的位姿
+        end_pose = client.get_current_pose_from_kinematics(arm_name, start_joints)
+        if end_pose is None:
+            print("⚠ 警告: 无法获取当前位姿，将使用默认四元数")
+    
     # 执行圆弧运动
     if choice not in ['7']:
         print(f"\n[13] 执行{arm_name}臂圆弧运动...")
         
-        if choice in ['1', '4']:
+        if choice in ['1']:
             circle_req = client.create_circle_request_three_point(
                 arm_name=arm_name,
                 midpoint_x=circle_params['midpoint'][0],
                 midpoint_y=circle_params['midpoint'][1],
                 midpoint_z=circle_params['midpoint'][2],
+                midpoint_qw=circle_params['midpoint'][3],
+                midpoint_qx=circle_params['midpoint'][4],
+                midpoint_qy=circle_params['midpoint'][5],
+                midpoint_qz=circle_params['midpoint'][6],
                 endpoint_x=circle_params['endpoint'][0],
                 endpoint_y=circle_params['endpoint'][1],
                 endpoint_z=circle_params['endpoint'][2],
+                endpoint_qw=circle_params['endpoint'][3],
+                endpoint_qx=circle_params['endpoint'][4],
+                endpoint_qy=circle_params['endpoint'][5],
+                endpoint_qz=circle_params['endpoint'][6],
+                rotate_angle=circle_params['angle'],
                 duration=6.0
             )
             method_name = "三点法"
-        elif choice in ['2', '5']:
+        elif choice in ['2']:
             circle_req = client.create_circle_request_parametric(
                 arm_name=arm_name,
                 center_x=center_params['center'][0],
@@ -499,19 +546,10 @@ def main():
                 axis_y=center_params['axis'][1],
                 axis_z=center_params['axis'][2],
                 rotate_angle=center_params['angle'],
-                duration=6.0
+                duration=6.0,
+                end_pose=end_pose  # 参数法画圆的话，建议两种，一种是用selp插值，但是姿态不变和起点保持一致，另一种是再登名理改姿态和圆弧保持一致
             )
             method_name = "参数法"
-        elif choice in ['3', '6']:
-            circle_req = client.create_planar_circle_request(
-                arm_name=arm_name,
-                center_x=0.25,
-                center_y=0.0 if arm_name == 'left' else 0.0,
-                center_z=-0.25,
-                radius=0.1,
-                duration=8.0
-            )
-            method_name = "平面画圆"
         else:
             print("无效选择")
             return 1
@@ -535,12 +573,12 @@ def main():
     # 清理
     print("\n[14] 清理...")
     
-    # 切换回MOVEJ状态
+    # 切换回hold状态
     try:
         send_fsm_command(interface, 2)  # HOLD
         time.sleep(0.5)
-        send_fsm_command(interface, 4)  # MOVEJ
-        print("✓ 已切换回MOVEJ状态")
+        # send_fsm_command(interface, 4)  # MOVEJ
+        print("✓ 已切换回hold状态")
     except Exception as e:
         print(f"⚠ 状态切换失败: {e}")
     
