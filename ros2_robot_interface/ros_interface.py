@@ -29,6 +29,7 @@ import tf2_ros
 from tf2_ros import TransformException
 from tf2_geometry_msgs import do_transform_pose
 
+from arms_ros2_control_msgs.msg import WbcCurrentState
 from arms_ros2_control_msgs.srv import ExecutePath
 
 from .config import ControlType, ROS2RobotInterfaceConfig
@@ -47,6 +48,24 @@ logger = logging.getLogger(__name__)
 
 class ROS2RobotInterface:
     """Interface for communicating with ROS 2 robots."""
+
+    BODY_MODE_TO_STATE: Dict[str, int] = {
+        "BODY_FREE": WbcCurrentState.BODY_FREE,
+        "BODY_RELATIVE": WbcCurrentState.BODY_VERTICAL,
+        "BODY_VERTICAL": WbcCurrentState.BODY_VERTICAL,  # backward-compatible alias
+        "BODY_TRACKING": WbcCurrentState.BODY_TRACKING,
+        "BODY_LOCK": WbcCurrentState.BODY_LOCKED,
+        "BODY_HEAD_COUPLED": WbcCurrentState.BODY_HEAD_COUPLED,
+    }
+    BODY_MODE_TO_COMMAND: Dict[str, str] = {
+        "BODY_FREE": "BODY_FREE",
+        "BODY_RELATIVE": "BODY_RELATIVE",
+        "BODY_VERTICAL": "BODY_RELATIVE",  # backward-compatible alias
+        "BODY_TRACKING": "BODY_TRACKING",
+        "BODY_LOCK": "BODY_LOCK",
+        "BODY_HEAD_COUPLED": "BODY_HEAD_COUPLED",
+    }
+    MODE_SWITCH_SETTLE_TIME_SEC: float = 0.1
     
     def __init__(self, config: ROS2RobotInterfaceConfig):
         """Initialize the ROS 2 robot interface."""
@@ -59,10 +78,12 @@ class ROS2RobotInterface:
         self.fsm_state_sub: Subscription | None = None
         self.robot_description_sub: Subscription | None = None
         self.body_current_target_sub: Subscription | None = None
+        self.wbc_state_sub: Subscription | None = None
         self.target_path_pub: Publisher | None = None
         self.execute_path_client: Client | None = None
         self.dual_target_stamped_pub: Publisher | None = None
         self.fsm_command_pub: Publisher | None = None
+        self.mode_command_pub: Publisher | None = None
         self.head_joint_controller_pub: Publisher | None = None
         self.body_joint_controller_pub: Publisher | None = None
         self.left_hand_joint_controller_pub: Publisher | None = None
@@ -93,6 +114,7 @@ class ROS2RobotInterface:
         self.head_target_positions: Optional[List[float]] = None
         self.body_target_positions: Optional[List[float]] = None
         self.body_current_target: Optional[List[float]] = None
+        self.wbc_state: Optional[WbcCurrentState] = None
         
         self.tf_buffer: Optional[tf2_ros.Buffer] = None
         self.tf_listener: Optional[tf2_ros.TransformListener] = None
@@ -350,6 +372,16 @@ class ROS2RobotInterface:
                     10
                 )
                 logger.info("✅ Subscribed to {} for body target tracking".format(self.config.body_joint_current_target_topic))
+
+            # Subscribe WBC current state for mode-aware command timing.
+            if self.is_wbc:
+                self.wbc_state_sub = self.robot_node.create_subscription(
+                    WbcCurrentState,
+                    "/ocs2_wbc_controller/current_state",
+                    self._wbc_state_callback,
+                    10
+                )
+                logger.info("✅ Subscribed to /ocs2_wbc_controller/current_state for WBC mode tracking")
             
             # Initialize TF buffer first (needed by ArmHandler)
             self.tf_buffer = tf2_ros.Buffer()
@@ -410,6 +442,7 @@ class ROS2RobotInterface:
                 logger.debug("Right gripper handler not created: gripper_enabled=False")
             
             self.fsm_command_pub = self.robot_node.create_publisher(Int32, "/fsm_command", 10)
+            self.mode_command_pub = self.robot_node.create_publisher(String, "/mode_command", 10)
             
             if self.config.head_joint_controller_topic:
                 self.head_joint_controller_pub = self.robot_node.create_publisher(
@@ -521,6 +554,40 @@ class ROS2RobotInterface:
             logger.debug(f"Body current target updated: {self.body_current_target}")
         except Exception as e:
             logger.error(f"Error in body current target callback: {e}", exc_info=True)
+
+    def _wbc_state_callback(self, msg: WbcCurrentState) -> None:
+        """Callback for /ocs2_wbc_controller/current_state."""
+        try:
+            self.wbc_state = msg
+        except Exception as e:
+            logger.error(f"Error in WBC state callback: {e}", exc_info=True)
+
+    def _normalize_body_mode(self, body_mode: Optional[str], body_pose: Optional[Pose]) -> Optional[str]:
+        """Normalize/validate body mode and preserve backward compatibility."""
+        desired_body_mode = body_mode.strip().upper() if body_mode else None
+        if desired_body_mode is None and body_pose is not None:
+            return "BODY_TRACKING"
+        if desired_body_mode is None:
+            return None
+        if desired_body_mode not in self.BODY_MODE_TO_STATE:
+            raise ValueError(
+                "Invalid body_mode='{}', must be one of {}".format(
+                    desired_body_mode, sorted(self.BODY_MODE_TO_STATE.keys())
+                )
+            )
+        return desired_body_mode
+
+    def _switch_body_mode_if_needed(self, desired_body_mode: Optional[str]) -> None:
+        """Switch body mode only when current WBC state does not match target mode."""
+        if desired_body_mode is None:
+            return
+
+        desired_state = self.BODY_MODE_TO_STATE[desired_body_mode]
+        if self.wbc_state is not None and self.wbc_state.body_state == desired_state:
+            return
+
+        self.send_mode_command(self.BODY_MODE_TO_COMMAND[desired_body_mode])
+        time.sleep(self.MODE_SWITCH_SETTLE_TIME_SEC)
 
     def _joint_state_callback(self, msg: JointState) -> None:
         """Callback for joint state messages."""
@@ -858,8 +925,28 @@ class ROS2RobotInterface:
         )
         return response.success
 
-    def send_dual_arm_target_stamped(self, left_pose: Pose, right_pose: Pose, frame_id: str = "arm_base") -> None:
-        """Send dual-arm target poses to /dual_target/stamped topic."""
+    def send_dual_arm_target_stamped(
+        self,
+        left_pose: Pose,
+        right_pose: Pose,
+        frame_id: str = "arm_base",
+        body_pose: Optional[Pose] = None,
+        body_frame_id: str = "base_footprint",
+        body_mode: Optional[str] = None,
+    ) -> None:
+        """Send dual-arm target poses to /dual_target/stamped topic.
+
+        When ``body_pose`` is provided, an additional 3rd pose will be appended:
+        ``[left, right, body]``. This matches PoseBasedReferenceManager dual-target
+        format that supports both 2-pose and 3-pose messages.
+
+        Args:
+            body_mode: Optional body mode command, e.g. ``BODY_TRACKING``,
+                ``BODY_FREE``, ``BODY_RELATIVE`` (alias: ``BODY_VERTICAL``),
+                ``BODY_LOCK``, ``BODY_HEAD_COUPLED``.
+                If set and mode is not BODY_TRACKING,
+                body target pose will not be appended.
+        """
         if not self.is_connected:
             raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
         if not self.config.right_end_effector_target_topic:
@@ -880,6 +967,17 @@ class ROS2RobotInterface:
             pose_stamped.header.frame_id = frame_id
             pose_stamped.pose = pose
             path_msg.poses.append(pose_stamped)
+
+        desired_body_mode = self._normalize_body_mode(body_mode, body_pose)
+        self._switch_body_mode_if_needed(desired_body_mode)
+
+        # Only BODY_TRACKING needs body target in dual_target/stamped.
+        if body_pose is not None and desired_body_mode == "BODY_TRACKING":
+            body_pose_stamped = PoseStamped()
+            body_pose_stamped.header.stamp = stamp
+            body_pose_stamped.header.frame_id = body_frame_id
+            body_pose_stamped.pose = body_pose
+            path_msg.poses.append(body_pose_stamped)
         
         # 清除旧的 current target，避免在收到新目标前误判为已到达
         if self.left_arm_handler:
@@ -888,9 +986,19 @@ class ROS2RobotInterface:
             self.right_arm_handler.latest_target_pose = None
         
         self.dual_target_stamped_pub.publish(path_msg)
-        logger.info(f"Published dual arm target to /dual_target/stamped (frame_id: {frame_id})")
+        if len(path_msg.poses) == 2:
+            logger.info(f"Published dual arm target to /dual_target/stamped (frame_id: {frame_id})")
+        else:
+            logger.info(
+                "Published dual-arm + body target to /dual_target/stamped "
+                f"(arm_frame_id: {frame_id}, body_frame_id: {body_frame_id})"
+            )
         logger.debug(f"Left arm pose: ({left_pose.position.x:.4f}, {left_pose.position.y:.4f}, {left_pose.position.z:.4f})")
         logger.debug(f"Right arm pose: ({right_pose.position.x:.4f}, {right_pose.position.y:.4f}, {right_pose.position.z:.4f})")
+        if len(path_msg.poses) == 3:
+            logger.debug(
+                f"Body pose: ({body_pose.position.x:.4f}, {body_pose.position.y:.4f}, {body_pose.position.z:.4f})"
+            )
     
     
     def send_fsm_command(self, command: int) -> None:
@@ -932,6 +1040,23 @@ class ROS2RobotInterface:
             _publish_and_wait(FSM_HOLD)
 
         _publish_and_wait(command)
+
+    def send_mode_command(self, command: str) -> None:
+        """Send mode command to /mode_command.
+
+        Args:
+            command: Mode command string, e.g. BASE_LOCK, BASE_UNLOCK.
+        """
+        if not self.is_connected:
+            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+
+        if self.mode_command_pub is None:
+            logger.warning("Mode command publisher not initialized")
+            return
+
+        mode_msg = String()
+        mode_msg.data = str(command)
+        self.mode_command_pub.publish(mode_msg)
 
     def auto_switch_fsm_state(self, target_state: int) -> bool:
         """Automatically switch FSM state only when needed.
@@ -2161,6 +2286,10 @@ class ROS2RobotInterface:
         if self.body_current_target_sub:
             self.body_current_target_sub.destroy()
             self.body_current_target_sub = None
+
+        if self.wbc_state_sub:
+            self.wbc_state_sub.destroy()
+            self.wbc_state_sub = None
         
         # Cleanup arm handlers
         if self.left_arm_handler:
@@ -2195,6 +2324,10 @@ class ROS2RobotInterface:
         if self.fsm_command_pub:
             self.fsm_command_pub.destroy()
             self.fsm_command_pub = None
+
+        if self.mode_command_pub:
+            self.mode_command_pub.destroy()
+            self.mode_command_pub = None
         
         if self.head_joint_controller_pub:
             self.head_joint_controller_pub.destroy()
@@ -2243,6 +2376,7 @@ class ROS2RobotInterface:
         
         self.latest_joint_state = None
         self.latest_categorized_joint_state = None
+        self.wbc_state = None
 
         
         logger.info("Disconnected from ROS 2 robot interface")
