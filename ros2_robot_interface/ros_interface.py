@@ -134,10 +134,25 @@ class ROS2RobotInterface:
         return t[:i]
 
     @property
-    def body_joint_controller_node(self) -> str:
-        """Body joint controller node name inferred from current interface config."""
+    def body_controller(self) -> str:
+        """躯干/腰关节控制器在 ROS 中的节点全名（由 ``body_joint_controller_topic`` 推断），供 ``set_node_parameters`` 等使用。"""
         return self._controller_node_from_topic(self.config.body_joint_controller_topic)
-    
+
+    @property
+    def arm_controller(self) -> str:
+        """双臂/统一臂控制器节点全名（由 ``unified_arm_joint_controller_topic`` 或 ``left_arm_joint_controller_topic`` 推断）。
+
+        典型 OCS2 / WBC 栈下可用于 ``set_node_parameters``（如 ``movel_duration``）等。
+        """
+        for topic in (
+            self.config.unified_arm_joint_controller_topic,
+            self.config.left_arm_joint_controller_topic,
+        ):
+            n = self._controller_node_from_topic(topic)
+            if n:
+                return n
+        return ""
+
     def list_nodes(self) -> List[Dict[str, str]]:
         """查询当前运行的 ROS 2 节点列表。详见 utils.discovery.list_nodes() 的文档。"""
         # 如果已连接，使用现有节点；否则传递 None 让函数创建临时节点
