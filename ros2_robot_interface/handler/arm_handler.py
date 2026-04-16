@@ -6,6 +6,7 @@ Arm Handler - 单臂处理器
 """
 
 import logging
+import math
 from enum import Enum
 from typing import Optional, Dict, Any, List, Callable
 
@@ -340,11 +341,25 @@ class ArmHandler:
             pos_dist = ((current_pose.position.x - target_pose.position.x) ** 2 +
                        (current_pose.position.y - target_pose.position.y) ** 2 +
                        (current_pose.position.z - target_pose.position.z) ** 2) ** 0.5
-            
-            dot_product = (current_pose.orientation.w * target_pose.orientation.w +
-                          current_pose.orientation.x * target_pose.orientation.x +
-                          current_pose.orientation.y * target_pose.orientation.y +
-                          current_pose.orientation.z * target_pose.orientation.z)
+
+            # Normalize target quaternion to avoid non-unit target causing orientation error bias.
+            tqx = target_pose.orientation.x
+            tqy = target_pose.orientation.y
+            tqz = target_pose.orientation.z
+            tqw = target_pose.orientation.w
+            target_norm = math.sqrt(tqx * tqx + tqy * tqy + tqz * tqz + tqw * tqw)
+            if target_norm > 1e-12:
+                tqx /= target_norm
+                tqy /= target_norm
+                tqz /= target_norm
+                tqw /= target_norm
+            else:
+                tqx, tqy, tqz, tqw = 0.0, 0.0, 0.0, 1.0
+
+            dot_product = (current_pose.orientation.w * tqw +
+                          current_pose.orientation.x * tqx +
+                          current_pose.orientation.y * tqy +
+                          current_pose.orientation.z * tqz)
             dot_product = max(-1.0, min(1.0, dot_product))
             orient_dist = 1.0 - abs(dot_product)
             
