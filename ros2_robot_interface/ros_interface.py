@@ -738,7 +738,13 @@ class ROS2RobotInterface:
                 elif name_lower.startswith('right_'):
                     category = 'right_arm'
                 else:
-                    category = 'head' if 'head' in name_lower else 'body' if 'body' in name_lower else 'other'
+                    # 与 WBC ``joint_names`` 分类一致：Galbot 等用 leg_joint* 表示底盘/腰链，归入 body
+                    if "head" in name_lower:
+                        category = "head"
+                    elif "body" in name_lower or name_lower.startswith("leg_"):
+                        category = "body"
+                    else:
+                        category = "other"
             else:
                 # 检查是否是夹爪/灵巧手关节（包含 'gripper' 或 'hand'）
                 is_gripper_or_hand = 'gripper' in name_lower or 'hand' in name_lower
@@ -747,7 +753,7 @@ class ROS2RobotInterface:
                     category = 'gripper'
                 elif 'head' in name_lower:
                     category = 'head'
-                elif 'body' in name_lower:
+                elif 'body' in name_lower or name_lower.startswith("leg_"):
                     category = 'body'
                 else:
                     category = 'arm' if 'joint' in name_lower else 'other'
@@ -1404,7 +1410,8 @@ class ROS2RobotInterface:
                         left_arm_joint_names.append(joint_name)
                     elif name_lower.startswith("right_"):
                         right_arm_joint_names.append(joint_name)
-                    elif "body" in name_lower:
+                    elif "body" in name_lower or name_lower.startswith("leg_"):
+                        # Galbot 等底盘/下肢链常用 leg_joint*，在 WBC 合成里与 body 段同序位
                         body_joint_names.append(joint_name)
                     elif "head" in name_lower:
                         head_joint_names.append(joint_name)
@@ -1511,6 +1518,164 @@ class ROS2RobotInterface:
         msg.data = combined_positions
         self.unified_arm_joint_controller_pub.publish(msg)
 
+    def _is_wbc_unified_joint_topic(self) -> bool:
+        ut = self.config.unified_arm_joint_controller_topic or ""
+        return "ocs2_wbc_controller" in ut
+
+    def send_coordinated_joint_positions(
+        self,
+        body_positions: Optional[List[float]] = None,
+        left_arm_positions: Optional[List[float]] = None,
+        right_arm_positions: Optional[List[float]] = None,
+        head_positions: Optional[List[float]] = None,
+    ) -> None:
+        """一次性下发关节空间目标（MoveJ 语义），在 WBC 合成与 split 栈之间自动选路。
+
+        低层 API（``send_dual_arm_joint_positions``、``send_body_joint_positions``、
+        ``ArmHandler.send_joint_positions`` 等）仍适合**并行/分时**组合（例如手臂
+        MoVEL 与腰部 MoveJ 分开发）；本方法面向**单步**「能一次发就一次发」的编排。
+
+        路由概要：
+
+        - **WBC**（``unified_arm_joint_controller_topic`` 含 ``ocs2_wbc_controller``）且
+          已连接双臂统一发布器、且配置为双臂模式：一律经
+          ``send_dual_arm_joint_positions``；缺某一臂目标时从 ``/joint_states`` 读当前角
+          作为 hold；仅躯干/头时双臂均 hold。
+        - **非 WBC** 但存在统一臂 topic：双臂走 ``send_dual_arm_joint_positions``；若提供
+          ``body_positions`` 且已初始化 ``body_joint_controller_pub``，再发躯干 topic
+          （与「臂 unified + 腰 split」的旧栈兼容）。
+        - **其它**：按可用的左右臂 handler 与 ``send_body_joint_positions`` 回退。
+
+        ``head_positions`` 仅在 WBC 合成路径中交给 ``send_dual_arm_joint_positions``；
+        非 WBC 时若配置了头部发布器，会在臂与躯干之后调用 ``send_head_joint_positions``。
+
+        Raises:
+            ROS2NotConnectedError: 未连接。
+            ValueError: 四个列表均为空/缺省，或 WBC 下无法从状态补全缺失臂。
+        """
+        if not self.is_connected:
+            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+
+        def _as_vec(xs: Optional[List[float]]) -> Optional[List[float]]:
+            if xs is None or len(xs) == 0:
+                return None
+            return [float(x) for x in xs]
+
+        body = _as_vec(body_positions)
+        left = _as_vec(left_arm_positions)
+        right = _as_vec(right_arm_positions)
+        head = _as_vec(head_positions)
+
+        if body is None and left is None and right is None and head is None:
+            raise ValueError(
+                "send_coordinated_joint_positions: at least one of body_positions, "
+                "left_arm_positions, right_arm_positions, head_positions must be non-empty"
+            )
+
+        wbc = self._is_wbc_unified_joint_topic()
+        has_unified = self.unified_arm_joint_controller_pub is not None
+        dual_mode = bool(self.config.right_end_effector_target_topic)
+
+        def _hold_arm(side: str) -> Optional[List[float]]:
+            cat = self.get_joint_state(categorized=True) or {}
+            p = (cat.get(f"{side}_arm") or {}).get("positions")
+            if not p or len(p) < 7:
+                return None
+            return [float(x) for x in p[:7]]
+
+        # ----- WBC：全身尽量一条 unified 向量 -----
+        if wbc and has_unified and dual_mode:
+            if left and right:
+                self.send_dual_arm_joint_positions(
+                    left, right, body_positions=body, head_positions=head
+                )
+                return
+            if left and not right:
+                rh = _hold_arm("right")
+                if not rh:
+                    raise ValueError(
+                        "send_coordinated_joint_positions (WBC): right arm omitted and "
+                        "right arm positions unavailable from joint_states"
+                    )
+                self.send_dual_arm_joint_positions(
+                    left, rh, body_positions=body, head_positions=head
+                )
+                return
+            if right and not left:
+                lh = _hold_arm("left")
+                if not lh:
+                    raise ValueError(
+                        "send_coordinated_joint_positions (WBC): left arm omitted and "
+                        "left arm positions unavailable from joint_states"
+                    )
+                self.send_dual_arm_joint_positions(
+                    lh, right, body_positions=body, head_positions=head
+                )
+                return
+            if body is not None or head is not None:
+                lh = _hold_arm("left")
+                rh = _hold_arm("right")
+                if not lh or not rh:
+                    raise ValueError(
+                        "send_coordinated_joint_positions (WBC): only body/head given but "
+                        "could not read both arms from joint_states"
+                    )
+                self.send_dual_arm_joint_positions(
+                    lh, rh, body_positions=body, head_positions=head
+                )
+                return
+
+        # ----- 非 WBC unified：臂一条消息，躯干另发（若配置了 body publisher）-----
+        if has_unified and dual_mode and left and right:
+            self.send_dual_arm_joint_positions(left, right)
+            if body is not None:
+                if self.body_joint_controller_pub is not None:
+                    self.send_body_joint_positions(body)
+                else:
+                    logger.warning(
+                        "send_coordinated_joint_positions: body_positions set but "
+                        "body_joint_controller_pub is not initialized; body command skipped"
+                    )
+            if head is not None and self.head_joint_controller_pub is not None:
+                self.send_head_joint_positions(head)
+            elif head is not None:
+                logger.warning(
+                    "send_coordinated_joint_positions: head_positions set but "
+                    "head_joint_controller_pub is not initialized; head command skipped"
+                )
+            return
+
+        # ----- 回退：分臂 handler + 躯干 -----
+        sent_any = False
+        if left and self.left_arm_handler is not None:
+            self.left_arm_handler.send_joint_positions(left)
+            sent_any = True
+        if right and self.right_arm_handler is not None:
+            self.right_arm_handler.send_joint_positions(right)
+            sent_any = True
+        if body is not None:
+            if self.body_joint_controller_pub is not None:
+                self.send_body_joint_positions(body)
+                sent_any = True
+            else:
+                logger.warning(
+                    "send_coordinated_joint_positions: body_positions set but "
+                    "body_joint_controller_pub is not initialized; body command skipped"
+                )
+        if head is not None and self.head_joint_controller_pub is not None:
+            self.send_head_joint_positions(head)
+            sent_any = True
+        elif head is not None:
+            logger.warning(
+                "send_coordinated_joint_positions: head_positions set but "
+                "head_joint_controller_pub is not initialized; head command skipped"
+            )
+
+        if not sent_any:
+            raise ValueError(
+                "send_coordinated_joint_positions: could not send any targets "
+                "(check dual-arm mode, unified topic, and arm handlers)"
+            )
 
     def send_joint_trajectory(self,
                              joint_names: List[str],

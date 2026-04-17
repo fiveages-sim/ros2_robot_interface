@@ -9,6 +9,7 @@ import math
 from geometry_msgs.msg import Pose, Point, Quaternion
 
 from ros2_robot_interface import ROS2RobotInterface, ROS2RobotInterfaceConfig
+from ros2_robot_interface.utils.quat_pose import quat_multiply, quat_normalize
 
 # 全局配置参数
 MAX_WAIT_TIME = 5.0  # 最大等待时间（秒）
@@ -32,33 +33,12 @@ def print_pose(pose, label="Pose"):
           f"{pose.orientation.z:6.3f}, {pose.orientation.w:6.3f})")
 
 
-def quaternion_multiply(q1, q2):
-    """四元数乘法，输入/输出格式均为 (x, y, z, w)"""
-    x1, y1, z1, w1 = q1
-    x2, y2, z2, w2 = q2
-    return (
-        w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
-        w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
-        w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
-        w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
-    )
-
-
-def normalize_quaternion(q):
-    """归一化四元数，避免累计数值误差"""
-    x, y, z, w = q
-    norm = math.sqrt(x * x + y * y + z * z + w * w)
-    if norm < 1e-9:
-        return (0.0, 0.0, 0.0, 1.0)
-    return (x / norm, y / norm, z / norm, w / norm)
-
-
 def rotate_quaternion_world_x(q_current, angle_deg):
     """按世界坐标系 X 轴旋转指定角度（度）"""
     half_angle = math.radians(angle_deg) * 0.5
     q_delta_world_x = (math.sin(half_angle), 0.0, 0.0, math.cos(half_angle))
-    q_new = quaternion_multiply(q_delta_world_x, q_current)
-    return normalize_quaternion(q_new)
+    q_new = quat_multiply(q_delta_world_x, q_current)
+    return quat_normalize(q_new)
 
 
 def wait_for_arrival(interface, max_wait_time=30.0, check_interval=0.5, pose_threshold=0.005):
