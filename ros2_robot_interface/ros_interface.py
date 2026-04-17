@@ -1152,14 +1152,14 @@ class ROS2RobotInterface:
         if self.is_wbc:
             return self.auto_switch_fsm_state(FSM_MOVEJ)
 
-        # Non-WBC: MOVEJ or OCS2 are both acceptable; MOVEJ is preferred when switching is needed.
+        # Non-WBC: MOVEJ or OCS2 are both acceptable; OCS2 is preferred when switching is needed.
         current_state = self.get_fsm_state()
         if current_state in (FSM_MOVEJ, FSM_OCS2):
             logger.debug(
                 f"FSM state {current_state} is acceptable for {normalized_type} in non-WBC mode"
             )
             return False
-        return self.auto_switch_fsm_state(FSM_MOVEJ)
+        return self.auto_switch_fsm_state(FSM_OCS2)
     
     def get_fsm_state(self) -> int:
         """Get current FSM state code.
