@@ -39,10 +39,28 @@ def wait_for_arrival(interface, max_wait_time=5.0, check_interval=0.5, pose_thre
     start_time = time.time()
     while time.time() - start_time < max_wait_time:
         left_result = interface.left_arm_handler.check_arrival(pose_threshold=pose_threshold)
-        right_result = interface.right_arm_handler.check_arrival(pose_threshold=pose_threshold)
-        if left_result["arrived"] and right_result["arrived"]:
-            print(f"  Arrived in {time.time() - start_time:.2f}s")
-            return True
+
+        wbc_state = getattr(interface, "wbc_state", None)
+        coupled_state = None
+        if wbc_state is not None:
+            coupled_state = getattr(wbc_state.__class__, "BIMANUAL_COUPLED", None)
+
+        is_coupled = (
+            wbc_state is not None
+            and coupled_state is not None
+            and getattr(wbc_state, "bimanual_state", None) == coupled_state
+        )
+        print(is_coupled)
+        if is_coupled:
+            if left_result["arrived"]:
+                print(f"  Arrived in {time.time() - start_time:.2f}s (coupled mode, left arm only)")
+                return True
+        else:
+            right_result = interface.right_arm_handler.check_arrival(pose_threshold=pose_threshold)
+            if left_result["arrived"] and right_result["arrived"]:
+                print(f"  Arrived in {time.time() - start_time:.2f}s")
+                return True
+
         time.sleep(check_interval)
 
     print("  Timeout waiting for dual-arm arrival")
@@ -168,7 +186,7 @@ def main():
 
         left_target_pose = create_pose(
             x=0.7,
-            y=0.4,
+            y=0.46,
             z=0.9,
             qx=0.707,
             qy=0.0,
@@ -177,7 +195,7 @@ def main():
         )
         right_target_pose = create_pose(
             x=0.7,
-            y=-0.4,
+            y=-0.6,
             z=0.9,
             qx=0.707,
             qy=0.0,
