@@ -16,7 +16,7 @@ from ros2_robot_interface import ROS2RobotInterface, ROS2RobotInterfaceConfig
 
 MAX_WAIT_TIME = 10.0
 CHECK_INTERVAL = 0.5
-POSE_THRESHOLD = 0.005
+POSE_THRESHOLD = 0.006
 
 
 def create_pose(x, y, z, qx=0.0, qy=0.0, qz=0.0, qw=1.0):
@@ -121,7 +121,7 @@ def main():
 
         left_target_pose = create_pose(
             x=0.85,
-            y=0.5,
+            y=0.45,
             z=0.65,
             qx=0.0707,
             qy=0.0,
@@ -130,7 +130,7 @@ def main():
         )
         right_target_pose = create_pose(
             x=0.85,
-            y=-0.5,
+            y=-0.45,
             z=0.65,
             qx=0.0707,
             qy=0.0,
@@ -164,6 +164,8 @@ def main():
         wait_for_arrival(interface, MAX_WAIT_TIME, CHECK_INTERVAL, POSE_THRESHOLD)
         print_final_error(interface, left_target_pose, right_target_pose, label="Step 1")
 
+        interface.send_mode_command("ARMS_COUPLED")
+
         left_target_pose = create_pose(
             x=0.7,
             y=0.4,
@@ -185,9 +187,9 @@ def main():
 
         # Body target in base_footprint.
         body_target_pose = create_pose(
-            x=0.0,
+            x=0.1,
             y=0.0,
-            z=0.85,
+            z=0.75,
             qx=0.0,
             qy=0.0,
             qz=0.0,

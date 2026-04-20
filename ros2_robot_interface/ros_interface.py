@@ -1099,6 +1099,7 @@ class ROS2RobotInterface:
         mode_msg = String()
         mode_msg.data = str(command)
         self.mode_command_pub.publish(mode_msg)
+        time.sleep(self.MODE_SWITCH_SETTLE_TIME_SEC)
 
     def auto_switch_fsm_state(self, target_state: int) -> bool:
         """Automatically switch FSM state only when needed.
