@@ -101,6 +101,12 @@ class ROS2RobotInterface:
         self._current_fsm_state: int = 2  # Default to HOLD
         self._auto_switch_fsm_before_control: bool = bool(self.config.auto_switch_fsm_before_control)
         self.is_wbc: bool = False
+        # WBC unified joint topic capabilities discovered from ROS graph.
+        # Some deployments expose body/head as dedicated sub-topics, and we use
+        # this to decide whether body/head should go via WBC unified path or
+        # fallback split publishers.
+        self._wbc_has_body_joint_topic: bool = False
+        self._wbc_has_head_joint_topic: bool = False
         
         # Robot description tracking
         self.latest_robot_description: Optional[str] = None
@@ -210,6 +216,8 @@ class ROS2RobotInterface:
         """Auto-detect robot configuration from topics. Returns True if dual-arm detected."""
         is_dual_arm = False
         self.is_wbc = False
+        self._wbc_has_body_joint_topic = False
+        self._wbc_has_head_joint_topic = False
         
         if "/right_target" in topic_names or "/right_current_pose" in topic_names:
             is_dual_arm = True
@@ -217,6 +225,14 @@ class ROS2RobotInterface:
                 self.config.right_end_effector_pose_topic = "/right_current_pose"
             if "/right_target" in topic_names:
                 self.config.right_end_effector_target_topic = "/right_target"
+        # Joint-only dual-arm stacks may not expose right Cartesian targets.
+        # Fall back to right arm MoveJ topics so coordinated joint commands can
+        # still route through dual-arm/unified paths.
+        if not is_dual_arm and (
+            "/ocs2_wbc_controller/target_joint_position/right" in topic_names
+            or "/ocs2_arm_controller/target_joint_position/right" in topic_names
+        ):
+            is_dual_arm = True
         
         # 检测目标位置订阅话题（用于到达判断）
         if "/left_current_target" in topic_names:
@@ -294,18 +310,22 @@ class ROS2RobotInterface:
                 self.config.left_arm_joint_controller_topic = (
                     "/ocs2_wbc_controller/target_joint_position/left"
                 )
-            if is_dual_arm and "/ocs2_wbc_controller/target_joint_position/right" in topic_names:
+            if "/ocs2_wbc_controller/target_joint_position/right" in topic_names:
+                is_dual_arm = True
                 self.config.right_arm_joint_controller_topic = "/ocs2_wbc_controller/target_joint_position/right"
         elif "/ocs2_arm_controller/target_joint_position/left" in topic_names:
             if self.config.left_arm_joint_controller_topic is None:
                 self.config.left_arm_joint_controller_topic = "/ocs2_arm_controller/target_joint_position/left"
-            if is_dual_arm and "/ocs2_arm_controller/target_joint_position/right" in topic_names:
+            if "/ocs2_arm_controller/target_joint_position/right" in topic_names:
+                is_dual_arm = True
                 self.config.right_arm_joint_controller_topic = "/ocs2_arm_controller/target_joint_position/right"
 
         # 检测统一的双臂关节控制器 topic（仅双臂模式，且可以与分开的 topic 同时存在）
         # 单臂模式下无后缀的 topic 应该设置为 left_arm_joint_controller_topic，而不是统一 topic
         if "/ocs2_wbc_controller/target_joint_position" in topic_names:
             self.is_wbc = True
+            self._wbc_has_body_joint_topic = "/ocs2_wbc_controller/target_joint_position/body" in topic_names
+            self._wbc_has_head_joint_topic = "/ocs2_wbc_controller/target_joint_position/head" in topic_names
 
         if is_dual_arm:
             # 双臂模式：检测统一 topic（优先检测 /ocs2_wbc_controller/target_joint_position，其次 /ocs2_arm_controller/target_joint_position）
@@ -1352,8 +1372,11 @@ class ROS2RobotInterface:
         if not self.is_connected:
             raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
 
-        if not self.config.right_end_effector_target_topic:
-            raise ValueError("Dual-arm joint control requires dual-arm mode. Right end-effector target topic not configured.")
+        if not (self.config.right_end_effector_target_topic or self.config.right_arm_joint_controller_topic):
+            raise ValueError(
+                "Dual-arm joint control requires right-side configuration. "
+                "Neither right_end_effector_target_topic nor right_arm_joint_controller_topic is configured."
+            )
 
         if self.unified_arm_joint_controller_pub is None:
             raise ROS2NotConnectedError(
@@ -1381,21 +1404,25 @@ class ROS2RobotInterface:
         is_wbc_controller = unified_topic and "ocs2_wbc_controller" in unified_topic
 
         if is_wbc_controller:
+            include_body_in_unified = bool(self._wbc_has_body_joint_topic)
+            include_head_in_unified = bool(self._wbc_has_head_joint_topic)
             configured_joint_names = list(self.config.joint_names or [])
             if not configured_joint_names:
                 logger.warning(
                     "config.joint_names is empty for WBC controller, falling back to "
                     "body + left + right ordering (head joints will be ignored)"
                 )
-                resolved_body: Optional[List[float]] = body_positions
-                if resolved_body is None:
-                    categorized_state = self.get_joint_state(categorized=True)
-                    if categorized_state and categorized_state.get('body', {}).get('positions'):
-                        resolved_body = list(categorized_state['body']['positions'])
-                if resolved_body is None:
-                    logger.warning("Body joint positions not available, using zeros for WBC controller")
-                    resolved_body = [0.0] * 4
-                combined_positions = list(resolved_body) + left_arm_positions + right_arm_positions
+                combined_positions = list(left_arm_positions) + list(right_arm_positions)
+                if include_body_in_unified:
+                    resolved_body: Optional[List[float]] = body_positions
+                    if resolved_body is None:
+                        categorized_state = self.get_joint_state(categorized=True)
+                        if categorized_state and categorized_state.get('body', {}).get('positions'):
+                            resolved_body = list(categorized_state['body']['positions'])
+                    if resolved_body is None:
+                        logger.warning("Body joint positions not available, using zeros for WBC controller")
+                        resolved_body = [0.0] * 4
+                    combined_positions = list(resolved_body) + combined_positions
             else:
                 body_joint_names: List[str] = []
                 left_arm_joint_names: List[str] = []
@@ -1436,12 +1463,20 @@ class ROS2RobotInterface:
                         f"got {len(right_arm_positions)}, expected {len(right_arm_joint_names)}"
                     )
 
-                if body_positions is not None and len(body_positions) != len(body_joint_names):
+                if (
+                    include_body_in_unified
+                    and body_positions is not None
+                    and len(body_positions) != len(body_joint_names)
+                ):
                     raise ValueError(
                         "Body position count does not match config.joint_names: "
                         f"got {len(body_positions)}, expected {len(body_joint_names)}"
                     )
-                if head_positions is not None and len(head_positions) != len(head_joint_names):
+                if (
+                    include_head_in_unified
+                    and head_positions is not None
+                    and len(head_positions) != len(head_joint_names)
+                ):
                     raise ValueError(
                         "Head position count does not match config.joint_names: "
                         f"got {len(head_positions)}, expected {len(head_joint_names)}"
@@ -1458,12 +1493,16 @@ class ROS2RobotInterface:
 
                 left_name_to_cmd = dict(zip(left_arm_joint_names, left_arm_positions))
                 right_name_to_cmd = dict(zip(right_arm_joint_names, right_arm_positions))
-                body_name_to_cmd = dict(zip(body_joint_names, body_positions or []))
-                head_name_to_cmd = dict(zip(head_joint_names, head_positions or []))
+                body_name_to_cmd = dict(zip(body_joint_names, body_positions or [])) if include_body_in_unified else {}
+                head_name_to_cmd = dict(zip(head_joint_names, head_positions or [])) if include_head_in_unified else {}
 
-                target_joint_names = (
-                    body_joint_names + left_arm_joint_names + right_arm_joint_names + head_joint_names
-                )
+                target_joint_names: List[str] = []
+                if include_body_in_unified:
+                    target_joint_names.extend(body_joint_names)
+                target_joint_names.extend(left_arm_joint_names)
+                target_joint_names.extend(right_arm_joint_names)
+                if include_head_in_unified:
+                    target_joint_names.extend(head_joint_names)
                 ordered_joint_names: List[str] = list(target_joint_names)
 
                 missing_in_state = [n for n in ordered_joint_names if n not in state_name_to_pos]
@@ -1495,11 +1534,6 @@ class ROS2RobotInterface:
                     raise ValueError(
                         "WBC command dimension mismatch: "
                         f"got {len(combined_positions)}, expected {expected_total}"
-                    )
-                if expected_total != 20:
-                    logger.warning(
-                        "WBC command dimension is %s (expected 20 for FiveAges W2 profile)",
-                        expected_total,
                     )
 
             logger.debug(
@@ -1573,9 +1607,11 @@ class ROS2RobotInterface:
                 "left_arm_positions, right_arm_positions, head_positions must be non-empty"
             )
 
-        wbc = self._is_wbc_unified_joint_topic()
+        unified_topic = self.config.unified_arm_joint_controller_topic or ""
+        using_wbc_controller = "ocs2_wbc_controller" in unified_topic
+        using_arm_controller = "ocs2_arm_controller" in unified_topic
         has_unified = self.unified_arm_joint_controller_pub is not None
-        dual_mode = bool(self.config.right_end_effector_target_topic)
+        dual_mode = bool(self.config.right_end_effector_target_topic or self.config.right_arm_joint_controller_topic)
 
         def _hold_arm(side: str) -> Optional[List[float]]:
             cat = self.get_joint_state(categorized=True) or {}
@@ -1584,12 +1620,30 @@ class ROS2RobotInterface:
                 return None
             return [float(x) for x in p[:7]]
 
-        # ----- WBC：全身尽量一条 unified 向量 -----
-        if wbc and has_unified and dual_mode:
+        # ----- WBC：按 body/head 子 topic 能力决定 unified or split -----
+        if using_wbc_controller and has_unified and dual_mode:
+            wbc_body = body if self._wbc_has_body_joint_topic else None
+            wbc_head = head if self._wbc_has_head_joint_topic else None
             if left and right:
                 self.send_dual_arm_joint_positions(
-                    left, right, body_positions=body, head_positions=head
+                    left, right, body_positions=wbc_body, head_positions=wbc_head
                 )
+                if body is not None and not self._wbc_has_body_joint_topic:
+                    if self.body_joint_controller_pub is not None:
+                        self.send_body_joint_positions(body)
+                    else:
+                        logger.warning(
+                            "send_coordinated_joint_positions: WBC topic has no /body channel and "
+                            "body_joint_controller_pub is not initialized; body command skipped"
+                        )
+                if head is not None and not self._wbc_has_head_joint_topic:
+                    if self.head_joint_controller_pub is not None:
+                        self.send_head_joint_positions(head)
+                    else:
+                        logger.warning(
+                            "send_coordinated_joint_positions: WBC topic has no /head channel and "
+                            "head_joint_controller_pub is not initialized; head command skipped"
+                        )
                 return
             if left and not right:
                 rh = _hold_arm("right")
@@ -1599,8 +1653,24 @@ class ROS2RobotInterface:
                         "right arm positions unavailable from joint_states"
                     )
                 self.send_dual_arm_joint_positions(
-                    left, rh, body_positions=body, head_positions=head
+                    left, rh, body_positions=wbc_body, head_positions=wbc_head
                 )
+                if body is not None and not self._wbc_has_body_joint_topic:
+                    if self.body_joint_controller_pub is not None:
+                        self.send_body_joint_positions(body)
+                    else:
+                        logger.warning(
+                            "send_coordinated_joint_positions: WBC topic has no /body channel and "
+                            "body_joint_controller_pub is not initialized; body command skipped"
+                        )
+                if head is not None and not self._wbc_has_head_joint_topic:
+                    if self.head_joint_controller_pub is not None:
+                        self.send_head_joint_positions(head)
+                    else:
+                        logger.warning(
+                            "send_coordinated_joint_positions: WBC topic has no /head channel and "
+                            "head_joint_controller_pub is not initialized; head command skipped"
+                        )
                 return
             if right and not left:
                 lh = _hold_arm("left")
@@ -1610,8 +1680,24 @@ class ROS2RobotInterface:
                         "left arm positions unavailable from joint_states"
                     )
                 self.send_dual_arm_joint_positions(
-                    lh, right, body_positions=body, head_positions=head
+                    lh, right, body_positions=wbc_body, head_positions=wbc_head
                 )
+                if body is not None and not self._wbc_has_body_joint_topic:
+                    if self.body_joint_controller_pub is not None:
+                        self.send_body_joint_positions(body)
+                    else:
+                        logger.warning(
+                            "send_coordinated_joint_positions: WBC topic has no /body channel and "
+                            "body_joint_controller_pub is not initialized; body command skipped"
+                        )
+                if head is not None and not self._wbc_has_head_joint_topic:
+                    if self.head_joint_controller_pub is not None:
+                        self.send_head_joint_positions(head)
+                    else:
+                        logger.warning(
+                            "send_coordinated_joint_positions: WBC topic has no /head channel and "
+                            "head_joint_controller_pub is not initialized; head command skipped"
+                        )
                 return
             if body is not None or head is not None:
                 lh = _hold_arm("left")
@@ -1622,12 +1708,28 @@ class ROS2RobotInterface:
                         "could not read both arms from joint_states"
                     )
                 self.send_dual_arm_joint_positions(
-                    lh, rh, body_positions=body, head_positions=head
+                    lh, rh, body_positions=wbc_body, head_positions=wbc_head
                 )
+                if body is not None and not self._wbc_has_body_joint_topic:
+                    if self.body_joint_controller_pub is not None:
+                        self.send_body_joint_positions(body)
+                    else:
+                        logger.warning(
+                            "send_coordinated_joint_positions: WBC topic has no /body channel and "
+                            "body_joint_controller_pub is not initialized; body command skipped"
+                        )
+                if head is not None and not self._wbc_has_head_joint_topic:
+                    if self.head_joint_controller_pub is not None:
+                        self.send_head_joint_positions(head)
+                    else:
+                        logger.warning(
+                            "send_coordinated_joint_positions: WBC topic has no /head channel and "
+                            "head_joint_controller_pub is not initialized; head command skipped"
+                        )
                 return
 
-        # ----- 非 WBC unified：臂一条消息，躯干另发（若配置了 body publisher）-----
-        if has_unified and dual_mode and left and right:
+        # ----- ARM unified：分体控制（臂 unified，body/head split）-----
+        if using_arm_controller and has_unified and dual_mode and left and right:
             self.send_dual_arm_joint_positions(left, right)
             if body is not None:
                 if self.body_joint_controller_pub is not None:
