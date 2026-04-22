@@ -76,7 +76,7 @@ class ROS2RobotInterfaceConfig:
     # 手臂关节控制器话题（自动检测，无需手动配置）
     # ============================================================================
     # 【自动检测】系统会在 connect() 时自动检测这些话题，不应手动设置
-    left_arm_joint_controller_topic: str | None = None  # 【自动检测】左臂关节控制器话题（根据可用话题自动检测）
+    left_arm_joint_controller_topic: str | None = None  # 【自动检测或可手动】左臂/单臂链关节 MoveJ 话题；单臂 OCS2 常为 /ocs2_arm_controller/target_joint_position
     right_arm_joint_controller_topic: str | None = None  # 【自动检测】右臂关节控制器话题（双臂模式时自动检测）
     unified_arm_joint_controller_topic: str | None = None  # 【自动检测】统一双臂关节控制器话题（如 /ocs2_wbc_controller/target_joint_position 或 /ocs2_arm_controller/target_joint_position）
     
@@ -86,7 +86,26 @@ class ROS2RobotInterfaceConfig:
     # 【未使用】此参数目前未被代码使用，代码实际使用的是从 ROS 2 topic 接收到的关节名称
     # 保留此参数用于未来可能的验证或过滤功能
     joint_names: list[str] = field(default_factory=lambda: [
-        "joint1", "joint2", "joint3", "joint4", "joint5", "joint6"
+                    "body_joint1",
+                    "body_joint2",
+                    "body_joint3",
+                    "body_joint4",
+                    "left_joint1",
+                    "left_joint2",
+                    "left_joint3",
+                    "left_joint4",
+                    "left_joint5",
+                    "left_joint6",
+                    "left_joint7",
+                    "right_joint1",
+                    "right_joint2",
+                    "right_joint3",
+                    "right_joint4",
+                    "right_joint5",
+                    "right_joint6",
+                    "right_joint7",
+                    "head_joint1",
+                    "head_joint2",      
     ])  # 【未使用】关节名称列表（预留，目前代码使用从 /joint_states topic 接收的实际关节名称）
     
     # ============================================================================
@@ -139,6 +158,7 @@ class ROS2RobotInterfaceConfig:
     # ============================================================================
     # 状态机切换（可选，手动配置）
     # ============================================================================
+    auto_switch_fsm_before_control: bool = True  # 【可选】是否在发送部分控制指令前自动发送 FSM 切换命令，默认关闭
     fsm_state_switch_settle_time: float = 0.3  # 【可选】发送 FSM 状态切换命令后的等待时间（单位：秒），用于确保对端完成状态切换
     
     # ============================================================================
@@ -147,6 +167,13 @@ class ROS2RobotInterfaceConfig:
     namespace: str = ""  # 【可选】ROS 2 节点命名空间，默认为空字符串
     node_name: str | None = None  # 【可选】ROS 2 节点名称，未配置时根据单臂/双臂模式自动生成
     
+    # ============================================================================
+    # Nav2 导航配置（可选，自动检测）
+    # ============================================================================
+    # connect() 时自动检测：nav2_msgs 已安装 且 controller_server 节点正在运行时启用导航支持
+    nav_action_server: str = "navigate_to_pose"  # 【可选】Nav2 NavigateToPose action server 名称
+    nav_enabled: bool | None = None  # 【可选】None=自动检测，True=强制启用，False=强制禁用
+
     # ============================================================================
     # 阈值参数（可选，手动配置）
     # ============================================================================
@@ -190,6 +217,27 @@ class ROS2RobotInterfaceConfig:
         )
 
     @classmethod
+    def default_single_arm_ocs2_arm_controller(
+        cls,
+        *,
+        arm_joint_topic: str = "/ocs2_arm_controller/target_joint_position",
+        **kwargs: object,
+    ) -> "ROS2RobotInterfaceConfig":
+        """单臂 + ``ocs2_arm_controller`` 典型栈（如 Isaac Sim / 本仓库 OCS2 关节命令）。
+
+        预先设置 ``left_arm_joint_controller_topic``，避免仅依赖 ``connect()`` 时 ROS 图探测
+        尚未列出该话题而导致 MoveJ 发布器未创建。若控制器带命名空间，传入
+        ``arm_joint_topic="/namespace/ocs2_arm_controller/target_joint_position"`` 覆盖即可。
+
+        其余参数与 :meth:`default_single_arm` 相同，经 ``**kwargs`` 传入.
+        """
+        merged: dict[str, object] = {
+            "left_arm_joint_controller_topic": arm_joint_topic,
+        }
+        merged.update(kwargs)
+        return cls.default_single_arm(**merged)
+
+    @classmethod
     def default_bimanual(
         cls,
         *,
@@ -228,4 +276,3 @@ class ROS2RobotInterfaceConfig:
             **kwargs,
         )
     
-
