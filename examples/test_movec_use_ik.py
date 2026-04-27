@@ -23,10 +23,15 @@ from arms_ros2_control_msgs.srv import MovecUseIK, JointTrajectory, KinematicsSe
 from arms_ros2_control_msgs.msg import JointWaypoint, CircleMessage
 from ros2_robot_interface import ROS2RobotInterface, ROS2RobotInterfaceConfig
 
+DEFAULT_OUTPUT_DIR = os.environ.get(
+    "POSE_DATA_OUTPUT_DIR",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "data"),
+)
+
 
 class PoseDataRecorder(Node):
     """数据记录器 - 订阅PoseStamped数据并保存到CSV（只在圆弧时使用）"""
-    def __init__(self, output_dir="/home/lina/lina/data"):
+    def __init__(self, output_dir=DEFAULT_OUTPUT_DIR):
         super().__init__('pose_data_recorder')
         
         self.output_dir = output_dir
@@ -215,14 +220,14 @@ class CircleMotionConfig:
 
 
 class MoveJAndCircleClient(Node):
-    def __init__(self, interface=None):
+    def __init__(self, interface=None, output_dir=DEFAULT_OUTPUT_DIR):
         super().__init__('movej_and_circle_client')
         
         # 保存机器人接口
         self.interface = interface
         
         # 创建数据记录器（只用于圆弧运动）
-        self.pose_recorder = PoseDataRecorder()
+        self.pose_recorder = PoseDataRecorder(output_dir)
         
         # 创建圆弧服务客户端
         self.circle_client = self.create_client(MovecUseIK, '/ocs2_arm_controller/execute_circle_use_ik')
@@ -874,16 +879,16 @@ def run_dual_arm_circles(client, interface):
 
 def main():
     """主测试函数"""
+    output_dir = DEFAULT_OUTPUT_DIR
+
     print("=" * 70)
-    print("双臂圆弧运动测试 - 先移动到起始位置，再选择执行动作")
-    print("功能说明:")
-    print("  1. 首先将双臂移动到圆弧起始位置（通过 MoveJ）")
-    print("  2. 然后可以选择执行左臂圆弧、右臂圆弧或双臂顺序圆弧")
-    print("数据将保存到: /home/lina/lina/data")
+    print("关节空间移动 + 圆弧轨迹服务测试 - 只在圆弧时记录位姿数据")
+    print("步骤1: 使用 MoveJ 移动到圆弧起点（不记录数据）")
+    print("步骤2: 使用 MoveC 执行圆弧运动（记录位姿数据）")
+    print(f"数据将保存到: {output_dir}")
     print("=" * 70)
     
     # 检查输出目录
-    output_dir = "/home/lina/lina/data"
     if not os.path.exists(output_dir):
         print(f"创建输出目录: {output_dir}")
         os.makedirs(output_dir)
@@ -921,7 +926,7 @@ def main():
     print("    ✓ 数据收集已开始\n")
     
     # 创建客户端节点
-    client = MoveJAndCircleClient(interface)
+    client = MoveJAndCircleClient(interface, output_dir)
     
     # 等待服务
     print("[5] 等待服务...")
