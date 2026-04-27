@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
 关节空间+圆弧轨迹 Service 客户端 - 带数据记录功能（只在圆弧时记录）
-先使用关节空间移动到圆弧起点，再执行圆弧运动
-服务: 
-  - 关节移动: /ocs2_arm_controller/joint_trajectory_with_para (service)
-  - 圆弧: /ocs2_arm_controller/execute_circle_use_ik (service)
-  - 运动学: /kinematics_service (service)
+支持双臂独立画圆，可顺序执行右臂->左臂
 """
 
 import rclpy
@@ -202,6 +198,22 @@ class PoseDataRecorder(Node):
             self.get_logger().error(f'写入{arm_name}臂数据失败: {e}')
 
 
+class CircleMotionConfig:
+    """圆弧运动配置类"""
+    def __init__(self, arm_name, start_joints, circle_params, method='parametric'):
+        """
+        参数:
+            arm_name: 'left' 或 'right'
+            start_joints: 圆弧起点的关节角度列表(7个)
+            circle_params: 圆弧参数字典
+            method: 'parametric' 或 'three_point'
+        """
+        self.arm_name = arm_name
+        self.start_joints = start_joints
+        self.circle_params = circle_params
+        self.method = method
+
+
 class MoveJAndCircleClient(Node):
     def __init__(self, interface=None):
         super().__init__('movej_and_circle_client')
@@ -393,6 +405,62 @@ class MoveJAndCircleClient(Node):
             self.get_logger().error(f'调用MoveJ服务失败: {e}')
             return False
 
+    def move_both_arms_to_positions(self, left_joints, right_joints, duration=5.0):
+        """
+        同时移动双臂到指定位置
+        
+        参数:
+            left_joints: 左臂7个关节位置列表
+            right_joints: 右臂7个关节位置列表
+            duration: 移动时间(秒)
+        """
+        self.get_logger().info('同时移动双臂到指定位置...')
+        self.get_logger().info(f'左臂目标: {[f"{j:.3f}" for j in left_joints[:3]]}...')
+        self.get_logger().info(f'右臂目标: {[f"{j:.3f}" for j in right_joints[:3]]}...')
+        
+        # 构建完整的14个关节位置
+        dual_joint_positions = left_joints + right_joints
+        
+        # 创建请求
+        req = JointTrajectory.Request()
+        req.joint_names = self.left_arm_joint_names + self.right_arm_joint_names
+        
+        wp = JointWaypoint()
+        wp.position = dual_joint_positions
+        wp.time_mode = True
+        wp.total_time = duration
+        
+        wp.max_velocity = [0.5] * 14
+        wp.max_acceleration = [1.0] * 14
+        wp.max_jerk = [2.0] * 14
+        
+        req.waypoints = [wp]
+        
+        future = self.joint_trajectory_client.call_async(req)
+        
+        try:
+            rclpy.spin_until_future_complete(self, future, timeout_sec=duration + 2.0)
+            if future.result() and future.result().success:
+                planned_duration = future.result().planned_duration
+                self.get_logger().info(f'✓ 双臂移动成功，规划时长: {planned_duration:.3f}秒')
+                wait_time = max(planned_duration, duration) + 1.0
+                self.get_logger().info(f'等待 {wait_time:.1f} 秒完成运动...')
+                time.sleep(wait_time)
+                return True
+            else:
+                error_msg = future.result().message if future.result() else '未知错误'
+                self.get_logger().error(f'✗ 双臂移动失败: {error_msg}')
+                return False
+        except Exception as e:
+            self.get_logger().error(f'调用双臂移动服务失败: {e}')
+            return False
+
+    def move_both_arms_to_safe_position(self, duration=5.0):
+        """将双臂移动到安全位置"""
+        safe_left = [-0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        safe_right = [0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        return self.move_both_arms_to_positions(safe_left, safe_right, duration)
+
     def get_current_joint_positions(self, arm_name="left"):
         """获取当前关节位置"""
         if self.interface is None:
@@ -416,11 +484,11 @@ class MoveJAndCircleClient(Node):
         return {'left': left_positions, 'right': right_positions}
 
     def create_circle_request_three_point(self, arm_name="left", 
-                                           midpoint_x=0.2839, midpoint_y=0.5915, midpoint_z=-0.4104,midpoint_qw=1.0,
-                                           midpoint_qx=0.0,midpoint_qy=0.0,midpoint_qz=0.0,
-                                           endpoint_x=0.3214, endpoint_y=0.4782, endpoint_z=-0.2665,endpoint_qw=1.0,
-                                           endpoint_qx=0.0,endpoint_qy=0.0,endpoint_qz=0.0,
-                                           rotate_angle=3.9551,duration=5.0,ik_type="BFGS"):
+                                           midpoint_x=0.2839, midpoint_y=0.5915, midpoint_z=-0.4104,
+                                           midpoint_qw=1.0, midpoint_qx=0.0, midpoint_qy=0.0, midpoint_qz=0.0,
+                                           endpoint_x=0.3214, endpoint_y=0.4782, endpoint_z=-0.2665,
+                                           endpoint_qw=1.0, endpoint_qx=0.0, endpoint_qy=0.0, endpoint_qz=0.0,
+                                           rotate_angle=3.9551, duration=5.0, ik_type="BFGS"):
         """创建三点法圆弧请求"""
         request = MovecUseIK.Request()
         circle = CircleMessage()
@@ -446,7 +514,7 @@ class MoveJAndCircleClient(Node):
         circle.midpoint.orientation = Quaternion(x=midpoint_qx, y=midpoint_qy, z=midpoint_qz, w=midpoint_qw)
         circle.endpoint.orientation = Quaternion(x=endpoint_qx, y=endpoint_qy, z=endpoint_qz, w=endpoint_qw)
         circle.rotate_angle = rotate_angle
-        circle.ik_type=ik_type
+        circle.ik_type = ik_type
         request.circle_params = circle
         return request
 
@@ -455,18 +523,13 @@ class MoveJAndCircleClient(Node):
                                           axis_x=0.9104, axis_y=0.4054, axis_z=0.0822,
                                           rotate_angle=3.9551,
                                           duration=5.0,
-                                          end_pose=None,ik_type="BFGS"):
-        """
-        创建参数法圆弧请求
-        
-        参数:
-            end_pose: geometry_msgs/Pose 终点姿态（如果提供，将使用其中的四元数）
-        """
+                                          end_pose=None, ik_type="BFGS"):
+        """创建参数法圆弧请求"""
         request = MovecUseIK.Request()
         circle = CircleMessage()
         
         circle.use_three_point_method = False
-        circle.use_slerp_for_orientation = False  # 使用姿态插值
+        circle.use_slerp_for_orientation = False
         circle.time_mode = True
         circle.frame_id = "base_link"
         circle.arm_name = arm_name
@@ -483,9 +546,10 @@ class MoveJAndCircleClient(Node):
         circle.axis = Vector3(x=axis_x, y=axis_y, z=axis_z)
         circle.rotate_angle = rotate_angle
         
-        # 设置终点位置
+        # 设置终点位置（参数法中不使用终点位置）
         circle.endpoint.position = Point(x=0.0, y=0.0, z=0.0)
-        circle.ik_type=ik_type
+        circle.ik_type = ik_type
+        
         # 如果提供了终点姿态，使用它；否则使用默认四元数
         if end_pose is not None:
             circle.endpoint.orientation = end_pose.orientation
@@ -517,9 +581,8 @@ class MoveJAndCircleClient(Node):
                 self.get_logger().info(f'✓ 圆弧服务响应成功，开始记录位姿数据...')
                 
                 # 在服务成功响应后，再开始记录数据
-                # 这样可以确保只记录圆弧运动的数据，不包含MoveJ的残留数据
-                self.pose_recorder.update_phase('circle')
-                self.pose_recorder.start_recording(arm, 'circle')
+                self.pose_recorder.update_phase(f'circle_{arm}')
+                self.pose_recorder.start_recording(arm, f'circle_{arm}')
                 
                 # 给记录器一点时间初始化
                 time.sleep(0.2)
@@ -533,6 +596,96 @@ class MoveJAndCircleClient(Node):
             self.get_logger().error(f'圆弧服务调用异常: {e}')
             return None
 
+    def execute_circle_motion(self, motion_config, duration=6.0):
+        """执行单个圆弧运动（假设已经在起点位置）"""
+        arm_name = motion_config.arm_name
+        circle_params = motion_config.circle_params
+        method = motion_config.method
+        
+        # 注意：这里不再调用MoveJ，假设机器人已经在圆弧起点
+        
+        # 对于参数法圆弧，获取当前位姿用于终点姿态
+        end_pose = None
+        if method == 'parametric':
+            self.get_logger().info(f'[{arm_name}臂] 获取当前位姿（用于圆弧终点姿态）...')
+            # 获取当前关节位置
+            current_positions = self.get_current_joint_positions(arm_name)
+            if current_positions:
+                end_pose = self.get_current_pose_from_kinematics(arm_name, current_positions[arm_name])
+            if end_pose is None:
+                self.get_logger().warn(f'[{arm_name}臂] 无法获取当前位姿，将使用默认四元数')
+        
+        # 创建圆弧请求
+        if method == 'three_point':
+            circle_req = self.create_circle_request_three_point(
+                arm_name=arm_name,
+                midpoint_x=circle_params['midpoint'][0],
+                midpoint_y=circle_params['midpoint'][1],
+                midpoint_z=circle_params['midpoint'][2],
+                midpoint_qw=circle_params['midpoint'][3],
+                midpoint_qx=circle_params['midpoint'][4],
+                midpoint_qy=circle_params['midpoint'][5],
+                midpoint_qz=circle_params['midpoint'][6],
+                endpoint_x=circle_params['endpoint'][0],
+                endpoint_y=circle_params['endpoint'][1],
+                endpoint_z=circle_params['endpoint'][2],
+                endpoint_qw=circle_params['endpoint'][3],
+                endpoint_qx=circle_params['endpoint'][4],
+                endpoint_qy=circle_params['endpoint'][5],
+                endpoint_qz=circle_params['endpoint'][6],
+                rotate_angle=circle_params['angle'],
+                duration=duration,
+                ik_type=circle_params.get('ik_type', 'BFGS')
+            )
+        else:  # parametric
+            circle_req = self.create_circle_request_parametric(
+                arm_name=arm_name,
+                center_x=circle_params['center'][0],
+                center_y=circle_params['center'][1],
+                center_z=circle_params['center'][2],
+                axis_x=circle_params['axis'][0],
+                axis_y=circle_params['axis'][1],
+                axis_z=circle_params['axis'][2],
+                rotate_angle=circle_params['angle'],
+                duration=duration,
+                end_pose=end_pose,
+                ik_type=circle_params.get('ik_type', 'BFGS')
+            )
+        
+        # 执行圆弧运动
+        self.get_logger().info(f'[{arm_name}臂] 执行圆弧运动（记录位姿数据中）...')
+        circle_response = self.call_circle_service_with_recording(circle_req, arm_name)
+        
+        if circle_response and circle_response.success:
+            self.get_logger().info(f'✓ [{arm_name}臂] 圆弧运动成功!')
+            self.get_logger().info(f'  消息: {circle_response.message}')
+            self.get_logger().info(f'  预计时长: {circle_response.estimated_duration:.2f}秒')
+            
+            # 等待轨迹完成
+            wait_time = circle_response.estimated_duration + 2.0
+            self.get_logger().info(f'等待 {wait_time:.1f} 秒完成轨迹...')
+            
+            # 在等待期间持续处理记录器事件
+            start_time = time.time()
+            while time.time() - start_time < wait_time:
+                rclpy.spin_once(self, timeout_sec=0.01)
+                rclpy.spin_once(self.pose_recorder, timeout_sec=0.01)
+                time.sleep(0.01)
+            
+            self.get_logger().info(f'✓ [{arm_name}臂] 轨迹执行完成')
+            
+            # 停止记录
+            self.pose_recorder.stop_recording()
+            self.get_logger().info(f'✓ [{arm_name}臂] 位姿数据已保存')
+            
+            return True
+        else:
+            error_msg = circle_response.message if circle_response else '未知错误'
+            self.get_logger().error(f'✗ [{arm_name}臂] 圆弧运动失败: {error_msg}')
+            if self.pose_recorder.is_recording:
+                self.pose_recorder.stop_recording()
+            return False
+
 
 def send_fsm_command(interface, command, wait_time=0.5):
     """发送FSM状态切换命令"""
@@ -540,21 +693,192 @@ def send_fsm_command(interface, command, wait_time=0.5):
     time.sleep(wait_time)
 
 
-def spin_recorders(client, duration):
-    """在指定时间内持续处理记录器事件"""
-    start_time = time.time()
-    while time.time() - start_time < duration:
-        rclpy.spin_once(client, timeout_sec=0.01)
-        rclpy.spin_once(client.pose_recorder, timeout_sec=0.01)
-        time.sleep(0.01)
+def setup_robot_state(interface, client):
+    """初始化机器人状态"""
+    print("\n[初始化] 切换到HOLD状态...")
+    try:
+        send_fsm_command(interface, 2)  # HOLD
+        print("✓ 已切换到HOLD状态")
+    except Exception as e:
+        print(f"✗ 状态切换失败: {e}")
+        return False
+    
+    print("\n[初始化] 切换到HOME状态...")
+    try:
+        send_fsm_command(interface, 1)  # HOME
+        print("等待HOME完成 (5秒)...")
+        time.sleep(5.0)
+        print("✓ 已回到HOME位置")
+    except Exception as e:
+        print(f"✗ 状态切换失败: {e}")
+        return False
+    
+    print("\n[初始化] 切换到HOLD状态...")
+    try:
+        send_fsm_command(interface, 2)  # HOLD
+        print("✓ 已切换到HOLD状态")
+    except Exception as e:
+        print(f"✗ 状态切换失败: {e}")
+        return False
+    
+    return True
+
+
+def move_both_arms_to_start_position(client, interface):
+    """移动双臂到圆弧起始位置"""
+    print("\n" + "=" * 70)
+    print("移动双臂到圆弧起始位置")
+    print("=" * 70)
+    
+    # 定义双臂起始位置（可以在这里修改关节角度）
+    # 右臂圆弧起点关节位置
+    right_start_joints = [-0.328385435813621, -0.22000419219377856, -0.2746054955857294, 
+                          1.0731518620969906, 0.44726364968600296, -0.5811312841716576, 
+                          0.5052403055260443]
+    # left_start_joints = [-0.328385435813621, 0.22000419219377856, 0.2746054955857294, 
+    #                       1.0731518620969906, -0.44726364968600296, -0.5811312841716576, 
+    #                       -0.5052403055260443]
+    
+    # 左臂圆弧起点关节位置（对称于右臂的终点位置
+    left_start_joints = [-0.48535481337577646, 0.7705844339342997, -0.20624623950835802, 
+                         -0.6913082479497125, -0.025730988246958686, 1.1253353493101284, 
+                         0.0032744788190768545]
+    
+    # 切换到MOVEJ状态
+    print("\n切换MOVEJ状态...")
+    try:
+        send_fsm_command(interface, 4)
+        print("✓ 已切换到MOVEJ状态")
+        time.sleep(0.5)
+    except Exception as e:
+        print(f"✗ 状态切换失败: {e}")
+        return False
+    
+    # 移动到起始位置
+    print("\n移动双臂到圆弧起始位置...")
+    success = client.move_both_arms_to_positions(left_start_joints, right_start_joints, duration=4.0)
+    
+    if success:
+        print("\n✓ 双臂已到达圆弧起始位置")
+    else:
+        print("\n✗ 双臂移动失败")
+    
+    return success
+
+
+def run_right_arm_circle(client, interface):
+    """执行右臂圆弧运动"""
+    print("\n" + "=" * 70)
+    print("执行右臂圆弧运动")
+    print("=" * 70)
+    
+    # 定义右臂圆弧参数（注意：不需要指定起始关节，因为已经在起始位置）
+    right_circle_params = {
+        'center': (0.2520576827979941, 0.0, 0.09094741848884622),
+        'axis': (-1.0, 0.0, 0.0),
+        'angle': (1.0/3.0) * math.pi,
+        'ik_type': "DLS"
+    }
+    
+    
+    # 注意：start_joints 参数在这里不会被使用（因为 execute_circle_motion 不调用 MoveJ）
+    # 但为了兼容性，传入空列表
+    right_motion = CircleMotionConfig(
+        arm_name='right',
+        start_joints=[],  # 不使用
+        circle_params=right_circle_params,
+        method='parametric'
+    )
+    
+    # 确保在MOVEJ状态
+    try:
+        send_fsm_command(interface, 4)
+        print("✓ 已切换到MOVEJ状态")
+        time.sleep(0.5)
+    except Exception as e:
+        print(f"✗ 状态切换失败: {e}")
+        return False
+    
+    # 执行圆弧运动
+    success = client.execute_circle_motion(right_motion, duration=6.0)
+    
+    if success:
+        print("\n✓ 右臂圆弧运动完成")
+    else:
+        print("\n✗ 右臂圆弧运动失败")
+    
+    return success
+
+
+def run_left_arm_circle(client, interface):
+    """执行左臂圆弧运动"""
+    print("\n" + "=" * 70)
+    print("执行左臂圆弧运动")
+    print("=" * 70)
+    
+    # 定义左臂圆弧参数
+    left_circle_params = {
+        'center': (0.2520576827979941, 0.0, 0.09094741848884622),
+        'axis': (-1.0, 0.0, 0.0),
+        'angle': (1.0/3.0) * math.pi,
+        'ik_type': "DLS"
+    }
+    
+    left_motion = CircleMotionConfig(
+        arm_name='left',
+        start_joints=[],  # 不使用
+        circle_params=left_circle_params,
+        method='parametric'
+    )
+    
+    # 确保在MOVEJ状态
+    try:
+        send_fsm_command(interface, 4)
+        print("✓ 已切换到MOVEJ状态")
+        time.sleep(0.5)
+    except Exception as e:
+        print(f"✗ 状态切换失败: {e}")
+        return False
+    
+    # 执行圆弧运动
+    success = client.execute_circle_motion(left_motion, duration=6.0)
+    
+    if success:
+        print("\n✓ 左臂圆弧运动完成")
+    else:
+        print("\n✗ 左臂圆弧运动失败")
+    
+    return success
+
+
+def run_dual_arm_circles(client, interface):
+    """执行双臂顺序画圆（右臂先，左臂后）"""
+    print("\n" + "=" * 70)
+    print("执行双臂顺序画圆运动: 右臂 -> 左臂")
+    print("=" * 70)
+    
+    # 执行右臂圆弧
+    if not run_right_arm_circle(client, interface):
+        return False
+    
+    # 右臂完成后稍作停顿
+    print("\n等待2秒，准备执行左臂圆弧...")
+    time.sleep(2.0)
+    
+    # 执行左臂圆弧
+    if not run_left_arm_circle(client, interface):
+        return False
+    
+    return True
 
 
 def main():
     """主测试函数"""
     print("=" * 70)
-    print("关节空间移动 + 圆弧轨迹服务测试 - 只在圆弧时记录位姿数据")
-    print("步骤1: 使用 MoveJ 移动到圆弧起点（不记录数据）")
-    print("步骤2: 使用 MoveC 执行圆弧运动（记录位姿数据）")
+    print("双臂圆弧运动测试 - 先移动到起始位置，再选择执行动作")
+    print("功能说明:")
+    print("  1. 首先将双臂移动到圆弧起始位置（通过 MoveJ）")
+    print("  2. 然后可以选择执行左臂圆弧、右臂圆弧或双臂顺序圆弧")
     print("数据将保存到: /home/lina/lina/data")
     print("=" * 70)
     
@@ -568,7 +892,7 @@ def main():
     rclpy.init()
     
     # 创建ROS2RobotInterface配置
-    print("[1] 创建配置...")
+    print("\n[1] 创建配置...")
     config = ROS2RobotInterfaceConfig()
     
     print("[2] 创建ROS2RobotInterface实例...")
@@ -608,210 +932,95 @@ def main():
         return 1
     print("✓ 服务已就绪")
     
-    # 切换到HOLD状态
-    print("\n[6] 切换到HOLD状态...")
-    try:
-        send_fsm_command(interface, 2)  # HOLD
-        print("✓ 已切换到HOLD状态")
-    except Exception as e:
-        print(f"✗ 状态切换失败: {e}")
+    # 初始化机器人状态
+    if not setup_robot_state(interface, client):
+        print("✗ 机器人状态初始化失败")
+        interface.disconnect()
+        rclpy.shutdown()
         return 1
     
-    # 切换到HOME状态
-    print("\n[7] 切换到HOME状态...")
-    try:
-        send_fsm_command(interface, 1)  # HOME
-        print("等待HOME完成 (5秒)...")
-        time.sleep(5.0)
-        print("✓ 已回到HOME位置")
-    except Exception as e:
-        print(f"✗ 状态切换失败: {e}")
+    # 移动双臂到起始位置
+    if not move_both_arms_to_start_position(client, interface):
+        print("✗ 移动到起始位置失败")
+        interface.disconnect()
+        rclpy.shutdown()
         return 1
     
-    # 切换到HOLD状态
-    print("\n[8] 切换到HOLD状态...")
-    try:
-        send_fsm_command(interface, 2)  # HOLD
-        print("✓ 已切换到HOLD状态")
-    except Exception as e:
-        print(f"✗ 状态切换失败: {e}")
-        return 1
+    # 显示菜单
+    print("\n" + "=" * 70)
+    print("选择要执行的动作:")
+    print("1. 右臂圆弧")
+    print("2. 左臂圆弧")
+    print("3. 双臂顺序圆弧（右臂 -> 左臂）")
+    print("4. 重新移动双臂到起始位置")
+    print("5. 退出")
+    print("=" * 70)
     
-    # 选择测试模式
-    print("\n选择测试模式:")
-    print("1. 右臂 - MoveJ到起点 + 三点法圆弧")
-    print("2. 右臂 - MoveJ到起点 + 参数法圆弧")
-    print("3. 仅MoveJ移动（测试，不记录数据）")
-    print("4. 仅圆弧运动（需要已在起点，记录数据）")
+    success = False
     
-    arm_name = 'right'
-    choice = input("请选择(1-4): ").strip()
-    
-    # 右臂圆弧起点的关节位置
-    if choice in ['2','4']:
-        # start_joints = [0.1606, -0.4771, -0.5085, 0.1539, 0.4943, -0.0472, 0.5657]
-        # center_params = {
-        #     'center': (0.076, -0.344, 0.118),
-        #     'axis': (0.0, 1.0, 0.0),
-        #     'angle': 2.0 * math.pi,
-        #     'ik_type':"DLS"
-        # }
-        # start_joints = [-0.10041490563072086,-0.3431672560123358,-0.1591746416278058,0.3181722465663216,
-        #                 0.311619984605325,-0.14628724397975174,0.20848141310625967]
-        start_joints = [-0.328385435813621,-0.22000419219377856,-0.2746054955857294,1.0731518620969906,
-                        0.44726364968600296,-0.5811312841716576,0.5052403055260443]
-        center_params = {
-            'center': (0.2520576827979941,0.0,0.09094741848884622),
-            'axis': (-1.0, 0.0, 0.0),
-            'angle': 1.0/3.0 * math.pi,
-            'ik_type':"DLS"
-        }
-    elif choice in ['1']:
-        ###下面的参数是宇树圆心[0.126298 -0.366388 0.135205],转轴：[-0.786041   0.616464 -0.0459511] 半径0.071357
-        # start_joints = [0.1722, -0.2144, -0.4844, -0.0738, 0.2343, 0.017, -0.2333]
-        # circle_params = {
-        #     'midpoint': (0.125121, -0.373182, 0.064187,0.931845,-0.015346 ,0.012323, -0.362322),# [x,y,z,qw,qx,qy,qz]
-        #     'endpoint': (0.082612, -0.421051, 0.149154,0.931845,-0.015346,0.012323,-0.362322),
-        #     'angle': 2.0 * math.pi, #如果是0就会运动到第三个点的位置，不是整圆
-        #     'ik_type':"DLS"
-        # }
+    while True:
+        choice = input("\n请选择(1-5): ").strip()
         
-        #宇树测试点：
-        # start_joints = [-0.09486280877359009, -0.31784775620251055, -0.12097406175381971, 0.2671227412429476,
-        #                 0.29327939104456574, -0.12360212838689603, 0.15756105816112817]
-        # circle_params = {
-        #     'midpoint': (0.28493124081114657,-0.21010960167080947, 0.15160789617056938,
-        #                  0.9998355240354676,-0.011837170939959271, -0.012956892810266867, -0.004574405924628916),# [x,y,z,qw,qx,qy,qz]
-        #     'endpoint': (0.14703642497642724,-0.39914187594233796, 0.08492210997294118,
-        #                  0.9124853769908218,-0.002862561769619186,0.012258643079609749, -0.40891560032344043),
-        #     'angle': 0.0 * math.pi #如果是0就会运动到第三个点的位置，不是整圆
-        # }
-
-        ###w2画圆弧测试
-        start_joints = [ -1.5009369600996312, -1.2722360477993053, 1.511559794610251, -0.8867350552610855,
-                        0.36633719649439095, -0.5669138393503574, -0.33781478093279904]
-        circle_params = {
-            'midpoint': (0.29341990898031634, -0.5087368643682688, -0.4628460982440809,
-                         0.177156205280351, 0.6982249217208578, -0.17696987626750169, 0.6706558733899475),
-            'endpoint': (0.25315673326666455, -0.5852422198922865, -0.41319361638728647,
-                         0.17900599274650042,0.696889216480679, -0.17734863484029192, 0.671453450534041),
-            'angle': 0.0 * math.pi,
-            'ik_type':"DLS"
-        }
-        # ik_type="BFGS"
-    elif choice == '3':
-        start_joints = [0.1606, -0.4771, -0.5085, 0.1539, 0.4943, -0.0472, 0.5657]
-    
-    # 切换到MOVEJ状态
-    if choice not in ['4']:
-        print(f"\n[9] 切换到MOVEJ状态...")
-        try:
-            send_fsm_command(interface, 4)  # MOVEJ
-            print("✓ 已切换到MOVEJ状态")
-        except Exception as e:
-            print(f"✗ 状态切换失败: {e}")
-            return 1
-    
-    # 关节空间移动到圆弧起点（不记录数据）
-    if choice not in ['4']:
-        print(f"\n[10] MoveJ移动到{arm_name}臂圆弧起点（不记录数据）...")
-        if not client.send_movej_command(arm_name, start_joints, duration=3.0):
-            print("✗ MoveJ到起点失败")
-            return 1
-        print("✓ MoveJ完成")
-        
-        # MoveJ完成后，额外等待一下确保完全稳定
-        print("等待2秒确保机器人稳定...")
-        time.sleep(2.0)
-    
-    # 对于参数法圆弧，先获取当前位姿用于终点姿态
-    end_pose = None
-    if choice in ['2']:
-        print(f"\n[11] 获取{arm_name}臂当前位姿（用于圆弧终点姿态）...")
-        end_pose = client.get_current_pose_from_kinematics(arm_name, start_joints)
-        if end_pose is None:
-            print("⚠ 警告: 无法获取当前位姿，将使用默认四元数")
-    
-    # 执行圆弧运动（记录数据）
-    if choice not in ['3']:
-        print(f"\n[12] 执行{arm_name}臂圆弧运动（记录位姿数据中）...")
-        
-        if choice in ['1']:
-            circle_req = client.create_circle_request_three_point(
-                arm_name=arm_name,
-                midpoint_x=circle_params['midpoint'][0],
-                midpoint_y=circle_params['midpoint'][1],
-                midpoint_z=circle_params['midpoint'][2],
-                midpoint_qw=circle_params['midpoint'][3],
-                midpoint_qx=circle_params['midpoint'][4],
-                midpoint_qy=circle_params['midpoint'][5],
-                midpoint_qz=circle_params['midpoint'][6],
-                endpoint_x=circle_params['endpoint'][0],
-                endpoint_y=circle_params['endpoint'][1],
-                endpoint_z=circle_params['endpoint'][2],
-                endpoint_qw=circle_params['endpoint'][3],
-                endpoint_qx=circle_params['endpoint'][4],
-                endpoint_qy=circle_params['endpoint'][5],
-                endpoint_qz=circle_params['endpoint'][6],
-                rotate_angle=circle_params['angle'],
-                duration=6.0,
-                ik_type=circle_params['ik_type']
-            )
-            method_name = "三点法"
-        elif choice in ['2']:
-            circle_req = client.create_circle_request_parametric(
-                arm_name=arm_name,
-                center_x=center_params['center'][0],
-                center_y=center_params['center'][1],
-                center_z=center_params['center'][2],
-                axis_x=center_params['axis'][0],
-                axis_y=center_params['axis'][1],
-                axis_z=center_params['axis'][2],
-                rotate_angle=center_params['angle'],
-                duration=6.0,
-                end_pose=end_pose,
-                ik_type=center_params['ik_type']
-            )
-            method_name = "参数法"
-        elif choice == '4':
-            # 仅圆弧运动，需要用户提供参数
-            print("\n仅圆弧运动模式，请手动配置参数")
-            method_type = input("选择方法 (1=三点法, 2=参数法): ").strip()
-            if method_type == '1':
-                circle_req = client.create_circle_request_three_point(arm_name=arm_name, duration=6.0)
-                method_name = "三点法"
+        if choice == '1':
+            success = run_right_arm_circle(client, interface)
+            if success:
+                print("\n✓ 右臂圆弧完成！")
             else:
-                circle_req = client.create_circle_request_parametric(arm_name=arm_name, duration=6.0)
-                method_name = "参数法"
+                print("\n✗ 右臂圆弧失败！")
+                break
         
-        circle_response = client.call_circle_service_with_recording(circle_req, arm_name)
+        elif choice == '2':
+            success = run_left_arm_circle(client, interface)
+            if success:
+                print("\n✓ 左臂圆弧完成！")
+            else:
+                print("\n✗ 左臂圆弧失败！")
+                break
         
-        if circle_response and circle_response.success:
-            print(f"✓ 圆弧运动({method_name})服务调用成功!")
-            print(f"  消息: {circle_response.message}")
-            print(f"  预计时长: {circle_response.estimated_duration:.2f}秒")
-            
-            wait_time = circle_response.estimated_duration + 2.0
-            print(f"等待 {wait_time:.1f} 秒完成轨迹...")
-            
-            # 在等待期间持续处理记录器事件
-            spin_recorders(client, wait_time)
-            
-            print("✓ 轨迹执行完成")
-            
-            # 停止记录
-            client.pose_recorder.stop_recording()
-            print("✓ 位姿数据已保存")
+        elif choice == '3':
+            success = run_dual_arm_circles(client, interface)
+            if success:
+                print("\n✓ 双臂圆弧完成！")
+            else:
+                print("\n✗ 双臂圆弧失败！")
+                break
+        
+        elif choice == '4':
+            print("\n重新移动双臂到起始位置...")
+            if move_both_arms_to_start_position(client, interface):
+                print("✓ 已重新就位，可以继续执行圆弧运动")
+            else:
+                print("✗ 重新就位失败")
+            continue
+        
+        elif choice == '5':
+            print("\n退出程序")
+            break
+        
         else:
-            error_msg = circle_response.message if circle_response else '未知错误'
-            print(f"✗ 圆弧运动失败: {error_msg}")
-            # 确保记录器停止
-            if client.pose_recorder.is_recording:
-                client.pose_recorder.stop_recording()
-            return 1
+            print("无效选择，请重新输入")
+            continue
+        
+        # 如果执行了圆弧动作，询问是否继续
+        if choice in ['1', '2', '3']:
+            print("\n是否继续执行其他动作？")
+            continue_choice = input("(y/n): ").strip().lower()
+            if continue_choice != 'y':
+                print("\n退出程序")
+                break
+            else:
+                # 重新显示菜单
+                print("\n" + "=" * 70)
+                print("选择要执行的动作:")
+                print("1. 右臂圆弧")
+                print("2. 左臂圆弧")
+                print("3. 双臂顺序圆弧（右臂 -> 左臂）")
+                print("4. 重新移动双臂到起始位置")
+                print("5. 退出")
+                print("=" * 70)
     
     # 清理
-    print("\n[13] 清理...")
+    print("\n[清理] 清理资源...")
     
     # 确保记录器已停止
     if client.pose_recorder.is_recording:
@@ -826,7 +1035,7 @@ def main():
         print(f"⚠ 状态切换失败: {e}")
     
     # 断开连接
-    print("\n[14] 断开连接...")
+    print("\n[断开] 断开连接...")
     interface.disconnect()
     
     # 销毁节点
@@ -836,8 +1045,12 @@ def main():
     rclpy.shutdown()
     
     print("\n" + "=" * 70)
-    print("测试完成！")
+    if success:
+        print("测试完成！")
+    else:
+        print("程序结束")
     print("=" * 70)
+    
     return 0
 
 
