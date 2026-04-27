@@ -21,7 +21,7 @@ from arms_ros2_control_msgs.msg import CircleMessage
 
 class PoseDataRecorder(Node):
     """数据记录器 - 订阅PoseStamped数据并保存到CSV"""
-    def __init__(self, output_dir="/home/lina/lina/data"):
+    def __init__(self, output_dir=os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")):
         super().__init__('pose_data_recorder')
         
         self.output_dir = output_dir
@@ -342,11 +342,11 @@ def main():
     """主测试函数"""
     print("=" * 70)
     print("圆弧轨迹服务测试 - 带数据记录功能")
-    print("数据将保存到: /home/lina/lina/data")
+    output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+    print(f"数据将保存到: {output_dir}")
     print("=" * 70)
-    
+
     # 检查输出目录
-    output_dir = "/home/lina/lina/data"
     if not os.path.exists(output_dir):
         print(f"创建输出目录: {output_dir}")
         os.makedirs(output_dir)
