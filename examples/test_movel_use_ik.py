@@ -21,6 +21,11 @@ from arms_ros2_control_msgs.srv import ExecuteLinear, KinematicsService, JointTr
 from arms_ros2_control_msgs.msg import LinearMessage, JointWaypoint
 from ros2_robot_interface import ROS2RobotInterface, ROS2RobotInterfaceConfig
 
+DEFAULT_OUTPUT_DIR = os.environ.get(
+    "POSE_DATA_OUTPUT_DIR",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "data"),
+)
+
 # ==================== 运动学测试脚本中的关节角度 ====================
 LEFT_TEST_JOINTS = [-0.3525227330, -0.7798290600, 0.8896949257, 
                     -1.8910405790, -2.7986485415, 0.4619120915, 0.8030297356]
@@ -30,7 +35,7 @@ RIGHT_TEST_JOINTS = [0.0982891175, -0.8816540101, -0.5496532015,
 
 class PoseDataRecorder(Node):
     """数据记录器 - 订阅PoseStamped数据并保存到CSV"""
-    def __init__(self, output_dir="/home/lina/lina/data"):
+    def __init__(self, output_dir=DEFAULT_OUTPUT_DIR):
         super().__init__('pose_data_recorder')
         
         self.output_dir = output_dir
@@ -125,10 +130,10 @@ class PoseDataRecorder(Node):
 
 
 class LinearTrajectoryClient(Node):
-    def __init__(self, interface=None):
+    def __init__(self, interface=None, output_dir=DEFAULT_OUTPUT_DIR):
         super().__init__('linear_trajectory_client')
         self.interface = interface
-        self.pose_recorder = PoseDataRecorder()
+        self.pose_recorder = PoseDataRecorder(output_dir)
         
         self.linear_client = self.create_client(ExecuteLinear, '/ocs2_arm_controller/execute_linear')
         self.kinematics_client = self.create_client(KinematicsService, '/kinematics_service')
@@ -342,6 +347,8 @@ def spin_recorders(client, duration):
 
 
 def main():
+    output_dir = DEFAULT_OUTPUT_DIR
+
     print("=" * 70)
     print("直线运动服务测试 - 使用运动学测试脚本中的关节角度")
     print("步骤:")
@@ -349,7 +356,7 @@ def main():
     print("  2. 正解获取当前位姿")
     print("  3. 计算Z轴移动-0.2m后的目标位姿")
     print("  4. MOVL直线运动")
-    print("数据将保存到: /home/lina/lina/data")
+    print(f"数据将保存到: {output_dir}")
     print("=" * 70)
     
     # 测试用的关节角度（来自运动学测试脚本）
@@ -357,7 +364,6 @@ def main():
     print(f"  左臂: {[f'{j:.4f}' for j in LEFT_TEST_JOINTS]}")
     print(f"  右臂: {[f'{j:.4f}' for j in RIGHT_TEST_JOINTS]}")
     
-    output_dir = "/home/lina/lina/data"
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
     
@@ -388,7 +394,7 @@ def main():
     time.sleep(2.0)
     print("    ✓ 数据收集已开始\n")
     
-    client = LinearTrajectoryClient(interface)
+    client = LinearTrajectoryClient(interface, output_dir)
     
     print("[5] 等待服务...")
     if not client.wait_for_services():
