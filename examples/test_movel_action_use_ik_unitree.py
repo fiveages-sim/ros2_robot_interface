@@ -123,6 +123,7 @@ class LinearTrajectoryActionClient(Node):
         if future.result() and future.result().success:
             planned_duration = future.result().planned_duration
             self.get_logger().info(f"MoveJ 成功，规划时长: {planned_duration:.3f} 秒")
+            time.sleep(max(planned_duration, duration) + 1.0)
             return True
 
         error_msg = future.result().message if future.result() else "未知错误"
