@@ -47,22 +47,22 @@ RIGHT_TEST_JOINTS = [
 
 # 三点法参数: (x, y, z, qw, qx, qy, qz)
 LEFT_THREE_POINT_MIDPOINT  = ( 
-     0.31983653553831504,
-     0.3619147395904916,
-     -0.304281578922287,
-     -0.003126739790803018,
-     0.7151283997968158,
-    0.00045134667774913653,
-     0.6989859738138546,
+     0.3704625618078148,
+    0.414126374455314,
+    -0.29923553466780695,
+    0.0032539334651132804,
+    0.7149622341901515,
+    -0.0009362579244783191,
+    0.699154874845288,
 )
 LEFT_THREE_POINT_ENDPOINT  = ( 
-    0.3173914735638681,
-    0.27607013529175073,
-    -0.424470821916592,
-  -0.003062114967371965,
-     0.7153326445137818,
-     0.0004275876887172841,
-     0.698777252286889,
+    0.36712537577707993,
+    0.3318733303285971,
+    -0.4520389847935645,
+    0.0033245439162966402,
+    0.71558932020881,
+    -0.0008963509947116495,
+    0.6985127549055464,
 
 )
 LEFT_THREE_POINT_ANGLE     = 0.0
@@ -187,7 +187,7 @@ class CircleTrajectoryActionClient(Node):
 
         waypoint = JointWaypoint()
         waypoint.position = left_joints + right_joints
-        waypoint.time_mode = True
+        waypoint.time_mode = not True
         waypoint.total_time = duration
         waypoint.max_velocity = [0.5] * 14
         waypoint.max_acceleration = [1.0] * 14
@@ -255,11 +255,11 @@ class CircleTrajectoryActionClient(Node):
         circle = CircleMessage()
         circle.arm_name = arm_name
         circle.duration = duration
-        circle.time_mode = True
+        circle.time_mode = not True
         circle.frame_id = "base_link"
         circle.ik_type = ik_type
         circle.use_three_point_method = True
-        circle.use_slerp_for_orientation = True
+        circle.use_slerp_for_orientation = not True
         circle.max_linear_velocity = 0.3
         circle.max_linear_acceleration = 0.5
         circle.max_linear_jerk = 3.0
@@ -296,7 +296,7 @@ class CircleTrajectoryActionClient(Node):
         circle = CircleMessage()
         circle.arm_name = arm_name
         circle.duration = duration
-        circle.time_mode = True
+        circle.time_mode = not True
         circle.frame_id = "base_link"
         circle.ik_type = ik_type
         circle.use_three_point_method = False
