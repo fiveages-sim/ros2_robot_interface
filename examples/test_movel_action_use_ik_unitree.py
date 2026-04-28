@@ -129,7 +129,14 @@ class LinearTrajectoryActionClient(Node):
         self.get_logger().error(f"MoveJ 失败: {error_msg}")
         return False
 
-    def create_linear_goal(self, arm_name, endpoint_pose, duration=3.0, ik_type="AUTO"):
+    def create_linear_goal(
+        self,
+        arm_name,
+        endpoint_pose,
+        duration=3.0,
+        ik_type="AUTO",
+        right_endpoint_pose=None,
+    ):
         goal_msg = ExecuteLinear.Goal()
         linear = LinearMessage()
         linear.arm_name = arm_name
@@ -144,6 +151,8 @@ class LinearTrajectoryActionClient(Node):
         linear.max_angular_acceleration = 1.0
         linear.max_angular_jerk = 3.0
         linear.endpoint = endpoint_pose
+        if right_endpoint_pose is not None:
+            linear.right_endpoint = right_endpoint_pose
         goal_msg.linear_params = linear
         return goal_msg
 
@@ -291,7 +300,7 @@ def main():
         print("\n选择测试模式:")
         print("1. 左臂 - MoveJ 到目标关节 -> action 直线 Z 轴下移 0.2m")
         print("2. 右臂 - MoveJ 到目标关节 -> action 直线 Z 轴下移 0.2m")
-        print("3. 双臂 - 同时 MoveJ 到目标关节 -> 依次 action 直线 Z 轴下移 0.2m")
+        print("3. 双臂 - 同时 MoveJ 到目标关节 -> 单次 action 同时执行双臂直线运动")
         choice = input("请选择(1-3): ").strip()
 
         if choice not in ["1", "2", "3"]:
@@ -329,14 +338,14 @@ def main():
             if not result or not result.success:
                 return 1
         else:
-            left_goal = client.create_linear_goal("left", left_target_pose, duration)
-            left_result = client.send_linear_action(left_goal, "left")
-            if not left_result or not left_result.success:
-                return 1
-            
-            right_goal = client.create_linear_goal("right", right_target_pose, duration)
-            right_result = client.send_linear_action(right_goal, "right")
-            if not right_result or not right_result.success:
+            dual_goal = client.create_linear_goal(
+                "both",
+                left_target_pose,
+                duration,
+                right_endpoint_pose=right_target_pose,
+            )
+            dual_result = client.send_linear_action(dual_goal, "both")
+            if not dual_result or not dual_result.success:
                 return 1
 
         print("\n直线 action 执行成功")
