@@ -5,8 +5,8 @@
 再通过正解获取当前位姿，计算 Z 轴移动 +-0.05m 后的目标位姿，
 最后通过 ExecuteLinear action 执行 MOVL。
 
-Action: /ocs2_arm_controller/execute_linear
-服务: /ocs2_arm_controller/joint_trajectory_with_para, /kinematics_service
+Action: /ocs2_arm_controller/execute_linear, /ocs2_arm_controller/joint_trajectory_with_para
+服务: /kinematics_service
 """
 
 import csv
@@ -21,9 +21,9 @@ from geometry_msgs.msg import Pose, PoseStamped
 from rclpy.action import ActionClient
 from rclpy.node import Node
 
-from arms_ros2_control_msgs.action import ExecuteLinear
+from arms_ros2_control_msgs.action import ExecuteLinear, JointTrajectory as JointTrajectoryAction
 from arms_ros2_control_msgs.msg import JointWaypoint, LinearMessage
-from arms_ros2_control_msgs.srv import JointTrajectory, KinematicsService
+from arms_ros2_control_msgs.srv import KinematicsService
 from ros2_robot_interface import ROS2RobotInterface, ROS2RobotInterfaceConfig
 
 LEFT_TEST_JOINTS = [
@@ -48,8 +48,9 @@ class LinearTrajectoryActionClient(Node):
             "/ocs2_arm_controller/execute_linear",
         )
         self.kinematics_client = self.create_client(KinematicsService, "/kinematics_service")
-        self.joint_trajectory_client = self.create_client(
-            JointTrajectory,
+        self.joint_trajectory_client = ActionClient(
+            self,
+            JointTrajectoryAction,
             "/ocs2_arm_controller/joint_trajectory_with_para",
         )
 
@@ -65,13 +66,13 @@ class LinearTrajectoryActionClient(Node):
     def wait_for_servers(self, timeout=10.0):
         linear_ready = self.linear_action_client.wait_for_server(timeout_sec=timeout)
         kinematics_ready = self.kinematics_client.wait_for_service(timeout_sec=timeout)
-        trajectory_ready = self.joint_trajectory_client.wait_for_service(timeout_sec=timeout)
+        trajectory_ready = self.joint_trajectory_client.wait_for_server(timeout_sec=timeout)
         if linear_ready and kinematics_ready and trajectory_ready:
             self.get_logger().info("所有服务/action 可用")
             return True
 
         self.get_logger().error(
-            f"不可用 - 直线action: {linear_ready}, 运动学: {kinematics_ready}, 轨迹: {trajectory_ready}"
+            f"不可用 - 直线action: {linear_ready}, 运动学: {kinematics_ready}, 轨迹action: {trajectory_ready}"
         )
         return False
 
@@ -106,8 +107,8 @@ class LinearTrajectoryActionClient(Node):
         )
 
     def send_dual_movej_command(self, left_joints, right_joints, duration=3.0):
-        req = JointTrajectory.Request()
-        req.joint_names = self.left_arm_joint_names + self.right_arm_joint_names
+        goal_msg = JointTrajectoryAction.Goal()
+        goal_msg.joint_names = self.left_arm_joint_names + self.right_arm_joint_names
 
         waypoint = JointWaypoint()
         waypoint.position = left_joints + right_joints
@@ -116,19 +117,51 @@ class LinearTrajectoryActionClient(Node):
         waypoint.max_velocity = [0.5] * 14
         waypoint.max_acceleration = [1.0] * 14
         waypoint.max_jerk = [2.0] * 14
-        req.waypoints = [waypoint]
+        goal_msg.waypoints = [waypoint]
 
-        future = self.joint_trajectory_client.call_async(req)
-        rclpy.spin_until_future_complete(self, future, timeout_sec=duration + 2.0)
-        if future.result() and future.result().success:
-            planned_duration = future.result().planned_duration
-            self.get_logger().info(f"MoveJ 成功，规划时长: {planned_duration:.3f} 秒")
-            time.sleep(max(planned_duration, duration) + 1.0)
+        self.get_logger().info("发送双臂 MoveJ action goal...")
+        send_goal_future = self.joint_trajectory_client.send_goal_async(
+            goal_msg,
+            feedback_callback=self.joint_trajectory_feedback_callback,
+        )
+        rclpy.spin_until_future_complete(self, send_goal_future, timeout_sec=5.0)
+
+        goal_handle = send_goal_future.result()
+        if goal_handle is None or not goal_handle.accepted:
+            self.get_logger().error("MoveJ action goal 被拒绝")
+            return False
+
+        result_future = goal_handle.get_result_async()
+        if not self.spin_until_result(result_future, timeout=max(duration + 10.0, 30.0)):
+            self.get_logger().error("等待 MoveJ action 结果超时，正在请求取消 goal")
+            cancel_future = goal_handle.cancel_goal_async()
+            rclpy.spin_until_future_complete(self, cancel_future, timeout_sec=2.0)
+            return False
+
+        result_response = result_future.result()
+        result = result_response.result
+        if result_response.status == GoalStatus.STATUS_SUCCEEDED and result.success:
+            self.get_logger().info(
+                f"MoveJ 成功，消息: {result.message}, "
+                f"规划时长: {result.planned_duration:.3f} 秒, "
+                f"实际时长: {result.actual_duration:.3f} 秒"
+            )
             return True
 
-        error_msg = future.result().message if future.result() else "未知错误"
-        self.get_logger().error(f"MoveJ 失败: {error_msg}")
+        self.get_logger().error(
+            f"MoveJ 失败，状态码: {result_response.status}, "
+            f"消息: {result.message}, "
+            f"规划时长: {result.planned_duration:.3f} 秒, "
+            f"实际时长: {result.actual_duration:.3f} 秒"
+        )
         return False
+
+    def joint_trajectory_feedback_callback(self, feedback_msg):
+        feedback = feedback_msg.feedback
+        self.get_logger().info(
+            f"MoveJ action反馈: 进度 {feedback.progress * 100.0:.1f}%, "
+            f"已用 {feedback.elapsed_time:.2f}s, 剩余 {feedback.remaining_time:.2f}s"
+        )
 
     def create_linear_goal(
         self,
