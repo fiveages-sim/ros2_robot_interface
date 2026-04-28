@@ -245,7 +245,7 @@ class CircleTrajectoryActionClient(Node):
         endpoint_pose,
         rotate_angle,
         duration=6.0,
-        ik_type="SDK",
+        ik_type="",
         right_midpoint_pose=None,
         right_endpoint_pose=None,
         right_rotate_angle=0.0,
@@ -256,16 +256,10 @@ class CircleTrajectoryActionClient(Node):
         circle.arm_name = arm_name
         circle.duration = duration
         circle.time_mode = not True
-        circle.frame_id = "base_link"
         circle.ik_type = ik_type
         circle.use_three_point_method = True
         circle.use_slerp_for_orientation = not True
-        circle.max_linear_velocity = 0.3
-        circle.max_linear_acceleration = 0.5
-        circle.max_linear_jerk = 3.0
-        circle.max_angular_velocity = 1.0
-        circle.max_angular_acceleration = 2.0
-        circle.max_angular_jerk = 5.0
+
         circle.midpoint = midpoint_pose
         circle.endpoint = endpoint_pose
         circle.rotate_angle = rotate_angle
@@ -284,7 +278,7 @@ class CircleTrajectoryActionClient(Node):
         axis,
         rotate_angle,
         duration=6.0,
-        ik_type="SDK",
+        ik_type="",
         end_pose=None,
         right_center=None,
         right_axis=None,
@@ -301,12 +295,6 @@ class CircleTrajectoryActionClient(Node):
         circle.ik_type = ik_type
         circle.use_three_point_method = False
         circle.use_slerp_for_orientation = False
-        circle.max_linear_velocity = 0.3
-        circle.max_linear_acceleration = 0.5
-        circle.max_linear_jerk = 3.0
-        circle.max_angular_velocity = 1.0
-        circle.max_angular_acceleration = 2.0
-        circle.max_angular_jerk = 5.0
         circle.center = center
         circle.axis = axis
         circle.rotate_angle = rotate_angle
