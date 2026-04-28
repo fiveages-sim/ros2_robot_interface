@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-直线运动 Action 客户端示例 - 带数据记录功能
+直线运动 Action 客户端示例
 使用运动学测试脚本中的关节角度，先 MoveJ 到目标关节角度，
-再通过正解获取当前位姿，计算 Z 轴移动 -0.2m 后的目标位姿，
+再通过正解获取当前位姿，计算 Z 轴移动 +-0.05m 后的目标位姿，
 最后通过 ExecuteLinear action 执行 MOVL。
 
 Action: /ocs2_arm_controller/execute_linear
@@ -26,137 +26,21 @@ from arms_ros2_control_msgs.msg import JointWaypoint, LinearMessage
 from arms_ros2_control_msgs.srv import JointTrajectory, KinematicsService
 from ros2_robot_interface import ROS2RobotInterface, ROS2RobotInterfaceConfig
 
-DEFAULT_OUTPUT_DIR = os.environ.get(
-    "POSE_DATA_OUTPUT_DIR",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "data"),
-)
-
-# LEFT_TEST_JOINTS = [
-#     -0.3525227330, -0.7798290600, 0.8896949257,
-#     -1.8910405790, -2.7986485415, 0.4619120915, 0.8030297356,
-# ]
 LEFT_TEST_JOINTS = [
     0.0, 0.2, 0.0,
     0.0, -0.2, 0.0, 0.0,
 ]
-# RIGHT_TEST_JOINTS = [
-#     0.0982891175, -0.8816540101, -0.5496532015,
-#     -1.8582004280, 2.8749939521, 0.3564035253, -1.0466912832,
-# ]
+
 RIGHT_TEST_JOINTS = [
     0.0, -0.2, 0.0,
     0.0, 0.2, 0.0, 0.0,
 ]
 
 
-class PoseDataRecorder(Node):
-    """订阅 PoseStamped 数据并保存到 CSV。"""
-
-    def __init__(self, output_dir=DEFAULT_OUTPUT_DIR):
-        super().__init__("pose_data_recorder")
-        self.output_dir = output_dir
-        self.is_recording = False
-        self.left_pose_count = 0
-        self.right_pose_count = 0
-        self.start_time = None
-        self.left_csv_file = None
-        self.right_csv_file = None
-        self.left_csv_writer = None
-        self.right_csv_writer = None
-        self.recording_arm = "both"
-        self.recording_phase = "linear_action"
-
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
-            self.get_logger().info(f"创建输出目录: {output_dir}")
-
-        self.create_subscription(PoseStamped, "/left_current_pose", self.left_pose_callback, 10)
-        self.create_subscription(PoseStamped, "/right_current_pose", self.right_pose_callback, 10)
-
-    def start_recording(self, arm="both", phase="linear_action"):
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.recording_arm = arm
-        self.recording_phase = phase
-        self.left_pose_count = 0
-        self.right_pose_count = 0
-        self.start_time = time.time()
-
-        if arm in ["both", "left"]:
-            left_filename = os.path.join(self.output_dir, f"left_pose_{phase}_{timestamp}.csv")
-            self.left_csv_file = open(left_filename, "w", newline="")
-            self.left_csv_writer = csv.writer(self.left_csv_file)
-            self.left_csv_writer.writerow([
-                "timestamp_sec", "timestamp_nanosec", "frame_id", "phase",
-                "position_x", "position_y", "position_z",
-                "orientation_w", "orientation_x", "orientation_y", "orientation_z",
-            ])
-            self.left_csv_file.flush()
-            self.get_logger().info(f"左臂数据将记录到: {left_filename}")
-
-        if arm in ["both", "right"]:
-            right_filename = os.path.join(self.output_dir, f"right_pose_{phase}_{timestamp}.csv")
-            self.right_csv_file = open(right_filename, "w", newline="")
-            self.right_csv_writer = csv.writer(self.right_csv_file)
-            self.right_csv_writer.writerow([
-                "timestamp_sec", "timestamp_nanosec", "frame_id", "phase",
-                "position_x", "position_y", "position_z",
-                "orientation_w", "orientation_x", "orientation_y", "orientation_z",
-            ])
-            self.right_csv_file.flush()
-            self.get_logger().info(f"右臂数据将记录到: {right_filename}")
-
-        self.is_recording = True
-
-    def stop_recording(self):
-        self.is_recording = False
-        if self.left_csv_file:
-            self.left_csv_file.close()
-            self.left_csv_file = None
-        if self.right_csv_file:
-            self.right_csv_file.close()
-            self.right_csv_file = None
-
-        elapsed_time = time.time() - self.start_time if self.start_time else 0.0
-        total_count = self.left_pose_count + self.right_pose_count
-        self.get_logger().info(f"数据记录停止，共记录 {total_count} 条数据，耗时 {elapsed_time:.2f} 秒")
-
-    def left_pose_callback(self, msg):
-        if self.is_recording and self.recording_arm in ["both", "left"]:
-            self._write_pose_data(msg, self.left_csv_writer, "left")
-
-    def right_pose_callback(self, msg):
-        if self.is_recording and self.recording_arm in ["both", "right"]:
-            self._write_pose_data(msg, self.right_csv_writer, "right")
-
-    def _write_pose_data(self, msg, csv_writer, arm_name):
-        if not csv_writer:
-            return
-
-        row = [
-            msg.header.stamp.sec,
-            msg.header.stamp.nanosec,
-            msg.header.frame_id,
-            self.recording_phase,
-            msg.pose.position.x,
-            msg.pose.position.y,
-            msg.pose.position.z,
-            msg.pose.orientation.w,
-            msg.pose.orientation.x,
-            msg.pose.orientation.y,
-            msg.pose.orientation.z,
-        ]
-        csv_writer.writerow(row)
-        if arm_name == "left":
-            self.left_pose_count += 1
-        else:
-            self.right_pose_count += 1
-
-
 class LinearTrajectoryActionClient(Node):
-    def __init__(self, interface=None, output_dir=DEFAULT_OUTPUT_DIR):
+    def __init__(self, interface=None):
         super().__init__("linear_trajectory_action_client")
         self.interface = interface
-        self.pose_recorder = PoseDataRecorder(output_dir)
 
         self.linear_action_client = ActionClient(
             self,
@@ -195,7 +79,7 @@ class LinearTrajectoryActionClient(Node):
         req = KinematicsService.Request()
         req.operation_type = "fk"
         req.arm_type = arm_name
-        req.solver_type = "AUTO"
+        # req.solver_type = "AUTO"
         req.joint_angles = joint_angles
 
         future = self.kinematics_client.call_async(req)
@@ -263,7 +147,7 @@ class LinearTrajectoryActionClient(Node):
         goal_msg.linear_params = linear
         return goal_msg
 
-    def send_linear_action_with_recording(self, goal_msg, arm_name, timeout=30.0):
+    def send_linear_action(self, goal_msg, arm_name, timeout=30.0):
         self.get_logger().info(f"发送 {arm_name} 臂直线 action goal...")
         send_goal_future = self.linear_action_client.send_goal_async(
             goal_msg,
@@ -275,9 +159,6 @@ class LinearTrajectoryActionClient(Node):
         if goal_handle is None or not goal_handle.accepted:
             self.get_logger().error("直线 action goal 被拒绝")
             return None
-
-        self.get_logger().info("直线 action goal 已接受，开始记录位姿数据")
-        self.pose_recorder.start_recording(arm_name, "linear_action")
 
         result_future = goal_handle.get_result_async()
         if not self.spin_until_result(result_future, timeout):
@@ -314,7 +195,6 @@ class LinearTrajectoryActionClient(Node):
         start_time = time.time()
         while rclpy.ok() and not future.done():
             rclpy.spin_once(self, timeout_sec=0.02)
-            rclpy.spin_once(self.pose_recorder, timeout_sec=0.02)
             if time.time() - start_time > timeout:
                 return False
         return future.done()
@@ -351,20 +231,14 @@ def build_offset_pose(source_pose, z_offset=-0.2):
 
 
 def main():
-    output_dir = DEFAULT_OUTPUT_DIR
-
     print("=" * 70)
     print("直线运动 Action 测试 - 使用运动学测试脚本中的关节角度")
     print("步骤:")
     print("  1. MoveJ 移动到目标关节角度")
     print("  2. 正解获取当前位姿")
-    print("  3. 计算 Z 轴移动 -0.2m 后的目标位姿")
+    print("  3. 计算 Z 轴移动 +-0.05m 后的目标位姿")
     print("  4. 通过 ExecuteLinear action 执行 MOVL")
-    print(f"数据将保存到: {output_dir}")
     print("=" * 70)
-
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
 
     rclpy.init()
 
@@ -383,19 +257,16 @@ def main():
             print("    错误: 此测试需要双臂模式")
             return 1
 
-        print("[3] 等待数据到达（2秒）...")
-        time.sleep(2.0)
+        print("[3] 等待数据到达（1秒）...")
+        time.sleep(1.0)
 
-        client = LinearTrajectoryActionClient(interface, output_dir)
+        client = LinearTrajectoryActionClient(interface)
 
         print("[4] 等待服务和 action server...")
         if not client.wait_for_servers():
             return 1
 
-        print("\n[5] 切换到 HOLD -> HOME -> HOLD...")
-        send_fsm_command(interface, 2)
-        send_fsm_command(interface, 1)
-        time.sleep(5.0)
+        print("\n[5] 切换到 HOLD")
         send_fsm_command(interface, 2)
         print("    状态切换完成")
 
@@ -430,58 +301,51 @@ def main():
         print("\n[7] 切换到 MOVEJ 状态...")
         send_fsm_command(interface, 4)
 
-        # if choice == "1":
-        #     print("\n[8] MoveJ 移动到左臂目标关节角度...")
-        #     if not client.send_movej_command("left", LEFT_TEST_JOINTS, duration=4.0):
-        #         return 1
-        # elif choice == "2":
-        #     print("\n[8] MoveJ 移动到右臂目标关节角度...")
-        #     if not client.send_movej_command("right", RIGHT_TEST_JOINTS, duration=4.0):
-        #         return 1
-        # else:
-        #     print("\n[8] 双臂同时 MoveJ 到目标关节角度...")
-        #     if not client.send_dual_movej_command(LEFT_TEST_JOINTS, RIGHT_TEST_JOINTS, duration=5.0):
-        #         return 1
+        if choice == "1":
+            print("\n[8] MoveJ 移动到左臂目标关节角度...")
+            if not client.send_movej_command("left", LEFT_TEST_JOINTS, duration=4.0):
+                return 1
+        elif choice == "2":
+            print("\n[8] MoveJ 移动到右臂目标关节角度...")
+            if not client.send_movej_command("right", RIGHT_TEST_JOINTS, duration=4.0):
+                return 1
+        else:
+            print("\n[8] 双臂同时 MoveJ 到目标关节角度...")
+            if not client.send_dual_movej_command(LEFT_TEST_JOINTS, RIGHT_TEST_JOINTS, duration=5.0):
+                return 1
 
-        # time.sleep(1.0)
+        time.sleep(1.0)
 
         print("\n[9] 发送直线 action...")
         duration = 3.0
         if choice == "1":
             goal_msg = client.create_linear_goal("left", left_target_pose, duration)
-            result = client.send_linear_action_with_recording(goal_msg, "left")
+            result = client.send_linear_action(goal_msg, "left")
             if not result or not result.success:
                 return 1
         elif choice == "2":
             goal_msg = client.create_linear_goal("right", right_target_pose, duration)
-            result = client.send_linear_action_with_recording(goal_msg, "right")
+            result = client.send_linear_action(goal_msg, "right")
             if not result or not result.success:
                 return 1
         else:
             left_goal = client.create_linear_goal("left", left_target_pose, duration)
-            left_result = client.send_linear_action_with_recording(left_goal, "left")
-            client.pose_recorder.stop_recording()
+            left_result = client.send_linear_action(left_goal, "left")
             if not left_result or not left_result.success:
                 return 1
-
-            # time.sleep(2.0)
+            
             right_goal = client.create_linear_goal("right", right_target_pose, duration)
-            right_result = client.send_linear_action_with_recording(right_goal, "right")
+            right_result = client.send_linear_action(right_goal, "right")
             if not right_result or not right_result.success:
                 return 1
 
-        if client.pose_recorder.is_recording:
-            client.pose_recorder.stop_recording()
-
-        print("\n直线 action 执行成功，位姿数据已保存")
+        print("\n直线 action 执行成功")
         return 0
 
     except Exception as exc:
         print(f"执行失败: {exc}")
         return 1
     finally:
-        if client is not None and client.pose_recorder.is_recording:
-            client.pose_recorder.stop_recording()
         if interface is not None:
             try:
                 send_fsm_command(interface, 2)
@@ -489,7 +353,6 @@ def main():
             except Exception:
                 pass
         if client is not None:
-            client.pose_recorder.destroy_node()
             client.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

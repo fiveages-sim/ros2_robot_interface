@@ -277,7 +277,7 @@ class CircleTrajectoryActionClient(Node):
 
     def create_circle_goal_three_point(
         self, arm_name, midpoint_pose, endpoint_pose, rotate_angle,
-        duration=6.0, ik_type="SDK",
+        duration=6.0, ik_type="DLS",
     ):
         """三点法圆弧 goal: 起点为当前位姿，指定中间点和终点（硬编码坐标）。"""
         goal_msg = MovecUseIK.Goal()
