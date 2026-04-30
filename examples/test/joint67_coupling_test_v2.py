@@ -11,6 +11,9 @@ home 姿态和抓取序列位姿（arm_base 坐标系下）。
 
   运行前需在 task file 中设置 joint67Coupling.activate = true (A) 或 false (B)，
   然后重启 OCS2 控制器。
+
+  MoveJ 左臂 joint6/7 耦合域外探测见:
+  movej_left_outside_joint67_coupling_test.py
 """
 
 import argparse
@@ -24,6 +27,10 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Pose, Point, Quaternion
 from sensor_msgs.msg import JointState
+try:
+    from pal_statistics_msgs.msg import Statistics
+except Exception:  # pragma: no cover
+    Statistics = None
 
 from ros2_robot_interface import ROS2RobotInterface, ROS2RobotInterfaceConfig
 from ros2_robot_interface.utils.quat_pose import (
@@ -217,6 +224,34 @@ class JointStateCache:
         self.msg = msg
 
 
+class IntrospectionCache:
+    def __init__(self):
+        self.name_to_value = {}
+
+    def callback(self, msg):
+        try:
+            self.name_to_value = {s.name: float(s.value) for s in msg.statistics}
+        except Exception:
+            return
+
+
+_INTRO_KEYS = (
+    "state_interface.left_joint6/position",
+    "command_interface.left_joint6/position",
+    "state_interface.right_joint6/position",
+    "command_interface.right_joint7/position",
+)
+
+
+def read_selected_introspection(cache: IntrospectionCache) -> dict:
+    ntv = cache.name_to_value or {}
+    out = {k: ntv.get(k) for k in _INTRO_KEYS}
+    s6, c6 = out[_INTRO_KEYS[0]], out[_INTRO_KEYS[1]]
+    if s6 is not None and c6 is not None:
+        out["delta_left6_cmd_minus_state_deg"] = math.degrees(c6 - s6)
+    return out
+
+
 def read_joint67(cache: JointStateCache, node: Node, timeout_sec: float = 2.0):
     q6_left = q7_left = q6_right = q7_right = None
     start = time.time()
@@ -255,28 +290,83 @@ def wait_for_arrival(interface, max_wait=MAX_WAIT, interval=WAIT_INTERVAL, thres
     return False
 
 
-def movej_to_home(interface, log, joint_state_cache, rcl_node, home_left_deg, home_right_deg):
+def _wait_movej_arm(interface, log, joint_state_cache, rcl_node, prefix, home_rad, start_total, timeout_total):
+    handler = interface.left_arm_handler if prefix == "left" else interface.right_arm_handler
+    handler.send_joint_positions(home_rad)
+    side = "Left" if prefix == "left" else "Right"
+    while time.time() - start_total < timeout_total:
+        joints = read_all_joints(joint_state_cache, rcl_node, prefix)
+        if joints is not None:
+            err = max(abs(joints[i] - home_rad[i]) for i in range(7))
+            if err < 0.05:
+                log.log(f"    ✓ {side} MoveJ 到位 (max_err={err:.4f} rad)")
+                return True
+        time.sleep(0.2)
+    log.log(f"    ⚠ {side} MoveJ 超时")
+    return False
+
+
+def _append_movej_joint67_record(records, label, note, ok, cmd_l, cmd_r, act_l=None, act_r=None):
+    if not isinstance(records, list):
+        return
+    if not ok:
+        records.append({"label": label, "note": note, "ok": False})
+        return
+    q6_l, q7_l = act_l
+    q6_r, q7_r = act_r
+    records.append({
+        "label": label,
+        "note": note,
+        "ok": True,
+        "cmd_q6_l": cmd_l[0], "cmd_q7_l": cmd_l[1],
+        "act_q6_l": q6_l, "act_q7_l": q7_l,
+        "cmd_q6_r": cmd_r[0], "cmd_q7_r": cmd_r[1],
+        "act_q6_r": q6_r, "act_q7_r": q7_r,
+        "d_q6_l_deg": math.degrees(q6_l - cmd_l[0]),
+        "d_q7_l_deg": math.degrees(q7_l - cmd_l[1]),
+        "d_q6_r_deg": math.degrees(q6_r - cmd_r[0]),
+        "d_q7_r_deg": math.degrees(q7_r - cmd_r[1]),
+    })
+
+
+def _log_movej_joint67(interface, log, joint_state_cache, rcl_node, records, label, note, cmd_l, cmd_r):
+    q6_l, q7_l, q6_r, q7_r = read_joint67(joint_state_cache, rcl_node, timeout_sec=1.0)
+    if None in (q6_l, q7_l, q6_r, q7_r):
+        log.log(f"    ⚠ MoveJ joint6/7 读取失败（{note}）")
+        _append_movej_joint67_record(records, label, note, False, cmd_l, cmd_r)
+        return
+    for side, c6, c7, a6, a7 in (
+        ("Left ", cmd_l[0], cmd_l[1], q6_l, q7_l),
+        ("Right", cmd_r[0], cmd_r[1], q6_r, q7_r),
+    ):
+        log.log(
+            f"    {side} j67 cmd q6,q7={math.degrees(c6):+.1f}°,{math.degrees(c7):+.1f}° | "
+            f"act={math.degrees(a6):+.1f}°,{math.degrees(a7):+.1f}° | "
+            f"Δ={math.degrees(a6 - c6):+.1f}°,{math.degrees(a7 - c7):+.1f}° ({note})"
+        )
+    _append_movej_joint67_record(records, label, note, True, cmd_l, cmd_r, (q6_l, q7_l), (q6_r, q7_r))
+
+
+def movej_to_home(interface, log, joint_state_cache, rcl_node, home_left_deg, home_right_deg,
+                  movej_joint67_records=None, label: str = ""):
     home_left_rad = [math.radians(d) for d in home_left_deg]
     home_right_rad = [math.radians(d) for d in home_right_deg]
+    cmd_l = (home_left_rad[5], home_left_rad[6])
+    cmd_r = (home_right_rad[5], home_right_rad[6])
     log.log("  MoveJ 回 home...")
     try:
         interface.send_fsm_command(4)
         time.sleep(1.0)
-        interface.left_arm_handler.send_joint_positions(home_left_rad)
-        interface.right_arm_handler.send_joint_positions(home_right_rad)
-        start = time.time()
-        while time.time() - start < 15.0:
-            left_joints = read_all_joints(joint_state_cache, rcl_node, "left")
-            right_joints = read_all_joints(joint_state_cache, rcl_node, "right")
-            if left_joints is not None and right_joints is not None:
-                left_err = max(abs(left_joints[i] - home_left_rad[i]) for i in range(7))
-                right_err = max(abs(right_joints[i] - home_right_rad[i]) for i in range(7))
-                if left_err < 0.05 and right_err < 0.05:
-                    log.log(f"    ✓ MoveJ 完成 (L_max={left_err:.4f}, R_max={right_err:.4f} rad)")
-                    return True
-            time.sleep(0.2)
-        log.log("    ⚠ MoveJ 超时")
-        return False
+        t0 = time.time()
+        timeout_total = 15.0
+        if not _wait_movej_arm(interface, log, joint_state_cache, rcl_node, "left", home_left_rad, t0, timeout_total):
+            _log_movej_joint67(interface, log, joint_state_cache, rcl_node, movej_joint67_records, label, "Left 超时", cmd_l, cmd_r)
+            return False
+        if not _wait_movej_arm(interface, log, joint_state_cache, rcl_node, "right", home_right_rad, t0, timeout_total):
+            _log_movej_joint67(interface, log, joint_state_cache, rcl_node, movej_joint67_records, label, "Right 超时", cmd_l, cmd_r)
+            return False
+        _log_movej_joint67(interface, log, joint_state_cache, rcl_node, movej_joint67_records, label, "完成", cmd_l, cmd_r)
+        return True
     except Exception as e:
         log.log(f"    ✗ MoveJ 失败: {e}")
         return False
@@ -316,20 +406,16 @@ def evaluate_arm(log, arm_label, q6, q7, target_pose, actual_pose):
 
     if target_pose is not None and actual_pose is not None:
         pos_err, ang_err = compute_pose_error(target_pose, actual_pose)
-        dx = target_pose.position.x - actual_pose.position.x
-        dy = target_pose.position.y - actual_pose.position.y
-        dz = target_pose.position.z - actual_pose.position.z
-
-        tq = target_pose.orientation
-        aq = actual_pose.orientation
-
-        log.log(f"  {arm_label} === 笛卡尔空间误差 ===")
-        log.log(f"  {arm_label}   目标位置: x={target_pose.position.x:.4f} y={target_pose.position.y:.4f} z={target_pose.position.z:.4f}")
-        log.log(f"  {arm_label}   实际位置: x={actual_pose.position.x:.4f} y={actual_pose.position.y:.4f} z={actual_pose.position.z:.4f}")
-        log.log(f"  {arm_label}   位置误差: Δx={dx:+.4f}m Δy={dy:+.4f}m Δz={dz:+.4f}m |总|={pos_err:.4f}m")
-        log.log(f"  {arm_label}   目标姿态: qx={tq.x:.4f} qy={tq.y:.4f} qz={tq.z:.4f} qw={tq.w:.4f}")
-        log.log(f"  {arm_label}   实际姿态: qx={aq.x:.4f} qy={aq.y:.4f} qz={aq.z:.4f} qw={aq.w:.4f}")
-        log.log(f"  {arm_label}   姿态误差(角度): {ang_err:.2f}°")
+        tp, ap = target_pose.position, actual_pose.position
+        dx, dy, dz = tp.x - ap.x, tp.y - ap.y, tp.z - ap.z
+        tq, aq = target_pose.orientation, actual_pose.orientation
+        log.log(
+            f"  {arm_label} 笛卡尔: |pos|={pos_err:.4f}m (Δx,Δy,Δz)=({dx:+.4f},{dy:+.4f},{dz:+.4f}) ang={ang_err:.2f}°"
+        )
+        log.log(
+            f"  {arm_label}   q_tgt=({tq.x:.4f},{tq.y:.4f},{tq.z:.4f},{tq.w:.4f}) "
+            f"q_act=({aq.x:.4f},{aq.y:.4f},{aq.z:.4f},{aq.w:.4f})"
+        )
         result['pos_err'] = pos_err
         result['ang_err'] = ang_err
         result['dx'] = dx
@@ -337,6 +423,19 @@ def evaluate_arm(log, arm_label, q6, q7, target_pose, actual_pose):
         result['dz'] = dz
 
     return result
+
+
+def _format_summary_intro(intro: dict) -> str:
+    s_l6, c_l6, s_r6, c_r7 = (intro.get(k) for k in _INTRO_KEYS)
+    if not all(v is not None for v in (s_l6, c_l6, s_r6, c_r7)):
+        return ""
+    d_l6 = intro.get("delta_left6_cmd_minus_state_deg")
+    if d_l6 is None:
+        d_l6 = math.degrees(c_l6 - s_l6)
+    return (
+        f" intro[L6 s={math.degrees(s_l6):+.1f}° c={math.degrees(c_l6):+.1f}° Δc-s={d_l6:+.1f}°"
+        f" R6 s={math.degrees(s_r6):+.1f}° R7 c={math.degrees(c_r7):+.1f}°]"
+    )
 
 
 def main():
@@ -354,6 +453,9 @@ def main():
     rcl_node = Node("joint67_coupling_test_v2")
     joint_state_cache = JointStateCache()
     rcl_node.create_subscription(JointState, "/joint_states", joint_state_cache.callback, 10)
+    introspection_cache = IntrospectionCache()
+    if Statistics is not None:
+        rcl_node.create_subscription(Statistics, "/controller_manager/introspection_data/full", introspection_cache.callback, 10)
     interface = None
 
     def cleanup():
@@ -395,6 +497,7 @@ def main():
 
     frame_id = "arm_base"
     results = []
+    movej_joint67_records = []
     test_idx = 0
 
     for case_name, case_data in TEST_POINT_DATA.items():
@@ -409,7 +512,10 @@ def main():
         log.log(f"  测试点位数: {len(pose_list)}")
         log.log("")
 
-        movej_to_home(interface, log, joint_state_cache, rcl_node, home_left_deg, home_right_deg)
+        movej_to_home(
+            interface, log, joint_state_cache, rcl_node, home_left_deg, home_right_deg,
+            movej_joint67_records=movej_joint67_records, label=f"{case_name}|home"
+        )
         switch_to_ocs2(interface, log)
 
         for pose_name, pose_data in pose_list.items():
@@ -448,24 +554,30 @@ def main():
             right_actual = interface.right_arm_handler.get_pose()
 
             q6_l, q7_l, q6_r, q7_r = read_joint67(joint_state_cache, rcl_node)
+            rclpy.spin_once(rcl_node, timeout_sec=0.0)
+            selected_intro = read_selected_introspection(introspection_cache)
 
-            left_joints = read_all_joints(joint_state_cache, rcl_node, "left")
-            right_joints = read_all_joints(joint_state_cache, rcl_node, "right")
-            if left_joints:
-                log.log(f"  左臂关节: {', '.join(f'j{i}={math.degrees(left_joints[i-1]):+.1f}°' for i in range(1, 8))}")
-            if right_joints:
-                log.log(f"  右臂关节: {', '.join(f'j{i}={math.degrees(right_joints[i-1]):+.1f}°' for i in range(1, 8))}")
+            for prefix, joints in (("左臂", read_all_joints(joint_state_cache, rcl_node, "left")),
+                                   ("右臂", read_all_joints(joint_state_cache, rcl_node, "right"))):
+                if joints:
+                    jstr = ", ".join(f"j{i}={math.degrees(joints[i - 1]):+.1f}°" for i in range(1, 8))
+                    log.log(f"  {prefix}关节: {jstr}")
 
             left_result = evaluate_arm(log, "Left", q6_l, q7_l, left_target, left_actual)
             right_result = evaluate_arm(log, "Right", q6_r, q7_r, right_target, right_actual)
+            left_result["intro"] = selected_intro
+            right_result["intro"] = selected_intro
 
             results.append((test_idx, tag, "Left", left_result))
             results.append((test_idx, tag, "Right", right_result))
             log.log("")
 
-    movej_to_home(interface, log, joint_state_cache, rcl_node,
-                  TEST_POINT_DATA["case1"]["home_pose"]["home_left_arm_joints_deg"],
-                  TEST_POINT_DATA["case1"]["home_pose"]["home_right_arm_joints_deg"])
+    movej_to_home(
+        interface, log, joint_state_cache, rcl_node,
+        TEST_POINT_DATA["case1"]["home_pose"]["home_left_arm_joints_deg"],
+        TEST_POINT_DATA["case1"]["home_pose"]["home_right_arm_joints_deg"],
+        movej_joint67_records=movej_joint67_records, label="final|home"
+    )
 
     log.log("")
     log.log("=" * 70)
@@ -490,11 +602,12 @@ def main():
                 pose_err_str += f" Δx={result['dx']:+.4f} Δy={result['dy']:+.4f} Δz={result['dz']:+.4f}"
         else:
             pose_err_str = "pose=N/A"
+        intro_str = _format_summary_intro(result.get("intro") or {})
         log.log(
             f"  #{step} {arm_label:5s} {tag:40s} "
             f"q6={q6_deg:+6.1f}° q7={q7_deg:+6.1f}° "
             f"limit={limit_deg:+.1f}° margin={margin_deg:+.1f}° "
-            f"{status:7s} {pose_err_str}"
+            f"{status:7s}{intro_str} {pose_err_str}"
         )
         if status == "INSIDE":
             inside_count += 1
@@ -504,6 +617,25 @@ def main():
     total = inside_count + outside_count
     log.log("")
     log.log(f"  INSIDE: {inside_count}/{total}  OUTSIDE: {outside_count}/{total}")
+
+    if movej_joint67_records:
+        log.log("")
+        log.log("  MoveJ joint67 cmd vs actual (home)")
+        for rec in movej_joint67_records:
+            tag = rec.get("label", "")
+            note = rec.get("note", "")
+            if not rec.get("ok", False):
+                log.log(f"    {tag:20s} {note:16s}  NO_DATA")
+                continue
+            log.log(
+                f"    {tag:20s} {note:16s}  "
+                f"L: cmd(q6,q7)=({math.degrees(rec['cmd_q6_l']):+.1f}°, {math.degrees(rec['cmd_q7_l']):+.1f}°) "
+                f"act=({math.degrees(rec['act_q6_l']):+.1f}°, {math.degrees(rec['act_q7_l']):+.1f}°) "
+                f"Δ=({rec['d_q6_l_deg']:+.1f}°, {rec['d_q7_l_deg']:+.1f}°) | "
+                f"R: cmd(q6,q7)=({math.degrees(rec['cmd_q6_r']):+.1f}°, {math.degrees(rec['cmd_q7_r']):+.1f}°) "
+                f"act=({math.degrees(rec['act_q6_r']):+.1f}°, {math.degrees(rec['act_q7_r']):+.1f}°) "
+                f"Δ=({rec['d_q6_r_deg']:+.1f}°, {rec['d_q7_r_deg']:+.1f}°)"
+            )
     if run_label == "A":
         log.log("  (Run A: joint67Coupling cost 应为 ACTIVE)")
         if outside_count > 0:

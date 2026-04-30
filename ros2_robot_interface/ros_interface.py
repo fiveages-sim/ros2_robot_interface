@@ -29,7 +29,20 @@ import tf2_ros
 from tf2_ros import TransformException
 from tf2_geometry_msgs import do_transform_pose
 
-from arms_ros2_control_msgs.msg import WbcCurrentState
+from typing import TYPE_CHECKING
+
+# NOTE: Some Jazzy deployments ship `arms_ros2_control_msgs` without `WbcCurrentState`.
+# This interface should still be usable for arm control/testing scripts that don't
+# require WBC mode tracking.
+try:
+    from arms_ros2_control_msgs.msg import WbcCurrentState as _WbcCurrentStateMsg
+except Exception:  # ImportError on missing symbol, but keep robust for ROS env issues
+    _WbcCurrentStateMsg = None
+
+if TYPE_CHECKING:
+    from arms_ros2_control_msgs.msg import WbcCurrentState  # pragma: no cover
+else:
+    WbcCurrentState = Any  # type: ignore[misc,assignment]
 from arms_ros2_control_msgs.srv import ExecutePath
 
 from .config import ControlType, ROS2RobotInterfaceConfig
@@ -50,12 +63,15 @@ class ROS2RobotInterface:
     """Interface for communicating with ROS 2 robots."""
 
     BODY_MODE_TO_STATE: Dict[str, int] = {
-        "BODY_FREE": WbcCurrentState.BODY_FREE,
-        "BODY_RELATIVE": WbcCurrentState.BODY_VERTICAL,
-        "BODY_VERTICAL": WbcCurrentState.BODY_VERTICAL,  # backward-compatible alias
-        "BODY_TRACKING": WbcCurrentState.BODY_TRACKING,
-        "BODY_LOCK": WbcCurrentState.BODY_LOCKED,
-        "BODY_HEAD_COUPLED": WbcCurrentState.BODY_HEAD_COUPLED,
+        # Values are only used for equality checks against `self.wbc_state.body_state`.
+        # When WbcCurrentState is unavailable, we keep keys for validation and simply
+        # won't be able to short-circuit mode switches based on current state.
+        "BODY_FREE": int(getattr(_WbcCurrentStateMsg, "BODY_FREE", 0) or 0),
+        "BODY_RELATIVE": int(getattr(_WbcCurrentStateMsg, "BODY_VERTICAL", 1) or 1),
+        "BODY_VERTICAL": int(getattr(_WbcCurrentStateMsg, "BODY_VERTICAL", 1) or 1),  # backward-compatible alias
+        "BODY_TRACKING": int(getattr(_WbcCurrentStateMsg, "BODY_TRACKING", 2) or 2),
+        "BODY_LOCK": int(getattr(_WbcCurrentStateMsg, "BODY_LOCKED", 3) or 3),
+        "BODY_HEAD_COUPLED": int(getattr(_WbcCurrentStateMsg, "BODY_HEAD_COUPLED", 4) or 4),
     }
     BODY_MODE_TO_COMMAND: Dict[str, str] = {
         "BODY_FREE": "BODY_FREE",
@@ -431,13 +447,19 @@ class ROS2RobotInterface:
 
             # Subscribe WBC current state for mode-aware command timing.
             if self.is_wbc:
-                self.wbc_state_sub = self.robot_node.create_subscription(
-                    WbcCurrentState,
-                    "/ocs2_wbc_controller/current_state",
-                    self._wbc_state_callback,
-                    10
-                )
-                logger.info("✅ Subscribed to /ocs2_wbc_controller/current_state for WBC mode tracking")
+                if _WbcCurrentStateMsg is None:
+                    logger.warning(
+                        "WBC mode tracking disabled: `arms_ros2_control_msgs.msg.WbcCurrentState` not available "
+                        "(this is common on some ROS 2 Jazzy installs)."
+                    )
+                else:
+                    self.wbc_state_sub = self.robot_node.create_subscription(
+                        _WbcCurrentStateMsg,
+                        "/ocs2_wbc_controller/current_state",
+                        self._wbc_state_callback,
+                        10,
+                    )
+                    logger.info("✅ Subscribed to /ocs2_wbc_controller/current_state for WBC mode tracking")
             
             # Initialize TF buffer first (needed by ArmHandler)
             self.tf_buffer = tf2_ros.Buffer()
