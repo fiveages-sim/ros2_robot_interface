@@ -33,7 +33,7 @@
   - [坐标转换](#坐标转换)
   - [机器人描述与参数查询](#机器人描述与参数查询)
 - [常量 (Constants)](#常量-constants)
-- [运动生成功能 (motion_generation)](#运动生成功能-motion_generation)
+- [几何与四元数 (utils.quat_pose)](#几何与四元数-utilsquat_pose)
 - [快速参考表](#快速参考表)
 - [注意事项](#注意事项)
 
@@ -1395,65 +1395,6 @@ interface.send_fsm_command(FSM_OCS2)
 
 ---
 
-## 运动生成功能 (motion_generation)
-
-包顶层已导出可组合的动作序列构建与执行工具，适合 pick/place/handover 这类阶段化任务。
-
-### 主要类型
-
-- `ArmSide`: `LEFT` / `RIGHT`
-- `SendMode`: `UNSTAMPED` / `STAMPED` / `DUAL_ARM_STAMPED`
-- `GripperMode`: `JOINT_POSITION` / `TARGET_COMMAND`
-- `ArmTarget`: 单臂目标（`Pose + gripper`）
-- `StageTarget`: 单阶段目标（可含 left/right）
-
-### 主要函数
-
-- `build_single_arm_pick_sequence(...)`
-- `build_single_arm_place_sequence(...)`
-- `build_single_arm_return_home_sequence(...)`
-- `assign_to_arm(sequence, side)`
-- `compose_bimanual_synchronized_sequence(left_sequence, right_sequence)`
-- `build_handover_sequence(...)`
-- `execute_stage_sequence(interface=..., sequence=..., ...)`
-
-### 示例
-
-```python
-from ros2_robot_interface import (
-    ArmSide,
-    SendMode,
-    GripperMode,
-    build_single_arm_pick_sequence,
-    assign_to_arm,
-    execute_stage_sequence,
-)
-
-pick_seq = build_single_arm_pick_sequence(
-    target_pose=target_pose,
-    approach_clearance=0.12,
-    grasp_clearance=0.02,
-    grasp_orientation=(0.0, 1.0, 0.0, 0.0),
-    gripper_open=1.0,
-    gripper_closed=0.0,
-)
-stages = assign_to_arm(pick_seq, ArmSide.LEFT)
-
-execute_stage_sequence(
-    interface=interface,
-    sequence=stages,
-    send_mode=SendMode.STAMPED,
-    gripper_mode=GripperMode.TARGET_COMMAND,
-    arrival_timeout=3.0,
-    arrival_poll=0.05,
-    time_now_fn=time.monotonic,
-    sleep_fn=time.sleep,
-    gripper_action_wait=0.2,
-)
-```
-
----
-
 ## 快速参考表
 
 | 部分 | Handler 访问 | 发送命令 | 获取状态 | 检查到达 |
@@ -1506,3 +1447,21 @@ execute_stage_sequence(
 8. **目标位置获取**：
    - 手臂的目标位置通过话题订阅获取（`/left_current_target` 或 `/right_current_target`）
    - 如果未配置这些话题，`get_target_pose()` 和 `check_arrival()` 将无法正常工作
+
+---
+
+## 几何与四元数 (utils.quat_pose)
+
+模块路径：`ros2_robot_interface.utils.quat_pose`（也可从 `ros2_robot_interface.utils` 导入已导出符号）。
+
+四元数为 **scalar-last (x, y, z, w)**，与 `geometry_msgs/Pose.orientation` 一致。
+
+| 函数 | 说明 |
+|------|------|
+| `quat_multiply(q1, q2)` | 四元数乘积 |
+| `quat_conjugate(q)` | 共轭 |
+| `quat_normalize(q)` | 单位化（近零时回退为 `(0,0,0,1)`） |
+| `rotate_vector_by_quat_inverse(vec, quat_xyzw)` | 用 `quat` 的逆旋转三维向量 |
+| `pose_from_tuple(position, orientation_xyzw)` | 元组 → `geometry_msgs.msg.Pose` |
+
+与 LeRobot 扁平 action/观测键相关的 `action_from_pose` / `obs_to_pose` 仍见 **`lerobot_robot_ros2.utils.pose_utils`**。
