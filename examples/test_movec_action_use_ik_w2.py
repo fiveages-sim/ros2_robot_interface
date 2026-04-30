@@ -233,10 +233,10 @@ class CircleTrajectoryActionClient(Node):
 
     def joint_trajectory_feedback_callback(self, feedback_msg):
         feedback = feedback_msg.feedback
-        self.get_logger().info(
-            f"MoveJ action反馈: 进度 {feedback.progress * 100.0:.1f}%, "
-            f"已用 {feedback.elapsed_time:.2f}s, 剩余 {feedback.remaining_time:.2f}s"
-        )
+        # self.get_logger().info(
+        #     f"MoveJ action反馈: 进度 {feedback.progress * 100.0:.1f}%, "
+        #     f"已用 {feedback.elapsed_time:.2f}s, 剩余 {feedback.remaining_time:.2f}s"
+        # )
 
     def create_circle_goal_three_point(
         self,
@@ -299,6 +299,8 @@ class CircleTrajectoryActionClient(Node):
         circle.axis = axis
         circle.rotate_angle = rotate_angle
         circle.endpoint.position = Point(x=0.0, y=0.0, z=0.0)
+        # circle.max_linear_velocity = 0.3
+        # circle.max_angular_velocity = 0.5
         if end_pose is not None:
             circle.endpoint.orientation = end_pose.orientation
             self.get_logger().info(
@@ -371,10 +373,10 @@ class CircleTrajectoryActionClient(Node):
 
     def circle_feedback_callback(self, feedback_msg):
         feedback = feedback_msg.feedback
-        self.get_logger().info(
-            f"action反馈: 进度 {feedback.progress * 100.0:.1f}%, "
-            f"已用 {feedback.elapsed_time:.2f}s, 剩余 {feedback.remaining_time:.2f}s"
-        )
+        # self.get_logger().info(
+        #     f"action反馈: 进度 {feedback.progress * 100.0:.1f}%, "
+        #     f"已用 {feedback.elapsed_time:.2f}s, 剩余 {feedback.remaining_time:.2f}s"
+        # )
 
     def spin_until_result(self, future, timeout):
         start_time = time.time()
