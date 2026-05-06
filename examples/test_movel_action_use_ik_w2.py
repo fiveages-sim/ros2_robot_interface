@@ -24,8 +24,8 @@ LEFT_TEST_JOINTS = [
 ]
 
 RIGHT_TEST_JOINTS = [
-    0.0982891175, -0.8816540101, -0.5496532015,
-    -1.8582004280, 2.8749939521, 0.3564035253, -1.0466912832,
+    0.3525227330, -0.7798290600, -0.8896949257,
+    -1.8910405790, 2.7986485415, 0.4619120915, -0.8030297356,
 ]
 
 
@@ -103,10 +103,11 @@ class LinearTrajectoryActionClient(Node):
         return False
 
     def movej_feedback_callback(self, feedback):
-        self.get_logger().info(
-            f"MoveJ action反馈: 进度 {feedback.progress * 100.0:.1f}%, "
-            f"已用 {feedback.elapsed_time:.2f}s, 剩余 {feedback.remaining_time:.2f}s"
-        )
+        # self.get_logger().info(
+        #     f"MoveJ action反馈: 进度 {feedback.progress * 100.0:.1f}%, "
+        #     f"已用 {feedback.elapsed_time:.2f}s, 剩余 {feedback.remaining_time:.2f}s"
+        # )
+        pass
 
     def get_current_joint_positions(self):
         if self.interface is None:
@@ -142,11 +143,27 @@ def build_offset_pose(source_pose, z_offset=-0.2):
     return target_pose
 
 
-def print_action_feedback(feedback):
-    print(
-        f"    action反馈: 进度 {feedback.progress * 100.0:.1f}%, "
-        f"已用 {feedback.elapsed_time:.2f}s, 剩余 {feedback.remaining_time:.2f}s"
+def format_pose(pose):
+    if pose is None:
+        return "不可用"
+    return (
+        f"position=({pose.position.x:.4f}, {pose.position.y:.4f}, {pose.position.z:.4f}), "
+        f"orientation=({pose.orientation.x:.4f}, {pose.orientation.y:.4f}, "
+        f"{pose.orientation.z:.4f}, {pose.orientation.w:.4f})"
     )
+
+
+def print_current_pose(client, arm_name, label):
+    current_pose = client.get_current_pose(arm_name)
+    print(f"    {label}当前位姿: {format_pose(current_pose)}")
+
+
+def print_action_feedback(feedback):
+    # print(
+    #     f"    action反馈: 进度 {feedback.progress * 100.0:.1f}%, "
+    #     f"已用 {feedback.elapsed_time:.2f}s, 剩余 {feedback.remaining_time:.2f}s"
+    # )
+    pass
 
 
 def main():
@@ -235,6 +252,8 @@ def main():
             )
             if not result or not result.success:
                 return 1
+            time.sleep(0.2)
+            print_current_pose(client, "left", "左臂")
         elif choice == "2":
             right_target_pose = build_offset_pose(client.get_current_pose("right"), z_offset=-0.2)
             print(
@@ -256,6 +275,8 @@ def main():
             )
             if not result or not result.success:
                 return 1
+            time.sleep(0.2)
+            print_current_pose(client, "right", "右臂")
         else:
             left_target_pose = build_offset_pose(client.get_current_pose("left"), z_offset=-0.2)
             right_target_pose = build_offset_pose(client.get_current_pose("right"), z_offset=-0.2)
@@ -283,6 +304,9 @@ def main():
             )
             if not dual_result or not dual_result.success:
                 return 1
+            time.sleep(0.2)
+            print_current_pose(client, "left", "左臂")
+            print_current_pose(client, "right", "右臂")
 
         print("\n直线 action 执行成功")
         return 0
