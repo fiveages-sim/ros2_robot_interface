@@ -342,7 +342,22 @@ class ArmHandler:
                        (current_pose.position.y - target_pose.position.y) ** 2 +
                        (current_pose.position.z - target_pose.position.z) ** 2) ** 0.5
 
-            # Normalize target quaternion to avoid non-unit target causing orientation error bias.
+            # Normalize both quaternions so arrival checking matches the
+            # diagnostic math used by wait_for_arrival() and avoids bias from
+            # non-unit pose messages.
+            cqx = current_pose.orientation.x
+            cqy = current_pose.orientation.y
+            cqz = current_pose.orientation.z
+            cqw = current_pose.orientation.w
+            current_norm = math.sqrt(cqx * cqx + cqy * cqy + cqz * cqz + cqw * cqw)
+            if current_norm > 1e-12:
+                cqx /= current_norm
+                cqy /= current_norm
+                cqz /= current_norm
+                cqw /= current_norm
+            else:
+                cqx, cqy, cqz, cqw = 0.0, 0.0, 0.0, 1.0
+
             tqx = target_pose.orientation.x
             tqy = target_pose.orientation.y
             tqz = target_pose.orientation.z
@@ -356,10 +371,10 @@ class ArmHandler:
             else:
                 tqx, tqy, tqz, tqw = 0.0, 0.0, 0.0, 1.0
 
-            dot_product = (current_pose.orientation.w * tqw +
-                          current_pose.orientation.x * tqx +
-                          current_pose.orientation.y * tqy +
-                          current_pose.orientation.z * tqz)
+            dot_product = (cqw * tqw +
+                          cqx * tqx +
+                          cqy * tqy +
+                          cqz * tqz)
             dot_product = max(-1.0, min(1.0, dot_product))
             orient_dist = 1.0 - abs(dot_product)
             

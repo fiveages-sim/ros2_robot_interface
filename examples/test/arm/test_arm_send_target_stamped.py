@@ -8,10 +8,11 @@ from ros2_robot_interface import ROS2RobotInterface, ROS2RobotInterfaceConfig
 # ============================================================================
 # 测试参数（按需修改）
 # ============================================================================
-MAX_WAIT_TIME = 10.0    # 每步最大等待时间（秒）
-CHECK_INTERVAL = 0.5    # 到位检查间隔（秒）
-POSE_THRESHOLD = 0.05  # 位置距离阈值（米）
-STEP_SIZE = 0.1       # 每次移动距离（米）
+MAX_WAIT_TIME = 10.0      # 每步最大等待时间（秒）
+CHECK_INTERVAL = 0.5      # 到位检查间隔（秒）
+POSE_THRESHOLD = 0.05     # 位置距离阈值（米）
+ORIENT_THRESHOLD = 0.01    # 姿态阈值
+STEP_SIZE = 0.1           # 每次移动距离（米）
 
 
 def create_pose(x, y, z, qx=0.0, qy=0.0, qz=0.0, qw=1.0) -> Pose:
@@ -30,11 +31,17 @@ def print_pose(pose: Pose, label: str = "Pose") -> None:
     )
 
 
-def wait_for_arrival(handler, max_wait: float, interval: float, threshold: float) -> bool:
+def wait_for_arrival(
+    handler,
+    max_wait: float,
+    interval: float,
+    threshold: float,
+    orient_threshold: float | None = None,
+) -> bool:
     """等待单臂到达目标位置，返回是否到达。"""
     start = time.time()
     while time.time() - start < max_wait:
-        result = handler.check_arrival(pose_threshold=threshold)
+        result = handler.check_arrival(pose_threshold=threshold, orient_threshold=orient_threshold)
         if result["arrived"]:
             elapsed = time.time() - start
             print(f"  ✓ 已到达目标（耗时 {elapsed:.1f}s）")
@@ -67,16 +74,21 @@ def wait_for_arrival(handler, max_wait: float, interval: float, threshold: float
                 ez = tw*cz - tx*cy + ty*cx - tz*cw
                 ew = tw*cw + tx*cx + ty*cy + tz*cz
                 angle_deg = 2.0 * math.degrees(math.acos(min(abs(ew), 1.0)))
+                orient_dist = 1.0 - abs(ew)
                 dist = math.sqrt(dx*dx + dy*dy + dz*dz)
                 print(f"    差值:")
                 print(f"      位置:      ({dx:+7.4f}, {dy:+7.4f}, {dz:+7.4f})  欧式距离: {dist:.4f}m")
                 print(f"      误差四元数: ({ex:+6.4f}, {ey:+6.4f}, {ez:+6.4f}, {ew:+6.4f})")
-                print(f"      姿态误差角:  {angle_deg:.4f}°")
+                print(f"      姿态误差角:  {angle_deg:.4f}°  四元数距离: {orient_dist:.4f}")
             return True
         time.sleep(interval)
 
-    result = handler.check_arrival(pose_threshold=threshold)
-    print(f"  ⚠ 超时（{max_wait:.0f}s），当前距目标 {result.get('position_distance', float('inf')):.4f}m")
+    result = handler.check_arrival(pose_threshold=threshold, orient_threshold=orient_threshold)
+    print(
+        f"  ⚠ 超时（{max_wait:.0f}s），"
+        f"位置距离: {result.get('position_distance', float('inf')):.4f}m  "
+        f"四元数距离: {result.get('orientation_distance', float('inf')):.4f}"
+    )
     return False
 
 
@@ -197,7 +209,7 @@ def main() -> int:
             break
 
         arrived = wait_for_arrival(
-            interface.left_arm_handler, MAX_WAIT_TIME, CHECK_INTERVAL, POSE_THRESHOLD
+            interface.left_arm_handler, MAX_WAIT_TIME, CHECK_INTERVAL, POSE_THRESHOLD, ORIENT_THRESHOLD
         )
         if not arrived:
             print("  ⚠ 未到达，继续下一步...")
@@ -219,7 +231,7 @@ def main() -> int:
                 print(f"  ✗ 右臂发布失败: {e}")
 
             wait_for_arrival(
-                interface.right_arm_handler, MAX_WAIT_TIME, CHECK_INTERVAL, POSE_THRESHOLD
+                interface.right_arm_handler, MAX_WAIT_TIME, CHECK_INTERVAL, POSE_THRESHOLD, ORIENT_THRESHOLD
             )
 
     # ========================================================================
