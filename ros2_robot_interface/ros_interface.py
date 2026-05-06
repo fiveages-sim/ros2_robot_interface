@@ -13,8 +13,10 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import rclpy
-from geometry_msgs.msg import Pose, PoseStamped, TransformStamped, Twist
+from action_msgs.msg import GoalStatus
+from geometry_msgs.msg import Point, Pose, PoseStamped, Quaternion, TransformStamped, Twist, Vector3
 from nav_msgs.msg import Path
+from rclpy.action import ActionClient
 from rclpy.duration import Duration
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.client import Client
@@ -29,6 +31,8 @@ import tf2_ros
 from tf2_ros import TransformException
 from tf2_geometry_msgs import do_transform_pose
 
+from arms_ros2_control_msgs.action import ExecuteLinear, JointTrajectory as JointTrajectoryAction, MovecUseIK
+from arms_ros2_control_msgs.msg import CircleMessage, JointWaypoint, LinearMessage
 from arms_ros2_control_msgs.msg import WbcCurrentState
 from arms_ros2_control_msgs.srv import ExecutePath
 
@@ -81,6 +85,9 @@ class ROS2RobotInterface:
         self.wbc_state_sub: Subscription | None = None
         self.target_path_pub: Publisher | None = None
         self.execute_path_client: Client | None = None
+        self.joint_trajectory_action_client: ActionClient | None = None
+        self.movel_action_client: ActionClient | None = None
+        self.movec_action_client: ActionClient | None = None
         self.dual_target_stamped_pub: Publisher | None = None
         self.fsm_command_pub: Publisher | None = None
         self.mode_command_pub: Publisher | None = None
@@ -428,6 +435,32 @@ class ROS2RobotInterface:
                     10
                 )
                 logger.info("✅ Subscribed to {} for body target tracking".format(self.config.body_joint_current_target_topic))
+
+            if self.config.joint_trajectory_action_name:
+                self.joint_trajectory_action_client = ActionClient(
+                    self.robot_node,
+                    JointTrajectoryAction,
+                    self.config.joint_trajectory_action_name,
+                )
+                logger.info(
+                    f"Created MoveJ action client: {self.config.joint_trajectory_action_name}"
+                )
+
+            if self.config.movel_action_name:
+                self.movel_action_client = ActionClient(
+                    self.robot_node,
+                    ExecuteLinear,
+                    self.config.movel_action_name,
+                )
+                logger.info(f"Created MOVL action client: {self.config.movel_action_name}")
+
+            if self.config.movec_action_name:
+                self.movec_action_client = ActionClient(
+                    self.robot_node,
+                    MovecUseIK,
+                    self.config.movec_action_name,
+                )
+                logger.info(f"Created MOVC action client: {self.config.movec_action_name}")
 
             # Subscribe WBC current state for mode-aware command timing.
             if self.is_wbc:
@@ -858,6 +891,441 @@ class ROS2RobotInterface:
         if self.body_current_target is None:
             return None
         return list(self.body_current_target)
+
+    def wait_for_movel_action_server(self, timeout: float = 5.0) -> bool:
+        """Wait for the configured parameterized MOVL action server."""
+        if self.movel_action_client is None:
+            return False
+        return self.movel_action_client.wait_for_server(timeout_sec=timeout)
+
+    def wait_for_movec_action_server(self, timeout: float = 5.0) -> bool:
+        """Wait for the configured parameterized MOVC action server."""
+        if self.movec_action_client is None:
+            return False
+        return self.movec_action_client.wait_for_server(timeout_sec=timeout)
+
+    def wait_for_joint_trajectory_action_server(self, timeout: float = 5.0) -> bool:
+        """Wait for the configured parameterized MoveJ action server."""
+        if self.joint_trajectory_action_client is None:
+            return False
+        return self.joint_trajectory_action_client.wait_for_server(timeout_sec=timeout)
+
+    def _wait_for_future_done(self, future: Any, timeout: float) -> bool:
+        """Wait for a rclpy future while this interface node is spun by its executor."""
+        if future.done():
+            return True
+        event = threading.Event()
+        future.add_done_callback(lambda _: event.set())
+        return event.wait(timeout=max(0.0, timeout))
+
+    def _send_motion_action_goal(
+        self,
+        action_client: ActionClient | None,
+        goal_msg: Any,
+        *,
+        action_label: str,
+        control_type: Optional[str] = "arm_joint",
+        feedback_callback: Optional[Callable[[Any], None]] = None,
+        timeout: float = 30.0,
+        wait_for_server_timeout: float = 5.0,
+    ) -> Any:
+        """Send a motion action goal and return the action result object."""
+        if not self.is_connected:
+            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+        if action_client is None:
+            raise ROS2NotConnectedError(f"{action_label} action client not initialized")
+        if not action_client.wait_for_server(timeout_sec=wait_for_server_timeout):
+            raise ROS2NotConnectedError(f"{action_label} action server is not available")
+
+        if control_type is not None:
+            self.auto_switch_fsm_for_control(control_type)
+
+        def _feedback_adapter(feedback_msg: Any) -> None:
+            if feedback_callback is not None:
+                feedback_callback(feedback_msg.feedback)
+
+        send_goal_future = action_client.send_goal_async(
+            goal_msg,
+            feedback_callback=_feedback_adapter if feedback_callback is not None else None,
+        )
+        if not self._wait_for_future_done(send_goal_future, wait_for_server_timeout):
+            logger.error("%s action goal send timed out", action_label)
+            return None
+
+        goal_handle = send_goal_future.result()
+        if goal_handle is None or not goal_handle.accepted:
+            logger.error("%s action goal rejected", action_label)
+            return None
+
+        result_future = goal_handle.get_result_async()
+        if not self._wait_for_future_done(result_future, timeout):
+            logger.error("%s action result timed out, canceling goal", action_label)
+            cancel_future = goal_handle.cancel_goal_async()
+            self._wait_for_future_done(cancel_future, 2.0)
+            return None
+
+        result_response = result_future.result()
+        result = result_response.result
+        message = getattr(result, "message", "")
+        estimated_duration = getattr(result, "estimated_duration", None)
+        actual_duration = getattr(result, "actual_duration", None)
+        if result_response.status != GoalStatus.STATUS_SUCCEEDED:
+            logger.error(
+                "%s action failed: status=%s, message=%s, estimated_duration=%s, actual_duration=%s",
+                action_label,
+                result_response.status,
+                message,
+                estimated_duration,
+                actual_duration,
+            )
+        else:
+            logger.info(
+                "%s action succeeded: message=%s, estimated_duration=%s, actual_duration=%s",
+                action_label,
+                message,
+                estimated_duration,
+                actual_duration,
+            )
+        return result
+
+    @staticmethod
+    def _pose_from_pose_like(pose: Pose | PoseStamped) -> Pose:
+        return pose.pose if isinstance(pose, PoseStamped) else pose
+
+    @staticmethod
+    def _point_from_value(value: Point | Tuple[float, float, float]) -> Point:
+        if isinstance(value, Point):
+            return value
+        return Point(x=float(value[0]), y=float(value[1]), z=float(value[2]))
+
+    @staticmethod
+    def _vector3_from_value(value: Vector3 | Tuple[float, float, float]) -> Vector3:
+        if isinstance(value, Vector3):
+            return value
+        return Vector3(x=float(value[0]), y=float(value[1]), z=float(value[2]))
+
+    @staticmethod
+    def _set_optional_float_field(msg: Any, field_name: str, value: Optional[float]) -> None:
+        if value is not None:
+            setattr(msg, field_name, float(value))
+
+    @staticmethod
+    def _set_optional_string_field(msg: Any, field_name: str, value: Optional[str]) -> None:
+        if value is not None:
+            setattr(msg, field_name, str(value))
+
+    @staticmethod
+    def _optional_float_array(value: Any, length: int, field_name: str) -> Optional[List[float]]:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return [float(value)] * length
+        values = [float(v) for v in value]
+        if len(values) != length:
+            raise ValueError(
+                f"{field_name} length mismatch: got {len(values)}, expected {length}"
+            )
+        return values
+
+    def execute_joint_trajectory_action(
+        self,
+        joint_names: List[str],
+        waypoints: List[List[float]],
+        *,
+        time_mode: bool = True,
+        total_time: Optional[float] = None,
+        max_velocity: Any = None,
+        max_acceleration: Any = None,
+        max_jerk: Any = None,
+        auto_switch_fsm: bool = True,
+        feedback_callback: Optional[Callable[[Any], None]] = None,
+        timeout: float = 30.0,
+        wait_for_server_timeout: float = 5.0,
+    ) -> Any:
+        """Execute parameterized MoveJ through ``JointTrajectory`` action.
+
+        Args:
+            joint_names: Joint names controlled by the action.
+            waypoints: Position arrays. Each waypoint must match ``joint_names`` length.
+            max_velocity/max_acceleration/max_jerk: Optional scalar or per-joint list.
+            feedback_callback: Receives the action feedback object.
+
+        Returns:
+            The action result object, or ``None`` if rejected/timed out.
+        """
+        if not joint_names:
+            raise ValueError("joint_names cannot be empty")
+        if not waypoints:
+            raise ValueError("waypoints cannot be empty")
+
+        joint_count = len(joint_names)
+        goal_msg = JointTrajectoryAction.Goal()
+        goal_msg.joint_names = list(joint_names)
+
+        velocity = self._optional_float_array(max_velocity, joint_count, "max_velocity")
+        acceleration = self._optional_float_array(
+            max_acceleration, joint_count, "max_acceleration"
+        )
+        jerk = self._optional_float_array(max_jerk, joint_count, "max_jerk")
+
+        for i, positions in enumerate(waypoints):
+            if len(positions) != joint_count:
+                raise ValueError(
+                    f"Waypoint {i} length mismatch: got {len(positions)}, expected {joint_count}"
+                )
+            waypoint = JointWaypoint()
+            waypoint.position = [float(p) for p in positions]
+            waypoint.time_mode = bool(time_mode)
+            if total_time is not None:
+                waypoint.total_time = float(total_time)
+            if velocity is not None:
+                waypoint.max_velocity = list(velocity)
+            if acceleration is not None:
+                waypoint.max_acceleration = list(acceleration)
+            if jerk is not None:
+                waypoint.max_jerk = list(jerk)
+            goal_msg.waypoints.append(waypoint)
+
+        return self._send_motion_action_goal(
+            self.joint_trajectory_action_client,
+            goal_msg,
+            action_label="MoveJ",
+            control_type="arm_joint" if auto_switch_fsm else None,
+            feedback_callback=feedback_callback,
+            timeout=timeout,
+            wait_for_server_timeout=wait_for_server_timeout,
+        )
+
+    def execute_dual_arm_movej_action(
+        self,
+        left_arm_positions: List[float],
+        right_arm_positions: List[float],
+        *,
+        duration: Optional[float] = None,
+        time_mode: bool = True,
+        left_joint_names: Optional[List[str]] = None,
+        right_joint_names: Optional[List[str]] = None,
+        max_velocity: Any = None,
+        max_acceleration: Any = None,
+        max_jerk: Any = None,
+        auto_switch_fsm: bool = True,
+        feedback_callback: Optional[Callable[[Any], None]] = None,
+        timeout: float = 30.0,
+        wait_for_server_timeout: float = 5.0,
+    ) -> Any:
+        """Convenience wrapper for dual-arm parameterized MoveJ action."""
+        if left_joint_names is None:
+            left_joint_names = [
+                "left_joint1", "left_joint2", "left_joint3", "left_joint4",
+                "left_joint5", "left_joint6", "left_joint7",
+            ]
+        if right_joint_names is None:
+            right_joint_names = [
+                "right_joint1", "right_joint2", "right_joint3", "right_joint4",
+                "right_joint5", "right_joint6", "right_joint7",
+            ]
+        joint_names = list(left_joint_names) + list(right_joint_names)
+        positions = list(left_arm_positions) + list(right_arm_positions)
+        return self.execute_joint_trajectory_action(
+            joint_names,
+            [positions],
+            time_mode=time_mode,
+            total_time=duration,
+            max_velocity=max_velocity,
+            max_acceleration=max_acceleration,
+            max_jerk=max_jerk,
+            auto_switch_fsm=auto_switch_fsm,
+            feedback_callback=feedback_callback,
+            timeout=timeout,
+            wait_for_server_timeout=wait_for_server_timeout,
+        )
+
+    def execute_movel_action(
+        self,
+        arm_name: str,
+        endpoint_pose: Pose | PoseStamped,
+        *,
+        duration: float = 3.0,
+        time_mode: bool = True,
+        frame_id: Optional[str] = None,
+        ik_type: Optional[str] = None,
+        right_endpoint_pose: Optional[Pose | PoseStamped] = None,
+        max_linear_velocity: Optional[float] = None,
+        max_linear_acceleration: Optional[float] = None,
+        max_linear_jerk: Optional[float] = None,
+        max_angular_velocity: Optional[float] = None,
+        max_angular_acceleration: Optional[float] = None,
+        max_angular_jerk: Optional[float] = None,
+        auto_switch_fsm: bool = True,
+        feedback_callback: Optional[Callable[[Any], None]] = None,
+        timeout: float = 30.0,
+        wait_for_server_timeout: float = 5.0,
+    ) -> Any:
+        """Execute parameterized MOVL through ``ExecuteLinear`` action.
+
+        ``feedback_callback`` receives the action feedback object, not the wrapper
+        message. The returned value is the action result object.
+        """
+        goal_msg = ExecuteLinear.Goal()
+        linear = LinearMessage()
+        linear.arm_name = arm_name
+        linear.duration = float(duration)
+        linear.time_mode = bool(time_mode)
+        self._set_optional_string_field(linear, "frame_id", frame_id)
+        self._set_optional_string_field(linear, "ik_type", ik_type)
+        self._set_optional_float_field(linear, "max_linear_velocity", max_linear_velocity)
+        self._set_optional_float_field(linear, "max_linear_acceleration", max_linear_acceleration)
+        self._set_optional_float_field(linear, "max_linear_jerk", max_linear_jerk)
+        self._set_optional_float_field(linear, "max_angular_velocity", max_angular_velocity)
+        self._set_optional_float_field(linear, "max_angular_acceleration", max_angular_acceleration)
+        self._set_optional_float_field(linear, "max_angular_jerk", max_angular_jerk)
+        linear.endpoint = self._pose_from_pose_like(endpoint_pose)
+        if right_endpoint_pose is not None:
+            linear.right_endpoint = self._pose_from_pose_like(right_endpoint_pose)
+        goal_msg.linear_params = linear
+        return self._send_motion_action_goal(
+            self.movel_action_client,
+            goal_msg,
+            action_label="MOVL",
+            control_type="arm_joint" if auto_switch_fsm else None,
+            feedback_callback=feedback_callback,
+            timeout=timeout,
+            wait_for_server_timeout=wait_for_server_timeout,
+        )
+
+    def execute_movec_action_three_point(
+        self,
+        arm_name: str,
+        midpoint_pose: Pose | PoseStamped,
+        endpoint_pose: Pose | PoseStamped,
+        rotate_angle: float = 0.0,
+        *,
+        duration: float = 6.0,
+        time_mode: bool = False,
+        frame_id: Optional[str] = None,
+        ik_type: Optional[str] = None,
+        use_slerp_for_orientation: bool = False,
+        right_midpoint_pose: Optional[Pose | PoseStamped] = None,
+        right_endpoint_pose: Optional[Pose | PoseStamped] = None,
+        right_rotate_angle: float = 0.0,
+        max_linear_velocity: Optional[float] = None,
+        max_linear_acceleration: Optional[float] = None,
+        max_linear_jerk: Optional[float] = None,
+        max_angular_velocity: Optional[float] = None,
+        max_angular_acceleration: Optional[float] = None,
+        max_angular_jerk: Optional[float] = None,
+        auto_switch_fsm: bool = True,
+        feedback_callback: Optional[Callable[[Any], None]] = None,
+        timeout: float = 60.0,
+        wait_for_server_timeout: float = 5.0,
+    ) -> Any:
+        """Execute parameterized MOVC through ``MovecUseIK`` action using three-point mode."""
+        goal_msg = MovecUseIK.Goal()
+        circle = CircleMessage()
+        circle.arm_name = arm_name
+        circle.duration = float(duration)
+        circle.time_mode = bool(time_mode)
+        self._set_optional_string_field(circle, "frame_id", frame_id)
+        self._set_optional_string_field(circle, "ik_type", ik_type)
+        circle.use_three_point_method = True
+        circle.use_slerp_for_orientation = bool(use_slerp_for_orientation)
+        circle.midpoint = self._pose_from_pose_like(midpoint_pose)
+        circle.endpoint = self._pose_from_pose_like(endpoint_pose)
+        circle.rotate_angle = float(rotate_angle)
+        self._set_optional_float_field(circle, "max_linear_velocity", max_linear_velocity)
+        self._set_optional_float_field(circle, "max_linear_acceleration", max_linear_acceleration)
+        self._set_optional_float_field(circle, "max_linear_jerk", max_linear_jerk)
+        self._set_optional_float_field(circle, "max_angular_velocity", max_angular_velocity)
+        self._set_optional_float_field(circle, "max_angular_acceleration", max_angular_acceleration)
+        self._set_optional_float_field(circle, "max_angular_jerk", max_angular_jerk)
+        if right_midpoint_pose is not None:
+            circle.right_midpoint = self._pose_from_pose_like(right_midpoint_pose)
+        if right_endpoint_pose is not None:
+            circle.right_endpoint = self._pose_from_pose_like(right_endpoint_pose)
+        circle.right_rotate_angle = float(right_rotate_angle)
+        goal_msg.circle_params = circle
+        return self._send_motion_action_goal(
+            self.movec_action_client,
+            goal_msg,
+            action_label="MOVC",
+            control_type="arm_joint" if auto_switch_fsm else None,
+            feedback_callback=feedback_callback,
+            timeout=timeout,
+            wait_for_server_timeout=wait_for_server_timeout,
+        )
+
+    def execute_movec_action_parametric(
+        self,
+        arm_name: str,
+        center: Point | Tuple[float, float, float],
+        axis: Vector3 | Tuple[float, float, float],
+        rotate_angle: float,
+        *,
+        endpoint_pose: Optional[Pose | PoseStamped] = None,
+        duration: float = 6.0,
+        time_mode: bool = False,
+        frame_id: Optional[str] = None,
+        ik_type: Optional[str] = None,
+        use_slerp_for_orientation: bool = False,
+        right_center: Optional[Point | Tuple[float, float, float]] = None,
+        right_axis: Optional[Vector3 | Tuple[float, float, float]] = None,
+        right_rotate_angle: float = 0.0,
+        right_endpoint_pose: Optional[Pose | PoseStamped] = None,
+        max_linear_velocity: Optional[float] = None,
+        max_linear_acceleration: Optional[float] = None,
+        max_linear_jerk: Optional[float] = None,
+        max_angular_velocity: Optional[float] = None,
+        max_angular_acceleration: Optional[float] = None,
+        max_angular_jerk: Optional[float] = None,
+        auto_switch_fsm: bool = True,
+        feedback_callback: Optional[Callable[[Any], None]] = None,
+        timeout: float = 60.0,
+        wait_for_server_timeout: float = 5.0,
+    ) -> Any:
+        """Execute parameterized MOVC through ``MovecUseIK`` action using center/axis/angle mode."""
+        goal_msg = MovecUseIK.Goal()
+        circle = CircleMessage()
+        circle.arm_name = arm_name
+        circle.duration = float(duration)
+        circle.time_mode = bool(time_mode)
+        self._set_optional_string_field(circle, "frame_id", frame_id)
+        self._set_optional_string_field(circle, "ik_type", ik_type)
+        circle.use_three_point_method = False
+        circle.use_slerp_for_orientation = bool(use_slerp_for_orientation)
+        circle.center = self._point_from_value(center)
+        circle.axis = self._vector3_from_value(axis)
+        circle.rotate_angle = float(rotate_angle)
+        self._set_optional_float_field(circle, "max_linear_velocity", max_linear_velocity)
+        self._set_optional_float_field(circle, "max_linear_acceleration", max_linear_acceleration)
+        self._set_optional_float_field(circle, "max_linear_jerk", max_linear_jerk)
+        self._set_optional_float_field(circle, "max_angular_velocity", max_angular_velocity)
+        self._set_optional_float_field(circle, "max_angular_acceleration", max_angular_acceleration)
+        self._set_optional_float_field(circle, "max_angular_jerk", max_angular_jerk)
+        circle.endpoint.position = Point(x=0.0, y=0.0, z=0.0)
+        if endpoint_pose is not None:
+            circle.endpoint.orientation = self._pose_from_pose_like(endpoint_pose).orientation
+        else:
+            circle.endpoint.orientation = Quaternion(w=1.0, x=0.0, y=0.0, z=0.0)
+        if right_center is not None:
+            circle.right_center = self._point_from_value(right_center)
+        if right_axis is not None:
+            circle.right_axis = self._vector3_from_value(right_axis)
+        circle.right_rotate_angle = float(right_rotate_angle)
+        circle.right_endpoint.position = Point(x=0.0, y=0.0, z=0.0)
+        if right_endpoint_pose is not None:
+            circle.right_endpoint.orientation = self._pose_from_pose_like(right_endpoint_pose).orientation
+        elif arm_name == "both":
+            circle.right_endpoint.orientation = Quaternion(w=1.0, x=0.0, y=0.0, z=0.0)
+        goal_msg.circle_params = circle
+        return self._send_motion_action_goal(
+            self.movec_action_client,
+            goal_msg,
+            action_label="MOVC",
+            control_type="arm_joint" if auto_switch_fsm else None,
+            feedback_callback=feedback_callback,
+            timeout=timeout,
+            wait_for_server_timeout=wait_for_server_timeout,
+        )
 
     def _copy_pose(self, src: Pose, dst: Pose) -> None:
         """Copy pose data from src to dst."""
@@ -2611,6 +3079,18 @@ class ROS2RobotInterface:
         if self.execute_path_client:
             self.execute_path_client.destroy()
             self.execute_path_client = None
+
+        if self.joint_trajectory_action_client:
+            self.joint_trajectory_action_client.destroy()
+            self.joint_trajectory_action_client = None
+
+        if self.movel_action_client:
+            self.movel_action_client.destroy()
+            self.movel_action_client = None
+
+        if self.movec_action_client:
+            self.movec_action_client.destroy()
+            self.movec_action_client = None
 
         if self.dual_target_stamped_pub:
             self.dual_target_stamped_pub.destroy()
