@@ -1,3 +1,4 @@
+import math
 import time
 import sys
 from geometry_msgs.msg import Pose, Point, Quaternion
@@ -40,15 +41,37 @@ def wait_for_arrival(handler, max_wait: float, interval: float, threshold: float
             current_pose = handler.get_pose()
             target_pose = handler.get_target_pose()
             if current_pose:
-                print(
-                    f"    当前位姿: ({current_pose.position.x:.3f}, "
-                    f"{current_pose.position.y:.3f}, {current_pose.position.z:.3f})"
-                )
+                print_pose(current_pose, "当前位姿")
             if target_pose:
-                print(
-                    f"    目标位姿: ({target_pose.position.x:.3f}, "
-                    f"{target_pose.position.y:.3f}, {target_pose.position.z:.3f})"
+                print_pose(target_pose, "目标位姿")
+            if current_pose and target_pose:
+                dx = current_pose.position.x - target_pose.position.x
+                dy = current_pose.position.y - target_pose.position.y
+                dz = current_pose.position.z - target_pose.position.z
+                # 归一化四元数
+                cx, cy, cz, cw = (
+                    current_pose.orientation.x, current_pose.orientation.y,
+                    current_pose.orientation.z, current_pose.orientation.w,
                 )
+                cn = math.sqrt(cx*cx + cy*cy + cz*cz + cw*cw)
+                cx, cy, cz, cw = cx/cn, cy/cn, cz/cn, cw/cn
+                tx, ty, tz, tw = (
+                    target_pose.orientation.x, target_pose.orientation.y,
+                    target_pose.orientation.z, target_pose.orientation.w,
+                )
+                tn = math.sqrt(tx*tx + ty*ty + tz*tz + tw*tw)
+                tx, ty, tz, tw = tx/tn, ty/tn, tz/tn, tw/tn
+                # q_error = q_target_inv * q_current（单位四元数的逆 = 共轭）
+                ex = tw*cx - tx*cw - ty*cz + tz*cy
+                ey = tw*cy + tx*cz - ty*cw - tz*cx
+                ez = tw*cz - tx*cy + ty*cx - tz*cw
+                ew = tw*cw + tx*cx + ty*cy + tz*cz
+                angle_deg = 2.0 * math.degrees(math.acos(min(abs(ew), 1.0)))
+                dist = math.sqrt(dx*dx + dy*dy + dz*dz)
+                print(f"    差值:")
+                print(f"      位置:      ({dx:+7.4f}, {dy:+7.4f}, {dz:+7.4f})  欧式距离: {dist:.4f}m")
+                print(f"      误差四元数: ({ex:+6.4f}, {ey:+6.4f}, {ez:+6.4f}, {ew:+6.4f})")
+                print(f"      姿态误差角:  {angle_deg:.4f}°")
             return True
         time.sleep(interval)
 
