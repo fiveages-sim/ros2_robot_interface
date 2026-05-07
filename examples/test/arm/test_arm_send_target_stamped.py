@@ -11,7 +11,7 @@ from ros2_robot_interface import ROS2RobotInterface, ROS2RobotInterfaceConfig
 MAX_WAIT_TIME = 10.0      # 每步最大等待时间（秒）
 CHECK_INTERVAL = 0.5      # 到位检查间隔（秒）
 POSE_THRESHOLD = 0.05     # 位置距离阈值（米）
-ORIENT_THRESHOLD = 0.01    # 姿态阈值
+ORIENT_THRESHOLD = 5.0     # 姿态阈值（度），对应四元数距离 0.01
 STEP_SIZE = 0.1           # 每次移动距离（米）
 
 
@@ -74,12 +74,11 @@ def wait_for_arrival(
                 ez = tw*cz - tx*cy + ty*cx - tz*cw
                 ew = tw*cw + tx*cx + ty*cy + tz*cz
                 angle_deg = 2.0 * math.degrees(math.acos(min(abs(ew), 1.0)))
-                orient_dist = 1.0 - abs(ew)
                 dist = math.sqrt(dx*dx + dy*dy + dz*dz)
                 print(f"    差值:")
                 print(f"      位置:      ({dx:+7.4f}, {dy:+7.4f}, {dz:+7.4f})  欧式距离: {dist:.4f}m")
                 print(f"      误差四元数: ({ex:+6.4f}, {ey:+6.4f}, {ez:+6.4f}, {ew:+6.4f})")
-                print(f"      姿态误差角:  {angle_deg:.4f}°  四元数距离: {orient_dist:.4f}")
+                print(f"      姿态误差角:  {angle_deg:.4f}°")
             return True
         time.sleep(interval)
 
@@ -87,7 +86,7 @@ def wait_for_arrival(
     print(
         f"  ⚠ 超时（{max_wait:.0f}s），"
         f"位置距离: {result.get('position_distance', float('inf')):.4f}m  "
-        f"四元数距离: {result.get('orientation_distance', float('inf')):.4f}"
+        f"姿态误差角: {result.get('orientation_angle_deg', float('inf')):.4f}°"
     )
     return False
 
