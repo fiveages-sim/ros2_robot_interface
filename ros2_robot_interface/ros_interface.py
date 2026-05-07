@@ -2359,7 +2359,7 @@ class ROS2RobotInterface:
                   'left_gripper'、'right_gripper'、'arm'（单臂模式）、'gripper'（单臂模式）
             position_threshold: 关节位置阈值（仅用于 head 和 body），如果为 None 则使用默认值
             arm_pose_threshold: 笛卡尔末端位置容差（米），传给左右臂 ``check_arrival``；None 用 handler 默认
-            arm_orient_threshold: 笛卡尔末端姿态容差；None 用 handler 默认
+            arm_orient_threshold: 笛卡尔末端姿态角度容差（度）；None 用 handler 默认
         
         Returns:
             包含到达状态和距离信息的字典，如果未连接则返回 None
@@ -2461,7 +2461,7 @@ class ROS2RobotInterface:
             poll_period: Polling interval in seconds.
             position_threshold: Optional threshold forwarded to ``check_arrive`` (head/body 关节)。
             arm_pose_threshold: 左右臂笛卡尔到位：位置阈值（米），见 ``check_arrive``。
-            arm_orient_threshold: 左右臂笛卡尔到位：姿态阈值，见 ``check_arrive``。
+            arm_orient_threshold: 左右臂笛卡尔到位：姿态角度阈值（度），见 ``check_arrive``。
             time_now_fn: Optional custom clock function. Use this when timeout should
                 follow simulation time instead of wall time.
             sleep_fn: Optional sleep function paired with ``time_now_fn``.

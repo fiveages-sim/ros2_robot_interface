@@ -313,14 +313,14 @@ class ArmHandler:
         self.joint_controller_pub.publish(msg)
         print(f"Published {self.label.lower()} joint positions: {positions}", flush=True)
     
-    def check_arrival(self, pose_threshold: float | None = None, 
+    def check_arrival(self, pose_threshold: float | None = None,
                      orient_threshold: float | None = None) -> Dict[str, Any]:
         """检查手臂是否到达目标位置
-        
+
         Args:
             pose_threshold: 位置距离阈值（米），如果为 None 则使用 config.pose_position_threshold
-            orient_threshold: 姿态距离阈值，如果为 None 则使用 config.pose_orientation_threshold
-            
+            orient_threshold: 姿态角度阈值（度），如果为 None 则使用 config.pose_orientation_threshold
+
         Returns:
             包含到达状态、距离等信息的字典
         """
@@ -331,6 +331,7 @@ class ArmHandler:
         arrived = False
         pos_dist = float('inf')
         orient_dist = float('inf')
+        orient_angle_deg = float('inf')
         total_dist = float('inf')
         status_msg = None
         
@@ -377,17 +378,19 @@ class ArmHandler:
                           cqz * tqz)
             dot_product = max(-1.0, min(1.0, dot_product))
             orient_dist = 1.0 - abs(dot_product)
-            
+            orient_angle_deg = math.degrees(2.0 * math.acos(abs(dot_product)))
+
             total_dist = pos_dist + orient_dist * 0.1
-            arrived = (pos_dist < pose_threshold and orient_dist < orient_threshold)
-            
+            arrived = (pos_dist < pose_threshold and orient_angle_deg < orient_threshold)
+
             status_msg = f"{self.label}已到达目标位置" if arrived else f"{self.label}未到达目标位置"
-        
+
         return {
             'arrived': arrived,
             'distance': total_dist,
             'position_distance': pos_dist,
             'orientation_distance': orient_dist,
+            'orientation_angle_deg': orient_angle_deg,
             'status_message': status_msg
         }
     
