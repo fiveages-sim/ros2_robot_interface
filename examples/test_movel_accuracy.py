@@ -20,6 +20,9 @@ right_arm_joint_names = [
 left_target_pose_list = [(0.35, 0.4, -0.4, 0.707, 0.0, 0.707, 0.0),
                          (0.32, 0.43, -0.42, 0.6, 0.2, 0.6, 0.2)]
 
+left_joints_list = [[1.45, -1.06, -1.19, -0.80, -0.69, -0.68, -0.12,],
+                    [1.55, -1.06, -1.39, -0.30, -0.79, -0.68, -0.12,]]
+
 def create_pose(x, y, z, qx=0.0, qy=0.0, qz=0.0, qw=1.0) -> Pose:
     pose = Pose()
     pose.position = Point(x=x, y=y, z=z)
@@ -71,8 +74,14 @@ def main():
 
         print("\n[4] 发送直线 action...")
         duration = 3.0
-
-        for p in left_target_pose_list:
+        interface.set_node_parameters(
+            full_node_name="/ocs2_arm_controller",
+            parameters={"movej_duration": duration},
+        )
+        
+        for p, joints in zip(left_target_pose_list, left_joints_list):
+            interface.left_arm_handler.send_joint_positions(joints)
+            time.sleep(duration + 1.0)
             left_target_pose = create_pose(*p)
             result = interface.execute_movel_action(
                 "left",
