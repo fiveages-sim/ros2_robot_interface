@@ -7,7 +7,6 @@ import rclpy
 from geometry_msgs.msg import Pose, Point, Quaternion
 
 from ros2_robot_interface import ROS2RobotInterface, ROS2RobotInterfaceConfig
-from ros2_robot_interface.utils.quat_pose import quat_multiply, rotate_vector_by_quat
 
 
 left_arm_joint_names = [
@@ -41,30 +40,6 @@ def format_pose(pose: Pose) -> str:
         f"{pose.orientation.z:.6f}, {pose.orientation.w:.6f})"
     )
 
-def convert_eef_pose_in_base_to_tcp_pose_in_base(
-    eef_pose_in_base: Pose,
-    tcp_in_eef_translation: tuple[float, float, float],
-    tcp_in_eef_quaternion: tuple[float, float, float, float],
-) -> Pose:
-    eef_quaternion = (
-        eef_pose_in_base.orientation.x,
-        eef_pose_in_base.orientation.y,
-        eef_pose_in_base.orientation.z,
-        eef_pose_in_base.orientation.w,
-    )
-    offset_in_base = rotate_vector_by_quat(tcp_in_eef_translation, eef_quaternion)
-    tcp_pose_in_base = Pose()
-    tcp_pose_in_base.position.x = eef_pose_in_base.position.x + offset_in_base[0]
-    tcp_pose_in_base.position.y = eef_pose_in_base.position.y + offset_in_base[1]
-    tcp_pose_in_base.position.z = eef_pose_in_base.position.z + offset_in_base[2]
-    tcp_quaternion = quat_multiply(eef_quaternion, tcp_in_eef_quaternion)
-    tcp_pose_in_base.orientation = Quaternion(
-        x=tcp_quaternion[0],
-        y=tcp_quaternion[1],
-        z=tcp_quaternion[2],
-        w=tcp_quaternion[3],
-    )
-    return tcp_pose_in_base
 
 def pose_position_distance(pose_a: Pose, pose_b: Pose) -> float:
     dx = pose_a.position.x - pose_b.position.x
@@ -115,46 +90,16 @@ def main():
             full_node_name="/ocs2_arm_controller",
             parameters={"movej_duration": duration},
         )
-        tcp_in_eef_transform = interface.lookup_transform(
-            LEFT_EEF_FRAME,
-            LEFT_TCP_FRAME,
-            timeout=1.0,
-        )
-        if tcp_in_eef_transform is None:
-            print(f"    错误: 无法查询 {LEFT_TCP_FRAME} 在 {LEFT_EEF_FRAME} 下的固定变换")
-            return 1
-        tcp_in_eef_translation = (
-            tcp_in_eef_transform.transform.translation.x,
-            tcp_in_eef_transform.transform.translation.y,
-            tcp_in_eef_transform.transform.translation.z,
-        )
-        tcp_in_eef_quaternion = (
-            tcp_in_eef_transform.transform.rotation.x,
-            tcp_in_eef_transform.transform.rotation.y,
-            tcp_in_eef_transform.transform.rotation.z,
-            tcp_in_eef_transform.transform.rotation.w,
-        )
-        print(
-            f"    固定变换 {LEFT_TCP_FRAME} in {LEFT_EEF_FRAME}: "
-            f"trans={tcp_in_eef_translation}, quat={tcp_in_eef_quaternion}"
-        )
-        
         for index, (p, joints) in enumerate(zip(left_target_pose_list, left_joints_list), start=1):
             print(f"\n[5.{index}] 执行第 {index} 组测试")
             print(f"    MoveJ joints: {joints}")
             interface.left_arm_handler.send_joint_positions(joints)
             time.sleep(duration + 1.0)
             left_target_pose = create_pose(*p)
-            # print(f"    left_target_pose ({BASE_FRAME} 下的 {LEFT_EEF_FRAME}): {format_pose(left_target_pose)}")
-            left_target_pose_tcp = convert_eef_pose_in_base_to_tcp_pose_in_base(
-                left_target_pose,
-                tcp_in_eef_translation,
-                tcp_in_eef_quaternion,
-            )
-            # print(f"    left_target_pose_tcp ({BASE_FRAME} 下的 {LEFT_TCP_FRAME}): {format_pose(left_target_pose_tcp)}")
             result = interface.execute_movel_action(
                 "left",
-                left_target_pose_tcp,
+                left_target_pose,
+                eef_frame_name=LEFT_EEF_FRAME,
                 duration=duration,
                 time_mode=True,
                 frame_id=BASE_FRAME,

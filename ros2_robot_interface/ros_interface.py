@@ -39,6 +39,7 @@ from arms_ros2_control_msgs.srv import ExecutePath
 from .config import ControlType, ROS2RobotInterfaceConfig
 from .constants import FSM_HOLD, FSM_HOME, FSM_MOVEJ, FSM_OCS2
 from .utils.exceptions import ROS2AlreadyConnectedError, ROS2NotConnectedError
+from .utils.quat_pose import quat_multiply, rotate_vector_by_quat
 from .handler import ArmHandler, ArmType, GripperHandler, GripperType
 from .utils.discovery import (
     discover_topics as _discover_topics,
@@ -988,6 +989,49 @@ class ROS2RobotInterface:
             )
         return result
 
+    def _convert_eef_pose_to_tcp(
+        self,
+        eef_pose_in_ref: Pose,
+        eef_frame_name: str,
+        tcp_frame_name: str,
+    ) -> Pose:
+        if eef_frame_name == tcp_frame_name:
+            return eef_pose_in_ref
+        tcp_in_eef = self.lookup_transform(eef_frame_name, tcp_frame_name)
+        if tcp_in_eef is None:
+            raise ValueError(
+                f"无法查询 {tcp_frame_name} 在 {eef_frame_name} 下的变换，"
+                "请确认 TF 树中存在该静态变换"
+            )
+        tcp_in_eef_translation = (
+            tcp_in_eef.transform.translation.x,
+            tcp_in_eef.transform.translation.y,
+            tcp_in_eef.transform.translation.z,
+        )
+        tcp_in_eef_quaternion = (
+            tcp_in_eef.transform.rotation.x,
+            tcp_in_eef.transform.rotation.y,
+            tcp_in_eef.transform.rotation.z,
+            tcp_in_eef.transform.rotation.w,
+        )
+        eef_quaternion = (
+            eef_pose_in_ref.orientation.x,
+            eef_pose_in_ref.orientation.y,
+            eef_pose_in_ref.orientation.z,
+            eef_pose_in_ref.orientation.w,
+        )
+        offset_in_ref = rotate_vector_by_quat(tcp_in_eef_translation, eef_quaternion)
+        tcp_quaternion = quat_multiply(eef_quaternion, tcp_in_eef_quaternion)
+        tcp_pose = Pose()
+        tcp_pose.position.x = eef_pose_in_ref.position.x + offset_in_ref[0]
+        tcp_pose.position.y = eef_pose_in_ref.position.y + offset_in_ref[1]
+        tcp_pose.position.z = eef_pose_in_ref.position.z + offset_in_ref[2]
+        tcp_pose.orientation.x = tcp_quaternion[0]
+        tcp_pose.orientation.y = tcp_quaternion[1]
+        tcp_pose.orientation.z = tcp_quaternion[2]
+        tcp_pose.orientation.w = tcp_quaternion[3]
+        return tcp_pose
+
     @staticmethod
     def _pose_from_pose_like(pose: Pose | PoseStamped) -> Pose:
         return pose.pose if isinstance(pose, PoseStamped) else pose
@@ -1145,6 +1189,7 @@ class ROS2RobotInterface:
         arm_name: str,
         endpoint_pose: Pose | PoseStamped,
         *,
+        eef_frame_name: str,
         duration: float = 3.0,
         time_mode: bool = True,
         frame_id: Optional[str] = None,
@@ -1179,7 +1224,11 @@ class ROS2RobotInterface:
         self._set_optional_float_field(linear, "max_angular_velocity", max_angular_velocity)
         self._set_optional_float_field(linear, "max_angular_acceleration", max_angular_acceleration)
         self._set_optional_float_field(linear, "max_angular_jerk", max_angular_jerk)
-        linear.endpoint = self._pose_from_pose_like(endpoint_pose)
+        linear.endpoint = self._convert_eef_pose_to_tcp(
+            self._pose_from_pose_like(endpoint_pose),
+            eef_frame_name,
+            f"{arm_name}_tcp",
+        )
         if right_endpoint_pose is not None:
             linear.right_endpoint = self._pose_from_pose_like(right_endpoint_pose)
         goal_msg.linear_params = linear
