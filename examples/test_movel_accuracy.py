@@ -17,11 +17,15 @@ right_arm_joint_names = [
             "right_joint1", "right_joint2", "right_joint3", "right_joint4",
             "right_joint5", "right_joint6", "right_joint7"]
 
-left_target_pose_list = [(0.35, 0.4, -0.4, 0.707, 0.0, 0.707, 0.0),
-                         (0.32, 0.43, -0.42, 0.6, 0.2, 0.6, 0.2)]
+right_target_pose_list = [(0.618796, -0.293836, -0.324952, -0.054354, 0.929983, 0.042920, 0.361019),
+    (0.689166, -0.130224, -0.055759, 0.689166, 0.043334, 0.722217, 0.039698),
+    (0.887050, -0.130224, -0.053759, 0.689166, 0.043334, 0.722217, 0.039698)]
 
-left_joints_list = [[1.45, -1.06, -1.19, -0.80, -0.69, -0.68, -0.12,],
-                    [1.55, -1.06, -1.39, -0.30, -0.79, -0.68, -0.12,]]
+right_joints_list = [ [-0.030256, -0.705494, -0.687498, -1.450485, -1.151796, -0.061196, 0.291313],
+    [0.261272, 1.105138, -0.795491, -2.036942, 0.971640, -0.427064, 0.347758],
+                    [2.083978, 1.284779, -2.099271, -1.875444, 0.417265, 0.582475, -0.597217]]
+
+right_initial_joints = [0.0, -0.785, 0.0, -1.57, 0.0, 0.0, 0.0]
 
 BASE_FRAME = "arm_base"
 LEFT_EEF_FRAME = "left_eef"
@@ -90,38 +94,41 @@ def main():
             full_node_name="/ocs2_arm_controller",
             parameters={"movej_duration": duration},
         )
-        for index, (p, joints) in enumerate(zip(left_target_pose_list, left_joints_list), start=1):
+        for index, (p, joints) in enumerate(zip(right_target_pose_list, right_joints_list), start=1):
             print(f"\n[5.{index}] 执行第 {index} 组测试")
-            print(f"    MoveJ joints: {joints}")
-            interface.left_arm_handler.send_joint_positions(joints)
+            print(f"    MoveJ to initial joints: {right_initial_joints}")
+            interface.right_arm_handler.send_joint_positions(right_initial_joints)
             time.sleep(duration + 1.0)
-            left_target_pose = create_pose(*p)
+            print(f"    MoveJ joints: {joints}")
+            interface.right_arm_handler.send_joint_positions(joints)
+            time.sleep(duration + 1.0)
+            right_target_pose = create_pose(*p)
             result = interface.execute_movel_action(
-                "left",
-                left_target_pose,
-                eef_frame_name=LEFT_EEF_FRAME,
+                "right",
+                right_target_pose,
+                eef_frame_name="right_eef",
                 duration=duration,
                 time_mode=True,
-                frame_id=BASE_FRAME,
+                frame_id="arm_base",
             )
             if not result or not result.success:
                 print(f"    MOVL 执行失败, result={result}")
                 return 1
             time.sleep(0.2)
-            left_final_pose = interface.left_arm_handler.get_pose()
-            if left_final_pose is None:
-                print("    错误: 未收到 left_final_pose")
+            right_final_pose = interface.right_arm_handler.get_pose()
+            if right_final_pose is None:
+                print("    错误: 未收到 right_final_pose")
                 return 1
-            # print(f"    left_final_pose (订阅话题): {format_pose(left_final_pose)}")
-            left_distance = pose_position_distance(left_final_pose, left_target_pose)
-            left_rotation_distance = pose_orientation_distance(left_final_pose, left_target_pose)
+            # print(f"    right_final_pose (订阅话题): {format_pose(right_final_pose)}")
+            right_distance = pose_position_distance(right_final_pose, right_target_pose)
+            right_rotation_distance = pose_orientation_distance(right_final_pose, right_target_pose)
             print(
-                f"    left_final_pose 与 left_target_pose "
-                f"({BASE_FRAME} 下的 {LEFT_EEF_FRAME}) 的位置距离: {left_distance:.6f} m"
+                f"    right_final_pose 与 right_target_pose "
+                f"({BASE_FRAME} 下的 right_eef) 的位置距离: {right_distance:.6f} m"
             )
             print(
-                f"    left_final_pose 与 left_target_pose ({BASE_FRAME} 下的 {LEFT_EEF_FRAME}) 的旋转差距: "
-                f"{left_rotation_distance:.6f} rad ({math.degrees(left_rotation_distance):.3f} deg)"
+                f"    right_final_pose 与 right_target_pose ({BASE_FRAME} 下的 right_eef) 的旋转差距: "
+                f"{right_rotation_distance:.6f} rad ({math.degrees(right_rotation_distance):.3f} deg)"
             )
         return 0
 
