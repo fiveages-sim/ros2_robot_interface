@@ -1189,7 +1189,7 @@ class ROS2RobotInterface:
         arm_name: str,
         endpoint_pose: Pose | PoseStamped,
         *,
-        eef_frame_name: str,
+        # eef_frame_name: str,
         duration: float = 3.0,
         time_mode: bool = True,
         frame_id: Optional[str] = None,
@@ -1224,11 +1224,15 @@ class ROS2RobotInterface:
         self._set_optional_float_field(linear, "max_angular_velocity", max_angular_velocity)
         self._set_optional_float_field(linear, "max_angular_acceleration", max_angular_acceleration)
         self._set_optional_float_field(linear, "max_angular_jerk", max_angular_jerk)
-        linear.endpoint = self._convert_eef_pose_to_tcp(
-            self._pose_from_pose_like(endpoint_pose),
-            eef_frame_name,
-            f"{arm_name}_tcp",
-        )
+        # linear.endpoint = self._convert_eef_pose_to_tcp(
+        #     self._pose_from_pose_like(endpoint_pose),
+        #     eef_frame_name,
+        #     f"{arm_name}_eef",
+        # )
+        # if right_endpoint_pose is not None:
+        #     linear.right_endpoint = self._pose_from_pose_like(right_endpoint_pose)
+        # 直接赋值，不做坐标转换
+        linear.endpoint = self._pose_from_pose_like(endpoint_pose)
         if right_endpoint_pose is not None:
             linear.right_endpoint = self._pose_from_pose_like(right_endpoint_pose)
         goal_msg.linear_params = linear

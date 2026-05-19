@@ -160,7 +160,7 @@ class LinearTrajectoryClient(Node):
         req = KinematicsService.Request()
         req.operation_type = "fk"
         req.arm_type = arm_name
-        req.solver_type = "SDK"
+        req.solver_type = "DLS"
         req.joint_angles = joint_angles
         
         if not self.kinematics_client.wait_for_service(timeout_sec=1.0):
@@ -264,7 +264,7 @@ class LinearTrajectoryClient(Node):
             self.get_logger().error(f'调用MoveJ服务失败: {e}')
             return False
 
-    def create_linear_request(self, arm_name, endpoint_pose, duration=3.0, ik_type="SDK"):
+    def create_linear_request(self, arm_name, endpoint_pose, duration=3.0, ik_type="DLS"):
         """创建直线服务请求"""
         request = ExecuteLinear.Request()
         linear = LinearMessage()
@@ -527,7 +527,7 @@ def main():
     print(f"\n[12] 执行{test_name}直线运动...")
     
     if choice == '1':
-        linear_req = client.create_linear_request("left", left_target_pose, duration, ik_type="SDK")
+        linear_req = client.create_linear_request("left", left_target_pose, duration, ik_type="DLS")
         response = client.call_linear_service_with_recording(linear_req, "left")
         
         if response and response.success:
@@ -541,7 +541,7 @@ def main():
             print("✗ 直线运动失败")
             
     elif choice == '2':
-        linear_req = client.create_linear_request("right", right_target_pose, duration, ik_type="SDK")
+        linear_req = client.create_linear_request("right", right_target_pose, duration, ik_type="DLS")
         response = client.call_linear_service_with_recording(linear_req, "right")
         
         if response and response.success:
@@ -558,7 +558,7 @@ def main():
         # 先左臂
         print("\n  执行左臂直线运动...")
         client.pose_recorder.start_recording("left", 'left_linear')
-        left_req = client.create_linear_request("left", left_target_pose, duration, ik_type="SDK")
+        left_req = client.create_linear_request("left", left_target_pose, duration, ik_type="DLS")
         left_response = client.call_linear_service_with_recording(left_req, "left")
         
         if left_response and left_response.success:
@@ -576,7 +576,7 @@ def main():
         
         print("\n  执行右臂直线运动...")
         client.pose_recorder.start_recording("right", 'right_linear')
-        right_req = client.create_linear_request("right", right_target_pose, duration, ik_type="SDK")
+        right_req = client.create_linear_request("right", right_target_pose, duration, ik_type="DLS")
         right_response = client.call_linear_service_with_recording(right_req, "right")
         
         if right_response and right_response.success:

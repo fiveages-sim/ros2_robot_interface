@@ -106,7 +106,7 @@ def main():
             result = interface.execute_movel_action(
                 "right",
                 right_target_pose,
-                eef_frame_name="right_eef",
+                # eef_frame_name="right_eef",
                 duration=duration,
                 time_mode=True,
                 frame_id="arm_base",
