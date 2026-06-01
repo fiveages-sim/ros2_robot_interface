@@ -789,6 +789,47 @@ body_positions = [0.0, 0.0, 0.0, 0.0]  # 弧度
 interface.send_body_joint_positions(body_positions)
 ```
 
+#### `send_waist_lifting_pose_relative(dx: float, dz: float, dphi: float) -> None`
+
+**功能：** 发送腰部局部 x/z/phi 相对移动命令
+
+**参数：**
+- `dx` (`float`): 局部 x 方向相对位移
+- `dz` (`float`): 局部 z 方向相对位移
+- `dphi` (`float`): 局部平面角相对变化，单位 rad
+
+**说明：**
+- 发布到 `/body_joint_controller/waist_lifting_pose_relative`
+- 消息类型为 `std_msgs/msg/Float64MultiArray`
+- 实际数据为 `[dx, dz, dphi]`
+- 控制器侧要求当前状态为 MOVEJ
+
+**示例：**
+```python
+interface.send_waist_lifting_pose_relative(0.02, 0.05, 0.10)
+```
+
+#### `send_waist_lifting_pose_absolute(x: float, z: float, phi: float) -> None`
+
+**功能：** 发送腰部 x/z/phi 绝对目标命令
+
+**参数：**
+- `x` (`float`): `base_footprint` 坐标系下目标 x
+- `z` (`float`): `base_footprint` 坐标系下目标 z
+- `phi` (`float`): `body_base` 平面角目标，单位 rad
+
+**说明：**
+- 发布到 `/body_joint_controller/waist_lifting_pose_absolute`
+- 消息类型为 `std_msgs/msg/Float64MultiArray`
+- 实际数据为 `[x, z, phi]`
+- 控制器侧会将 `(x, z)` 从 `base_footprint` 转到 `body_base` 后执行
+- 控制器侧要求当前状态为 MOVEJ
+
+**示例：**
+```python
+interface.send_waist_lifting_pose_absolute(0.12, 0.45, 0.20)
+```
+
 ---
 
 ### 获取状态
