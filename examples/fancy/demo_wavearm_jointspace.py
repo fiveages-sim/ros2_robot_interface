@@ -16,7 +16,7 @@ def main():
     # ========================================================================
     # 配置参数
     # ========================================================================
-    TRAJECTORY_EXECUTION_WAIT_TIME = 6.0  # 轨迹执行完成后的等待时间（秒）
+    TRAJECTORY_EXECUTION_WAIT_TIME = 12.0  # 轨迹执行完成后的等待时间（秒）
 
     print("\n" + "=" * 70)
     print(" " * 15 + "W2 Robot Wave Arm Joint Space Demo")
@@ -200,7 +200,8 @@ def main():
                 print(f"  → 发送右臂关节轨迹（{len(right_arm_wave_waypoints)}个目标点）...")
                 interface.send_joint_trajectory(
                     joint_names=right_arm_joint_names,
-                    waypoints=right_arm_wave_waypoints
+                    waypoints=right_arm_wave_waypoints,
+                    trajectory_duration=6.0
                 )
                 print("  ✓ 右臂轨迹已发送")
             else:
@@ -210,7 +211,8 @@ def main():
                 print(f"     右臂: 回到位置 {right_arm_home_position}")
                 interface.send_joint_trajectory(
                     joint_names=left_arm_wave_with_right_arm_home_joint_names,
-                    waypoints=left_arm_wave_with_right_arm_home_waypoints
+                    waypoints=left_arm_wave_with_right_arm_home_waypoints,
+                    trajectory_duration=6.0
                 )
                 print("  ✓ 左臂挥手+右臂回位轨迹已发送")
 

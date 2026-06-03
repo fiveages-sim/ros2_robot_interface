@@ -1850,7 +1850,8 @@ class ROS2RobotInterface:
 
     def send_joint_trajectory(self,
                              joint_names: List[str],
-                             waypoints: List[List[float]]) -> None:
+                             waypoints: List[List[float]],
+                             trajectory_duration: float | None = None) -> None:
         """Send multi-node joint trajectory for arm joints.
         
         This method uses a unified topic for both single-arm and dual-arm control.
@@ -1864,6 +1865,9 @@ class ROS2RobotInterface:
             waypoints: List of waypoints, each waypoint is a list of joint positions
                       Note: Current joint position will be added as first waypoint automatically
                       Each waypoint must have the same length as joint_names
+            trajectory_duration: Optional total trajectory time in seconds. When set, updates the
+                      arm controller ROS parameter ``movej_trajectory_duration`` before publishing
+                      (same as ros2-viser controller config). ``None`` leaves the current parameter value.
         
         Raises:
             ROS2NotConnectedError: If interface is not connected
@@ -1888,6 +1892,17 @@ class ROS2RobotInterface:
         for i, waypoint in enumerate(waypoints):
             if len(waypoint) != len(joint_names):
                 raise ValueError(f"Waypoint {i} has {len(waypoint)} positions, but expected {len(joint_names)}")
+
+        if trajectory_duration is not None:
+            if trajectory_duration <= 0:
+                raise ValueError("trajectory_duration must be positive")
+            ctrl = self.arm_controller
+            if not ctrl:
+                raise ROS2NotConnectedError(
+                    "Arm controller node unknown; cannot set movej_trajectory_duration"
+                )
+            if not self.set_node_parameters(ctrl, {"movej_trajectory_duration": trajectory_duration}):
+                logger.warning("Failed to set movej_trajectory_duration on %s", ctrl)
         
         # Create JointTrajectory message
         trajectory_msg = JointTrajectory()

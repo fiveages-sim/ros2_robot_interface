@@ -1151,9 +1151,12 @@ ok = interface.execute_path(
 print(f"execute_path success: {ok}")
 ```
 
-#### `send_joint_trajectory(joint_names: List[str], waypoints: List[List[float]]) -> None`
+#### `send_joint_trajectory(joint_names: List[str], waypoints: List[List[float]], trajectory_duration: float | None = None) -> None`
 
 **功能：** 发送多路点关节轨迹（`JointTrajectory`），支持单臂/双臂统一接口。
+
+**参数：**
+- `trajectory_duration`：可选，整条轨迹总时长（秒）。若指定，会在发布前将臂控制器节点参数 `movej_trajectory_duration` 设为该值（与 ros2-viser 控制器配置一致）；`None` 则沿用控制器当前参数。
 
 **示例：**
 ```python
@@ -1163,7 +1166,7 @@ waypoints = [
     [0.0, 0.3, -0.2, 0.0, 1.2, 0.0, 0.0],
     [0.1, 0.4, -0.3, 0.1, 1.1, 0.1, 0.0],
 ]
-interface.send_joint_trajectory(joint_names, waypoints)
+interface.send_joint_trajectory(joint_names, waypoints, trajectory_duration=5.0)
 ```
 
 ---
