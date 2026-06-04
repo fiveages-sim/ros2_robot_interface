@@ -163,8 +163,25 @@ class ROS2RobotInterface:
 
     @property
     def body_controller(self) -> str:
-        """躯干/腰关节控制器在 ROS 中的节点全名（由 ``body_joint_controller_topic`` 推断），供 ``set_node_parameters`` 等使用。"""
-        return self._controller_node_from_topic(self.config.body_joint_controller_topic)
+        """躯干/腰关节控制器节点全名，供 ``set_node_parameters`` 等使用。
+
+        兼容两类栈：
+        - split 栈：优先由 ``body_joint_controller_topic`` 推断；
+        - WBC unified 栈：若无独立 body topic，但检测到 WBC 统一控制器可携带 body
+          通道（或至少识别到 WBC），回退到 unified arm 控制器节点，避免上层
+          MoveJ 编排因 ``interface.body_controller`` 为空而直接报错。
+        """
+        node = self._controller_node_from_topic(self.config.body_joint_controller_topic)
+        if node:
+            return node
+
+        # WBC unified 栈通常没有独立 body_joint_controller_topic。
+        # 此时复用 unified 控制器节点用于参数设置（例如 movej duration）。
+        if self.is_wbc and (
+            self._wbc_has_body_joint_topic or self.config.unified_arm_joint_controller_topic
+        ):
+            return self.arm_controller
+        return ""
 
     @property
     def arm_controller(self) -> str:
