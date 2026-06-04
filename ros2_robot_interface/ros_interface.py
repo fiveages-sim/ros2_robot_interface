@@ -91,6 +91,8 @@ class ROS2RobotInterface:
         self.arm_trajectory_pub: Publisher | None = None  # Unified trajectory publisher for both arms
         self.unified_arm_joint_controller_pub: Publisher | None = None  # Unified joint position publisher for both arms
 
+        self.waist_lifting_pose_relative_pub: Publisher | None = None
+        self.waist_lifting_pose_absolute_pub: Publisher | None = None
         self.waist_lifting_command_pub: Publisher | None = None
         self.waist_turning_command_pub: Publisher | None = None
 
@@ -306,6 +308,12 @@ class ROS2RobotInterface:
 
         if "/body_joint_controller/waist_lifting" in topic_names:
             self.config.waist_lifting_topic = "/body_joint_controller/waist_lifting"
+
+        if "/body_joint_controller/waist_lifting_pose_relative" in topic_names:
+            self.config.waist_lifting_pose_relative_topic = "/body_joint_controller/waist_lifting_pose_relative"
+
+        if "/body_joint_controller/waist_lifting_pose_absolute" in topic_names:
+            self.config.waist_lifting_pose_absolute_topic = "/body_joint_controller/waist_lifting_pose_absolute"
 
         if "/body_joint_controller/waist_lifting_command" in topic_names:
             self.config.waist_lifting_command_topic = "/body_joint_controller/waist_lifting_command"
@@ -530,6 +538,16 @@ class ROS2RobotInterface:
             if self.config.waist_lifting_topic:
                 self.waist_lifting_pub = self.robot_node.create_publisher(
                     Float64, self.config.waist_lifting_topic, 10
+                )
+
+            if self.config.waist_lifting_pose_relative_topic:
+                self.waist_lifting_pose_relative_pub = self.robot_node.create_publisher(
+                    Float64MultiArray, self.config.waist_lifting_pose_relative_topic, 10
+                )
+
+            if self.config.waist_lifting_pose_absolute_topic:
+                self.waist_lifting_pose_absolute_pub = self.robot_node.create_publisher(
+                    Float64MultiArray, self.config.waist_lifting_pose_absolute_topic, 10
                 )
 
             if self.config.waist_lifting_command_topic:
@@ -1279,6 +1297,56 @@ class ROS2RobotInterface:
         self.waist_lifting_pub.publish(msg)
         logger.debug(f"Published waist lifting relative position: {position}")
 
+    def send_waist_lifting_pose_relative(self, dx: float, dz: float, dphi: float) -> None:
+        """Send local relative waist x/z/phi delta.
+
+        Args:
+            dx: Local x delta.
+            dz: Local z delta.
+            dphi: Local planar angle delta in radians.
+        """
+        if not self.is_connected:
+            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+
+        if self.waist_lifting_pose_relative_pub is None:
+            logger.warning(
+                "Waist lifting pose relative publisher not initialized. "
+                "Set waist_lifting_pose_relative_topic in config."
+            )
+            return
+
+        self.auto_switch_fsm_for_control("body_joint")
+
+        msg = Float64MultiArray()
+        msg.data = [dx, dz, dphi]
+        self.waist_lifting_pose_relative_pub.publish(msg)
+        logger.debug(f"Published waist lifting pose relative: {[dx, dz, dphi]}")
+
+    def send_waist_lifting_pose_absolute(self, x: float, z: float, phi: float) -> None:
+        """Send absolute waist x/z/phi target.
+
+        Args:
+            x: Target x in base_footprint.
+            z: Target z in base_footprint.
+            phi: Target planar angle in radians.
+        """
+        if not self.is_connected:
+            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+
+        if self.waist_lifting_pose_absolute_pub is None:
+            logger.warning(
+                "Waist lifting pose absolute publisher not initialized. "
+                "Set waist_lifting_pose_absolute_topic in config."
+            )
+            return
+
+        self.auto_switch_fsm_for_control("body_joint")
+
+        msg = Float64MultiArray()
+        msg.data = [x, z, phi]
+        self.waist_lifting_pose_absolute_pub.publish(msg)
+        logger.debug(f"Published waist lifting pose absolute: {[x, z, phi]}")
+
     def send_waist_lifting_velocity_scale(self, velocity_scale: float) -> None:
         """Send target velocity for waist lifting."""
         if not self.is_connected:
@@ -1799,7 +1867,8 @@ class ROS2RobotInterface:
 
     def send_joint_trajectory(self,
                              joint_names: List[str],
-                             waypoints: List[List[float]]) -> None:
+                             waypoints: List[List[float]],
+                             trajectory_duration: float | None = None) -> None:
         """Send multi-node joint trajectory for arm joints.
         
         This method uses a unified topic for both single-arm and dual-arm control.
@@ -1813,6 +1882,9 @@ class ROS2RobotInterface:
             waypoints: List of waypoints, each waypoint is a list of joint positions
                       Note: Current joint position will be added as first waypoint automatically
                       Each waypoint must have the same length as joint_names
+            trajectory_duration: Optional total trajectory time in seconds. When set, updates the
+                      arm controller ROS parameter ``movej_trajectory_duration`` before publishing
+                      (same as ros2-viser controller config). ``None`` leaves the current parameter value.
         
         Raises:
             ROS2NotConnectedError: If interface is not connected
@@ -1837,6 +1909,17 @@ class ROS2RobotInterface:
         for i, waypoint in enumerate(waypoints):
             if len(waypoint) != len(joint_names):
                 raise ValueError(f"Waypoint {i} has {len(waypoint)} positions, but expected {len(joint_names)}")
+
+        if trajectory_duration is not None:
+            if trajectory_duration <= 0:
+                raise ValueError("trajectory_duration must be positive")
+            ctrl = self.arm_controller
+            if not ctrl:
+                raise ROS2NotConnectedError(
+                    "Arm controller node unknown; cannot set movej_trajectory_duration"
+                )
+            if not self.set_node_parameters(ctrl, {"movej_trajectory_duration": trajectory_duration}):
+                logger.warning("Failed to set movej_trajectory_duration on %s", ctrl)
         
         # Create JointTrajectory message
         trajectory_msg = JointTrajectory()
@@ -2669,6 +2752,14 @@ class ROS2RobotInterface:
         if self.unified_arm_joint_controller_pub:
             self.unified_arm_joint_controller_pub.destroy()
             self.unified_arm_joint_controller_pub = None
+
+        if self.waist_lifting_pose_relative_pub:
+            self.waist_lifting_pose_relative_pub.destroy()
+            self.waist_lifting_pose_relative_pub = None
+
+        if self.waist_lifting_pose_absolute_pub:
+            self.waist_lifting_pose_absolute_pub.destroy()
+            self.waist_lifting_pose_absolute_pub = None
 
         if self.waist_lifting_command_pub:
             self.waist_lifting_command_pub.destroy()
