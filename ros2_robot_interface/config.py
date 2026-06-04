@@ -81,6 +81,13 @@ class ROS2RobotInterfaceConfig:
     left_arm_joint_controller_topic: str | None = None  # 【自动检测或可手动】左臂/单臂链关节 MoveJ 话题；单臂 OCS2 常为 /ocs2_arm_controller/target_joint_position
     right_arm_joint_controller_topic: str | None = None  # 【自动检测】右臂关节控制器话题（双臂模式时自动检测）
     unified_arm_joint_controller_topic: str | None = None  # 【自动检测】统一双臂关节控制器话题（如 /ocs2_wbc_controller/target_joint_position 或 /ocs2_arm_controller/target_joint_position）
+
+    # ============================================================================
+    # 参数化笛卡尔轨迹 Action（可选，手动配置）
+    # ============================================================================
+    joint_trajectory_action_name: str | None = "/ocs2_arm_controller/joint_trajectory_with_para"  # 带参数/反馈的 MoveJ action
+    movel_action_name: str | None = "/ocs2_arm_controller/execute_linear"  # 带参数/反馈的 MOVEL action
+    movec_action_name: str | None = "/ocs2_arm_controller/execute_circle_use_ik"  # 带参数/反馈的 MOVEC action
     
     # ============================================================================
     # 关节配置（未使用，预留）
@@ -183,7 +190,7 @@ class ROS2RobotInterfaceConfig:
     position_threshold: float = 0.05  # 【可选】关节位置阈值（单位：弧度），用于 check_arrive 检查头部、身体关节是否到达目标位置
     gripper_position_threshold: float = 0.01  # 【可选】夹爪位置阈值（单位：0.0-1.0），用于 check_arrive 检查夹爪是否到达目标位置
     pose_position_threshold: float = 0.05  # 【可选】位姿位置阈值（单位：米），用于 arm_handler.check_arrival 检查末端执行器位置是否到达目标
-    pose_orientation_threshold: float = 0.1  # 【可选】位姿姿态阈值（单位：四元数距离），用于 arm_handler.check_arrival 检查末端执行器姿态是否到达目标
+    pose_orientation_threshold: float = 5.0  # 【可选】位姿姿态阈值（单位：度），用于 arm_handler.check_arrival 检查末端执行器姿态是否到达目标
     gripper_stability_history_size: int = 20  # 【可选】夹爪位置历史记录数量，用于夹爪稳定性检查
     gripper_stability_threshold: float = 0.0001  # 【可选】夹爪位置稳定性阈值，用于判断夹爪位置是否稳定
 
