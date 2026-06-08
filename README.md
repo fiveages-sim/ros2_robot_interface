@@ -68,6 +68,24 @@ interface.left_gripper_handler.send_joint_positions(0.5)  # 行程/开度目标�
 interface.disconnect()
 ```
 
+## Center of Mass
+
+`ROS2RobotInterface` can compute the robot center of mass from cached `/robot_description`
+and `/joint_states` when Pinocchio Python is available in the current environment.
+
+```python
+from ros2_robot_interface import ROS2RobotInterface, ROS2RobotInterfaceConfig
+
+robot = ROS2RobotInterface(ROS2RobotInterfaceConfig(joint_states_topic="/joint_states"))
+robot.connect()
+try:
+    com = robot.get_center_of_mass()
+    if com is not None:
+        print(com.xyz, com.frame_id)
+finally:
+    robot.disconnect()
+```
+
 ### Configuration Options
 
 ```python

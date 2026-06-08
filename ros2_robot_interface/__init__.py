@@ -12,6 +12,7 @@ from .utils.exceptions import (
     ROS2NotConnectedError,
     ROS2AlreadyConnectedError,
 )
+from .dynamics import ComEstimate, ComEstimator, ComEstimatorError
 from .ros_interface import ROS2RobotInterface
 
 __version__ = "0.1.0"
@@ -27,4 +28,7 @@ __all__ = [
     "ROS2InterfaceError",
     "ROS2NotConnectedError",
     "ROS2AlreadyConnectedError",
+    "ComEstimate",
+    "ComEstimator",
+    "ComEstimatorError",
 ]

@@ -47,6 +47,7 @@ from .utils.discovery import (
     list_node_parameters as _list_node_parameters,
     set_node_parameters as _set_node_parameters,
 )
+from .dynamics import ComEstimate, ComEstimator, ComEstimatorError
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +122,8 @@ class ROS2RobotInterface:
         # Robot description tracking
         self.latest_robot_description: Optional[str] = None
         self._robot_description_received = False
+        self._com_estimator: Optional[ComEstimator] = None
+        self._com_estimator_urdf: Optional[str] = None
         self._connected = False
         
         self.last_joint_state_time = 0.0
@@ -1765,6 +1768,53 @@ class ROS2RobotInterface:
             True if robot description has been received, False otherwise.
         """
         return self._robot_description_received
+
+    def _latest_joint_positions_by_name(self) -> Dict[str, float]:
+        """Return latest joint positions keyed by joint name."""
+        if not self.latest_joint_state:
+            return {}
+        names = self.latest_joint_state.get("names") or []
+        positions = self.latest_joint_state.get("positions") or []
+        return {
+            str(name): float(position)
+            for name, position in zip(names, positions)
+        }
+
+    def get_center_of_mass(
+        self,
+        *,
+        frame_id: str = "base_footprint",
+        allow_missing_with_neutral: bool = False,
+    ) -> Optional[ComEstimate]:
+        """Compute robot center of mass from cached robot_description and joint_states.
+
+        Returns:
+            `ComEstimate` if URDF and joint states are available, otherwise `None`.
+
+        Raises:
+            ComEstimatorError: if Pinocchio is unavailable or required q joints are missing.
+        """
+        if not self.latest_robot_description:
+            logger.warning("Cannot compute CoM: /robot_description has not been received")
+            return None
+
+        joint_positions = self._latest_joint_positions_by_name()
+        if not joint_positions:
+            logger.warning("Cannot compute CoM: /joint_states has not been received")
+            return None
+
+        if (
+            self._com_estimator is None
+            or self._com_estimator_urdf != self.latest_robot_description
+            or self._com_estimator.frame_id != frame_id
+        ):
+            self._com_estimator = ComEstimator(self.latest_robot_description, frame_id=frame_id)
+            self._com_estimator_urdf = self.latest_robot_description
+
+        return self._com_estimator.compute(
+            joint_positions,
+            allow_missing_with_neutral=allow_missing_with_neutral,
+        )
     
     def send_head_joint_positions(self, positions: List[float]) -> None:
         """Send target joint positions for head joints."""
