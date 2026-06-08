@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from typing import Mapping
 import xml.etree.ElementTree as ET
 
@@ -19,6 +20,41 @@ else:
 
 class ComEstimatorError(RuntimeError):
     """Raised when CoM estimation cannot be performed safely."""
+
+
+class SupportStatus(str, Enum):
+    """Support-region classification for the current CoM projection."""
+
+    SAFE = "safe"
+    WARNING = "warning"
+    VIOLATION = "violation"
+
+
+@dataclass(frozen=True)
+class SupportRectangle:
+    """Rectangular CoM support region in one frame."""
+
+    x_min: float
+    x_max: float
+    y_min: float
+    y_max: float
+    margin: float = 0.0
+    frame_id: str = "base_footprint"
+
+
+@dataclass(frozen=True)
+class SupportMargins:
+    """Raw and safety margins from the CoM projection to a rectangular support region."""
+
+    status: SupportStatus
+    raw_margin_x_min: float
+    raw_margin_x_max: float
+    raw_margin_y_min: float
+    raw_margin_y_max: float
+    safe_margin_x_min: float
+    safe_margin_x_max: float
+    safe_margin_y_min: float
+    safe_margin_y_max: float
 
 
 @dataclass(frozen=True)
@@ -50,6 +86,76 @@ class MimicJoint:
     source_joint: str
     multiplier: float = 1.0
     offset: float = 0.0
+
+
+def evaluate_support_margins(
+    com_xy: tuple[float, float],
+    support: SupportRectangle,
+) -> SupportMargins:
+    """Evaluate rectangular support margins for a CoM XY projection."""
+    com_x, com_y = float(com_xy[0]), float(com_xy[1])
+    x_min = float(support.x_min)
+    x_max = float(support.x_max)
+    y_min = float(support.y_min)
+    y_max = float(support.y_max)
+    margin = float(support.margin)
+
+    if x_min >= x_max:
+        raise ComEstimatorError(f"Invalid support rectangle: x_min={x_min} must be < x_max={x_max}")
+    if y_min >= y_max:
+        raise ComEstimatorError(f"Invalid support rectangle: y_min={y_min} must be < y_max={y_max}")
+    if margin < 0.0:
+        raise ComEstimatorError(f"Invalid support margin: margin={margin} must be >= 0")
+    if margin * 2.0 >= (y_max - y_min):
+        raise ComEstimatorError(
+            f"Invalid support margin: margin={margin} leaves no safe y range for [{y_min}, {y_max}]"
+        )
+    if margin * 2.0 >= (x_max - x_min):
+        raise ComEstimatorError(
+            f"Invalid support margin: margin={margin} leaves no safe x range for [{x_min}, {x_max}]"
+        )
+
+    raw_margin_x_min = com_x - x_min
+    raw_margin_x_max = x_max - com_x
+    raw_margin_y_min = com_y - y_min
+    raw_margin_y_max = y_max - com_y
+
+    safe_margin_x_min = com_x - (x_min + margin)
+    safe_margin_x_max = (x_max - margin) - com_x
+    safe_margin_y_min = com_y - (y_min + margin)
+    safe_margin_y_max = (y_max - margin) - com_y
+
+    raw_margins = (
+        raw_margin_x_min,
+        raw_margin_x_max,
+        raw_margin_y_min,
+        raw_margin_y_max,
+    )
+    safe_margins = (
+        safe_margin_x_min,
+        safe_margin_x_max,
+        safe_margin_y_min,
+        safe_margin_y_max,
+    )
+
+    if any(value < 0.0 for value in raw_margins):
+        status = SupportStatus.VIOLATION
+    elif any(value < 0.0 for value in safe_margins):
+        status = SupportStatus.WARNING
+    else:
+        status = SupportStatus.SAFE
+
+    return SupportMargins(
+        status=status,
+        raw_margin_x_min=raw_margin_x_min,
+        raw_margin_x_max=raw_margin_x_max,
+        raw_margin_y_min=raw_margin_y_min,
+        raw_margin_y_max=raw_margin_y_max,
+        safe_margin_x_min=safe_margin_x_min,
+        safe_margin_x_max=safe_margin_x_max,
+        safe_margin_y_min=safe_margin_y_min,
+        safe_margin_y_max=safe_margin_y_max,
+    )
 
 
 class ComEstimator:

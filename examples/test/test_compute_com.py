@@ -9,7 +9,87 @@ import sys
 import time
 
 from ros2_robot_interface import ROS2RobotInterface, ROS2RobotInterfaceConfig
-from ros2_robot_interface.dynamics import ComEstimatorError
+from ros2_robot_interface.dynamics import (
+    ComEstimatorError,
+    SupportMargins,
+    SupportRectangle,
+    SupportStatus,
+    evaluate_support_margins,
+)
+
+DEFAULT_SUPPORT_RECTANGLE = SupportRectangle(
+    x_min=-0.22,
+    x_max=0.22,
+    y_min=-0.22,
+    y_max=0.22,
+    margin=0.05,
+    frame_id="base_footprint",
+)
+
+_SUPPORT_STATUS_MARKERS = {
+    SupportStatus.SAFE: "✓",
+    SupportStatus.WARNING: "!",
+    SupportStatus.VIOLATION: "✗",
+}
+
+
+def _print_triggered_margins(title: str, entries: list[tuple[str, float]]) -> None:
+    """Print only margin entries that breached their threshold (< 0)."""
+    triggered = [(label, value) for label, value in entries if value < 0.0]
+    if not triggered:
+        return
+    print(f"  {title}")
+    for label, value in triggered:
+        print(f"    {label}  {value:+.4f}")
+
+
+def _print_support_margins(margins: SupportMargins) -> None:
+    """Print support margins in a multi-line, scannable layout."""
+    marker = _SUPPORT_STATUS_MARKERS[margins.status]
+    print(f"  support  {marker} {margins.status.value}")
+    _print_triggered_margins(
+        "margins",
+        [
+            ("x min", margins.safe_margin_x_min),
+            ("x max", margins.safe_margin_x_max),
+            ("y min", margins.safe_margin_y_min),
+            ("y max", margins.safe_margin_y_max),
+        ],
+    )
+    _print_triggered_margins(
+        "raw margins",
+        [
+            ("x min", margins.raw_margin_x_min),
+            ("x max", margins.raw_margin_x_max),
+            ("y min", margins.raw_margin_y_min),
+            ("y max", margins.raw_margin_y_max),
+        ],
+    )
+
+
+def _print_com_estimate(
+    estimate,
+    *,
+    support_rectangle: SupportRectangle = DEFAULT_SUPPORT_RECTANGLE,
+) -> None:
+    """Print one CoM estimate block."""
+    x, y, z = estimate.xyz
+    print("[CoM]")
+    print(f"  frame    {estimate.frame_id}")
+    print(f"  position x={x:+.4f}  y={y:+.4f}  z={z:+.4f}")
+
+    if estimate.frame_id != support_rectangle.frame_id:
+        print(
+            f"  support  ? unavailable "
+            f"(com_frame={estimate.frame_id}, support_frame={support_rectangle.frame_id})"
+        )
+    else:
+        _print_support_margins(evaluate_support_margins((x, y), support_rectangle))
+
+    if estimate.missing_joints:
+        print("  missing  ", ", ".join(estimate.missing_joints))
+    if estimate.unsupported_joints:
+        print("  skipped  ", ", ".join(estimate.unsupported_joints))
 
 
 def main():
@@ -59,15 +139,8 @@ def main():
                     )
                 printed_frame_diagnostics = True
 
-            x, y, z = estimate.xyz
-            print(
-                f"[CoM] frame={estimate.frame_id} "
-                f"x={x:.4f} y={y:.4f} z={z:.4f}"
-            )
-            if estimate.missing_joints:
-                print("      missing:", ", ".join(estimate.missing_joints))
-            if estimate.unsupported_joints:
-                print("      unsupported multi-q joints:", ", ".join(estimate.unsupported_joints))
+            _print_com_estimate(estimate)
+            print()
 
             time.sleep(1.0)
     except KeyboardInterrupt:
