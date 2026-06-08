@@ -22,6 +22,17 @@ class ComEstimatorError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class FrameDiagnostics:
+    """Relationship between Pinocchio universe, URDF root link, and reported CoM frame."""
+
+    pinocchio_universe_name: str
+    urdf_root_link: str
+    requested_frame_id: str
+    relation: str
+    frame_id_matches_root_link: bool
+
+
+@dataclass(frozen=True)
 class ComEstimate:
     """Result of a center-of-mass computation."""
 
@@ -29,6 +40,7 @@ class ComEstimate:
     frame_id: str
     missing_joints: tuple[str, ...]
     unsupported_joints: tuple[str, ...]
+    frame_diagnostics: FrameDiagnostics | None = None
 
 
 @dataclass(frozen=True)
@@ -53,6 +65,26 @@ class ComEstimator:
 
         self.frame_id = frame_id
         self.model = pin.buildModelFromXML(urdf_xml)
+        self.root_link = self._collect_urdf_root_link(urdf_xml)
+        universe_name = str(self.model.names[0]) if len(self.model.names) else "universe"
+        frame_id_matches_root_link = self.frame_id == self.root_link
+        if frame_id_matches_root_link:
+            relation = (
+                "固定基座 Pinocchio 模型：universe 与 URDF 根连杆坐标系重合；"
+                "centerOfMass 返回值与请求帧坐标一致"
+            )
+        else:
+            relation = (
+                "固定基座 Pinocchio 模型：centerOfMass 在 universe/URDF 根连杆坐标系下；"
+                "请求帧与 URDF 根连杆不同，当前未做坐标变换"
+            )
+        self.frame_diagnostics = FrameDiagnostics(
+            pinocchio_universe_name=universe_name,
+            urdf_root_link=self.root_link,
+            requested_frame_id=self.frame_id,
+            relation=relation,
+            frame_id_matches_root_link=frame_id_matches_root_link,
+        )
         self.data = self.model.createData()
         self.q_neutral = pin.neutral(self.model)
         self.single_dof_joint_names: tuple[str, ...] = self._collect_single_dof_joint_names()
@@ -96,6 +128,7 @@ class ComEstimator:
             frame_id=self.frame_id,
             missing_joints=tuple(sorted(missing)),
             unsupported_joints=self.unsupported_joint_names,
+            frame_diagnostics=self.frame_diagnostics,
         )
 
     def _collect_single_dof_joint_names(self) -> tuple[str, ...]:
@@ -115,6 +148,31 @@ class ComEstimator:
             if self.model.nqs[joint_id] > 1:
                 names.append(joint_name)
         return tuple(names)
+
+    @staticmethod
+    def _collect_urdf_root_link(urdf_xml: str) -> str:
+        try:
+            root = ET.fromstring(urdf_xml)
+        except ET.ParseError as exc:
+            raise ComEstimatorError("URDF XML is invalid; cannot parse root link.") from exc
+
+        links = {
+            link.attrib["name"]
+            for link in root.findall("link")
+            if "name" in link.attrib
+        }
+        child_links = {
+            child.attrib["link"]
+            for joint in root.findall("joint")
+            for child in [joint.find("child")]
+            if child is not None and "link" in child.attrib
+        }
+        root_links = sorted(links - child_links)
+        if len(root_links) != 1:
+            raise ComEstimatorError(
+                "Expected exactly one URDF root link, got: " + ", ".join(root_links)
+            )
+        return root_links[0]
 
     @staticmethod
     def _collect_mimic_joints(urdf_xml: str) -> dict[str, MimicJoint]:

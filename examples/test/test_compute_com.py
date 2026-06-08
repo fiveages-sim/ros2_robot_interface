@@ -30,6 +30,7 @@ def main():
         return 1
 
     print("[2] Waiting for /robot_description and /joint_states...")
+    printed_frame_diagnostics = False
     try:
         while True:
             try:
@@ -43,6 +44,20 @@ def main():
                 print("[CoM unavailable] waiting for cached robot_description and joint_states")
                 time.sleep(1.0)
                 continue
+
+            if not printed_frame_diagnostics and estimate.frame_diagnostics is not None:
+                diag = estimate.frame_diagnostics
+                print("[Frame diagnostics]")
+                print(f"      Pinocchio universe: {diag.pinocchio_universe_name}")
+                print(f"      URDF root link: {diag.urdf_root_link}")
+                print(f"      requested CoM frame: {diag.requested_frame_id}")
+                print(f"      relation: {diag.relation}")
+                if not diag.frame_id_matches_root_link:
+                    print(
+                        "      warning: requested CoM frame differs from URDF root link; "
+                        "current estimator does not apply a frame transform"
+                    )
+                printed_frame_diagnostics = True
 
             x, y, z = estimate.xyz
             print(
