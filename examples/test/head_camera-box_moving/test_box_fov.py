@@ -5,6 +5,10 @@ The box is assumed to be aligned with the base_footprint axes. The script
 queries the current transform from base_footprint to the head camera frame,
 projects the box corners into the camera image, and prints visibility and
 image-center status.
+
+By default, the script also sends waist phi velocity commands from the
+normalized image y error to keep the box center near cy. Use
+--disable-phi-servo to run FOV checks without moving the waist.
 """
 
 from __future__ import annotations
@@ -28,11 +32,12 @@ from ros2_robot_interface.dynamics import (
     estimate_box_fov_from_transform_stamped,
     estimate_ground_fov_from_transform_stamped,
     evaluate_support_margins,
+    default_head_camera_intrinsics,
 )
 from std_msgs.msg import Float64MultiArray
 from visualization_msgs.msg import Marker, MarkerArray
 
-DEFAULT_CENTERED_THRESHOLD = 0.08
+DEFAULT_CENTERED_THRESHOLD = 0.01
 DEFAULT_FOV_MARKER_TOPIC = "/head_camera_ground_fov"
 DEFAULT_BOX_MARKER_TOPIC = "/axis_aligned_box_fov"
 DEFAULT_BOX_POSE_SIZE_TOPIC = "/axis_aligned_box_pose_size"
@@ -134,11 +139,37 @@ def _print_box_fov_estimate(estimate, center_ray_at_box_z=None) -> None:
     else:
         score_text = f"{estimate.center_score:+.6f}"
 
+    intrinsics = default_head_camera_intrinsics()
+    if estimate.box_center_uv is None:
+        center_uv_text = "None"
+    else:
+        center_uv_text = f"u={estimate.box_center_uv[0]:+.2f}  v={estimate.box_center_uv[1]:+.2f}"
+
+    if estimate.center_offset_px is None:
+        center_offset_px_text = "None"
+    else:
+        center_offset_px_text = (
+            f"du={estimate.center_offset_px[0]:+.2f}  "
+            f"dv={estimate.center_offset_px[1]:+.2f}"
+        )
+
+    if estimate.center_offset_norm is None:
+        center_offset_norm_text = "None"
+    else:
+        center_offset_norm_text = (
+            f"du={estimate.center_offset_norm[0]:+.6f}  "
+            f"dv={estimate.center_offset_norm[1]:+.6f}"
+        )
+
     in_fov = [f"C{index}" for index, corner in enumerate(estimate.corners, start=1) if corner.in_image]
     out_fov = [f"C{index}" for index, corner in enumerate(estimate.corners, start=1) if not corner.in_image]
 
     print("[box fov]")
     print(f"  center_score  {score_text}")
+    print(f"  box_center_uv  {center_uv_text}")
+    print(f"  image_center   cx={intrinsics.cx:+.2f}  cy={intrinsics.cy:+.2f}")
+    print(f"  center_offset_px    {center_offset_px_text}")
+    print(f"  center_offset_norm  {center_offset_norm_text}")
     if center_ray_at_box_z is None:
         print("  center_ray_at_box_z  unavailable")
     else:
@@ -361,6 +392,35 @@ def _parse_args() -> argparse.Namespace:
             f"Default: {DEFAULT_BOX_POSE_SIZE_TOPIC}"
         ),
     )
+    phi_servo_group = parser.add_mutually_exclusive_group()
+    phi_servo_group.add_argument(
+        "--enable-phi-servo",
+        dest="enable_phi_servo",
+        action="store_true",
+        default=True,
+        help="Enable simple waist phi velocity servo from normalized box center y error. Default: enabled.",
+    )
+    phi_servo_group.add_argument(
+        "--disable-phi-servo",
+        dest="enable_phi_servo",
+        action="store_false",
+        help="Disable waist phi velocity servo and only print FOV checks.",
+    )
+    parser.add_argument(
+        "--phi-servo-speed",
+        type=float,
+        default=0.1,
+        help="Absolute waist phi velocity scale used by the servo. Default: 0.1",
+    )
+    parser.add_argument(
+        "--phi-servo-threshold",
+        type=float,
+        default=DEFAULT_CENTERED_THRESHOLD,
+        help=(
+            "Stop phi servo when abs(normalized y error) is within this threshold. "
+            f"Default: {DEFAULT_CENTERED_THRESHOLD}"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -375,6 +435,12 @@ def main() -> int:
     if args.period <= 0.0:
         print("--period must be > 0", file=sys.stderr)
         return 2
+    if args.phi_servo_speed < 0.0 or args.phi_servo_speed > 1.0:
+        print("--phi-servo-speed must be in [0, 1]", file=sys.stderr)
+        return 2
+    if args.phi_servo_threshold < 0.0:
+        print("--phi-servo-threshold must be >= 0", file=sys.stderr)
+        return 2
 
     print("\n" + "=" * 70)
     print(" " * 18 + "Axis-Aligned Box FOV Check")
@@ -387,6 +453,11 @@ def main() -> int:
     print(f"[config] box_marker_topic={args.box_marker_topic}")
     print(f"[config] box_pose_size_topic={args.box_pose_size_topic}")
     print(f"[config] period={args.period:.2f}s  once={args.once}")
+    print(
+        f"[config] phi_servo enabled={args.enable_phi_servo}  "
+        f"speed={args.phi_servo_speed:+.3f}  "
+        f"threshold={args.phi_servo_threshold:+.6f}"
+    )
     print()
 
     try:
@@ -456,9 +527,29 @@ def main() -> int:
         f"    Listening for live box updates on {args.box_pose_size_topic} "
         "(std_msgs/Float64MultiArray: [x, y, z, length, width, height])\n"
     )
+    if args.enable_phi_servo:
+        print(
+            "    Waist phi servo is ENABLED. It will send non-zero "
+            "send_waist_phi_velocity_scale() commands until centered.\n"
+        )
 
     print("[2] Reading TF, checking box FOV, and publishing markers...")
     print("    Press Ctrl+C to stop.\n")
+    last_phi_servo_command: float | None = None
+
+    def _send_phi_servo_command(command: float, reason: str) -> None:
+        nonlocal last_phi_servo_command
+        if not args.enable_phi_servo:
+            return
+        if interface.config.waist_phi_command_topic is None:
+            print("[phi servo unavailable] waist_phi_command_topic is not enabled")
+            return
+        if last_phi_servo_command is not None and abs(command - last_phi_servo_command) < 1e-9:
+            return
+        interface.send_waist_phi_velocity_scale(command)
+        last_phi_servo_command = command
+        print(f"[phi servo] command={command:+.3f}  reason={reason}")
+
     printed_box_version = 0
     try:
         while True:
@@ -482,6 +573,7 @@ def main() -> int:
                     f"[box fov unavailable] waiting for TF "
                     f"{args.base_frame} -> {args.camera_frame}"
                 )
+                _send_phi_servo_command(0.0, "tf unavailable")
             else:
                 box_center_for_marker = current_center
                 camera_origin_for_marker = None
@@ -495,6 +587,7 @@ def main() -> int:
                     )
                 except BoxFovEstimatorError as exc:
                     print(f"[box fov unavailable] {exc}")
+                    _send_phi_servo_command(0.0, "box fov unavailable")
                 else:
                     center_ray_at_box_z = None
                     try:
@@ -508,6 +601,20 @@ def main() -> int:
                         center_ray_at_box_z = center_ray_estimate.center_intersection
 
                     _print_box_fov_estimate(box_estimate, center_ray_at_box_z)
+                    if box_estimate.center_offset_norm is None:
+                        _send_phi_servo_command(0.0, "center offset unavailable")
+                    else:
+                        error_y = box_estimate.center_offset_norm[1]
+                        if abs(error_y) <= args.phi_servo_threshold:
+                            phi_command = 0.0
+                        elif error_y > 0.0:
+                            phi_command = args.phi_servo_speed
+                        else:
+                            phi_command = -args.phi_servo_speed
+                        _send_phi_servo_command(
+                            phi_command,
+                            f"error_y={error_y:+.6f}",
+                        )
                     box_center_for_marker = box_estimate.box_center_base
                     marker_frame_id = box_estimate.source_frame_id
 
@@ -545,7 +652,9 @@ def main() -> int:
             time.sleep(args.period)
     except KeyboardInterrupt:
         print("\nInterrupted by user")
+        _send_phi_servo_command(0.0, "user interrupted")
     finally:
+        _send_phi_servo_command(0.0, "shutdown")
         del box_pose_size_sub
         print("[3] Disconnecting...")
         interface.disconnect()
