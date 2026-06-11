@@ -142,6 +142,7 @@ config = ROS2RobotInterfaceConfig(
 - `send_fsm_command(command)` - 发送 FSM 状态切换命令
 - `send_head_joint_positions(positions)` - 发送头部关节位置
 - `send_body_joint_positions(positions)` - 发送身体关节位置
+- `send_waist_phi_velocity_scale(velocity_scale)` - 发送 body_joint3 phi 速度系数（非零持续运动，发送 `0.0` 停止）
 - `send_dual_arm_target_stamped(left_pose, right_pose, frame_id)` - 发送双臂目标 pose
 - `check_arrive(part, ...)` - 统一检查到达状态
 - `list_nodes()` - 查询当前运行的 ROS 2 节点列表
@@ -171,6 +172,15 @@ config = ROS2RobotInterfaceConfig(
 - `get_target_position()` - 获取目标位置
 
 **注意：** 控制器名称（`hand_controller` 或 `gripper_controller`）会在 `connect()` 时自动检测，无需手动配置。
+
+### 腰部 phi 速度控制
+
+`send_waist_phi_velocity_scale()` 向 `waist_phi_command_topic` 发布速度系数。非零值会持续驱动 body_joint3 phi 运动，发送 `0.0` 停止。
+
+```python
+robot.send_waist_phi_velocity_scale(0.3)
+robot.send_waist_phi_velocity_scale(0.0)
+```
 
 ### ROS2RobotInterfaceConfig
 
