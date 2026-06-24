@@ -1485,9 +1485,16 @@ class ROS2RobotInterface:
         left_poses: List[Pose | PoseStamped],
         right_poses: List[Pose | PoseStamped],
         trajectory_duration: float = 0.0,
-        frame_id: Optional[str] = None,
+        frame_id: Optional[str] = "arm_base",
     ) -> bool:
-        """Send unequal-waypoint dual-arm path via ExecutePath service."""
+        """Send dual-arm path through ExecutePath service.
+
+        Either side may be an empty list. An empty side means "do not update this arm":
+        the C++ PoseBasedReferenceManager will keep sampling that arm's previous
+        reference trajectory, and will hold its last reference pose after it ends.
+        The trajectory start time is decided by the controller when it receives the
+        request, not by the Python sender timestamp.
+        """
         if not self.is_connected:
             raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
 
@@ -1542,6 +1549,34 @@ class ROS2RobotInterface:
             f"duration={response.estimated_duration:.2f}s, msg={response.message}"
         )
         return response.success
+
+    def execute_left_path(
+        self,
+        left_poses: List[Pose | PoseStamped],
+        trajectory_duration: float = 0.0,
+        frame_id: Optional[str] = "arm_base",
+    ) -> bool:
+        """Execute a left-arm Cartesian path while the right arm keeps its current reference."""
+        return self.execute_path(
+            left_poses=left_poses,
+            right_poses=[],
+            trajectory_duration=trajectory_duration,
+            frame_id=frame_id,
+        )
+
+    def execute_right_path(
+        self,
+        right_poses: List[Pose | PoseStamped],
+        trajectory_duration: float = 0.0,
+        frame_id: Optional[str] = "arm_base",
+    ) -> bool:
+        """Execute a right-arm Cartesian path while the left arm keeps its current reference."""
+        return self.execute_path(
+            left_poses=[],
+            right_poses=right_poses,
+            trajectory_duration=trajectory_duration,
+            frame_id=frame_id,
+        )
 
     def send_dual_arm_target_stamped(
         self,
