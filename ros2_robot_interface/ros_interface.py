@@ -301,6 +301,9 @@ class ROS2RobotInterface:
         if "/left_gripper_controller/target_percent" in topic_names:
             self.config.left_gripper_target_percent_topic = "/left_gripper_controller/target_percent"
             logger.info("Detected left gripper target_percent topic")
+        elif "/gripper_controller/target_percent" in topic_names:
+            self.config.left_gripper_target_percent_topic = "/gripper_controller/target_percent"
+            logger.info("Detected left gripper target_percent topic (single-arm gripper_controller)")
         if "/right_gripper_controller/target_percent" in topic_names:
             self.config.right_gripper_target_percent_topic = "/right_gripper_controller/target_percent"
             logger.info("Detected right gripper target_percent topic")
