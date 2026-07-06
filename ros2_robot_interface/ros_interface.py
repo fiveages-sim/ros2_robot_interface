@@ -322,9 +322,19 @@ class ROS2RobotInterface:
 
         if "/body_joint_controller/waist_lifting_pose_relative" in topic_names:
             self.config.waist_lifting_pose_relative_topic = "/body_joint_controller/waist_lifting_pose_relative"
+        elif "/ocs2_wbc_controller/waist_lifting_pose_relative" in topic_names:
+            self.config.waist_lifting_pose_relative_topic = (
+                "/ocs2_wbc_controller/waist_lifting_pose_relative"
+            )
+            logger.info("Detected WBC waist lifting pose relative topic")
 
         if "/body_joint_controller/waist_lifting_pose_absolute" in topic_names:
             self.config.waist_lifting_pose_absolute_topic = "/body_joint_controller/waist_lifting_pose_absolute"
+        elif "/ocs2_wbc_controller/waist_lifting_pose_absolute" in topic_names:
+            self.config.waist_lifting_pose_absolute_topic = (
+                "/ocs2_wbc_controller/waist_lifting_pose_absolute"
+            )
+            logger.info("Detected WBC waist lifting pose absolute topic")
 
         if "/body_joint_controller/waist_lifting_command" in topic_names:
             self.config.waist_lifting_command_topic = "/body_joint_controller/waist_lifting_command"
