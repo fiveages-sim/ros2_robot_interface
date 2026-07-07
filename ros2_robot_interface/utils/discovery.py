@@ -13,6 +13,7 @@ import rclpy
 from rcl_interfaces.srv import ListParameters, DescribeParameters, GetParameters, SetParameters
 from rcl_interfaces.msg import ParameterType, Parameter, ParameterValue
 from rclpy.executors import SingleThreadedExecutor
+from rclpy.action import get_action_names_and_types
 from rclpy.node import Node
 
 logger = logging.getLogger(__name__)
@@ -80,6 +81,29 @@ def discover_topics(max_attempts: int = 30) -> List[str]:
         temp_node.destroy_node()
     
     return topic_names
+
+
+def discover_actions(settle_spins: int = 10) -> List[str]:
+    """Discover available ROS 2 action names.
+
+    Args:
+        settle_spins: Number of executor spins to let discovery converge.
+
+    Returns:
+        List of action names.
+    """
+    temp_node, temp_executor = _create_temp_node("ros2_robot_interface_action_temp")
+    action_names: List[str] = []
+    time.sleep(0.5)
+    try:
+        for _ in range(max(1, settle_spins)):
+            temp_executor.spin_once(timeout_sec=0.1)
+        actions_and_types = get_action_names_and_types(temp_node)
+        action_names = [name for name, _ in actions_and_types]
+    finally:
+        temp_executor.shutdown()
+        temp_node.destroy_node()
+    return action_names
 
 
 def list_nodes(node: Optional[Node] = None, namespace: str = "") -> List[Dict[str, str]]:

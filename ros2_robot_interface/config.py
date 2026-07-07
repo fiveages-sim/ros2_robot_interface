@@ -88,6 +88,7 @@ class ROS2RobotInterfaceConfig:
     joint_trajectory_action_name: str | None = "/ocs2_arm_controller/joint_trajectory_with_para"  # 带参数/反馈的 MoveJ action
     movel_action_name: str | None = "/ocs2_arm_controller/execute_linear"  # 带参数/反馈的 MOVEL action
     movec_action_name: str | None = "/ocs2_arm_controller/execute_circle_use_ik"  # 带参数/反馈的 MOVEC action
+    waist_lifting_pose_action_name: str | None = None  # 【可自动检测】腰部位姿 action，例如 "/ocs2_wbc_controller/waist_lifting_pose" 或 "/body_joint_controller/waist_lifting_pose"
     
     # ============================================================================
     # 关节配置（未使用，预留）
