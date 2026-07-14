@@ -100,8 +100,8 @@ def main() -> int:
     print("[8] 相对位姿测试：execute_waist_lifting_pose_relative_action(dx, dz, dphi)")
     print("-" * 70)
     relative_steps = [
-        (0.02, 0.02, math.radians(5.0), "前上+小角度正向"),
-        (-0.02, -0.02, math.radians(-5.0), "回到初始附近"),
+        (0.01, 0.02, math.radians(10.0), "前上+小角度正向"),
+        (-0.01, -0.02, math.radians(-10.0), "回到初始附近"),
     ]
     for idx, (dx, dz, dphi, label) in enumerate(relative_steps, start=1):
         print(
@@ -119,7 +119,7 @@ def main() -> int:
     print("[9] 绝对位姿测试：execute_waist_lifting_pose_absolute_action(x, z, phi)")
     print("-" * 70)
     absolute_steps = [
-        (0.02, 0.78, math.radians(8.0), "目标A"),
+        (0.01, 0.78, math.radians(10.0), "目标A"),
         (0.00, 0.75, 0.0, "目标B（回中）"),
     ]
     for idx, (x, z, phi, label) in enumerate(absolute_steps, start=1):

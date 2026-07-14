@@ -168,6 +168,11 @@ class ROS2RobotInterface:
         if t.endswith(suffix):
             node = t[: -len(suffix)]
             return node if node else ""
+        # WBC 分通道，如 /ocs2_wbc_controller/target_joint_position/body
+        sub_channel = "/target_joint_position/"
+        if sub_channel in t:
+            node = t.split(sub_channel, 1)[0]
+            return node if node else ""
         i = t.rfind("/")
         if i <= 0:
             return ""
@@ -312,11 +317,29 @@ class ROS2RobotInterface:
             self.config.right_gripper_target_percent_topic = "/right_gripper_controller/target_percent"
             logger.info("Detected right gripper target_percent topic")
 
-        if "/head_joint_controller/target_joint_position" in topic_names:
-            self.config.head_joint_controller_topic = "/head_joint_controller/target_joint_position"
-        
-        if "/body_joint_controller/target_joint_position" in topic_names:
-            self.config.body_joint_controller_topic = "/body_joint_controller/target_joint_position"
+        # 躯干/头部关节：WBC 分 topic 优先，否则回退 split 控制器 topic（二选一）
+        # 供 send_body_joint_positions / send_head_joint_positions 使用
+        if "/ocs2_wbc_controller/target_joint_position/body" in topic_names:
+            self.config.body_joint_controller_topic = (
+                "/ocs2_wbc_controller/target_joint_position/body"
+            )
+            logger.info("Detected WBC body joint topic: /ocs2_wbc_controller/target_joint_position/body")
+        elif "/body_joint_controller/target_joint_position" in topic_names:
+            self.config.body_joint_controller_topic = (
+                "/body_joint_controller/target_joint_position"
+            )
+            logger.info("Detected split body joint topic: /body_joint_controller/target_joint_position")
+
+        if "/ocs2_wbc_controller/target_joint_position/head" in topic_names:
+            self.config.head_joint_controller_topic = (
+                "/ocs2_wbc_controller/target_joint_position/head"
+            )
+            logger.info("Detected WBC head joint topic: /ocs2_wbc_controller/target_joint_position/head")
+        elif "/head_joint_controller/target_joint_position" in topic_names:
+            self.config.head_joint_controller_topic = (
+                "/head_joint_controller/target_joint_position"
+            )
+            logger.info("Detected split head joint topic: /head_joint_controller/target_joint_position")
 
         if "/body_joint_controller/current_target_joint" in topic_names:
             self.config.body_joint_current_target_topic = "/body_joint_controller/current_target_joint"
