@@ -63,8 +63,8 @@ class ROS2RobotInterfaceConfig:
     # ============================================================================
     # 【可自动检测】系统会在 connect() 时自动检测这些话题，如果检测到会自动设置
     # 也可以手动配置
-    head_joint_controller_topic: str | None = None  # 【可自动检测】头部关节控制器话题，例如 "/head_joint_controller/target_joint_position"
-    body_joint_controller_topic: str | None = None  # 【可自动检测】身体关节控制器话题，例如 "/body_joint_controller/target_joint_position"
+    head_joint_controller_topic: str | None = None  # 【可自动检测】头部关节；WBC: /ocs2_wbc_controller/target_joint_position/head，split: /head_joint_controller/target_joint_position
+    body_joint_controller_topic: str | None = None  # 【可自动检测】躯干关节；WBC: /ocs2_wbc_controller/target_joint_position/body，split: /body_joint_controller/target_joint_position
     left_hand_joint_controller_topic: str | None = None  # 【可自动检测】左灵巧手关节控制器话题，例如 "/left_hand_controller/target_joint_position"
     right_hand_joint_controller_topic: str | None = None  # 【可自动检测】右灵巧手关节控制器话题，例如 "/right_hand_controller/target_joint_position"
     waist_lifting_topic: str | None = None  # 【可自动检测】腰部升降相对位置控制话题，例如 "/body_joint_controller/waist_lifting"
@@ -88,6 +88,7 @@ class ROS2RobotInterfaceConfig:
     joint_trajectory_action_name: str | None = "/ocs2_arm_controller/joint_trajectory_with_para"  # 带参数/反馈的 MoveJ action
     movel_action_name: str | None = "/ocs2_arm_controller/execute_linear"  # 带参数/反馈的 MOVEL action
     movec_action_name: str | None = "/ocs2_arm_controller/execute_circle_use_ik"  # 带参数/反馈的 MOVEC action
+    waist_lifting_pose_action_name: str | None = None  # 【可自动检测】腰部位姿 action，例如 "/ocs2_wbc_controller/waist_lifting_pose" 或 "/body_joint_controller/waist_lifting_pose"
     
     # ============================================================================
     # 关节配置（未使用，预留）

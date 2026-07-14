@@ -31,7 +31,7 @@ import tf2_ros
 from tf2_ros import TransformException
 from tf2_geometry_msgs import do_transform_pose
 
-from arms_ros2_control_msgs.action import ExecuteLinear, JointTrajectory as JointTrajectoryAction, MovecUseIK
+from arms_ros2_control_msgs.action import ExecuteLinear, JointTrajectory as JointTrajectoryAction, MovecUseIK, WaistLiftingPose
 from arms_ros2_control_msgs.msg import CircleMessage, JointWaypoint, LinearMessage
 from arms_ros2_control_msgs.msg import WbcCurrentState
 from arms_ros2_control_msgs.srv import ExecutePath
@@ -43,6 +43,7 @@ from .utils.quat_pose import quat_multiply, rotate_vector_by_quat
 from .handler import ArmHandler, ArmType, GripperHandler, GripperType
 from .utils.discovery import (
     discover_topics as _discover_topics,
+    discover_actions as _discover_actions,
     list_nodes as _list_nodes,
     list_node_parameters as _list_node_parameters,
     set_node_parameters as _set_node_parameters,
@@ -89,6 +90,7 @@ class ROS2RobotInterface:
         self.joint_trajectory_action_client: ActionClient | None = None
         self.movel_action_client: ActionClient | None = None
         self.movec_action_client: ActionClient | None = None
+        self.waist_lifting_pose_action_client: ActionClient | None = None
         self.dual_target_stamped_pub: Publisher | None = None
         self.fsm_command_pub: Publisher | None = None
         self.mode_command_pub: Publisher | None = None
@@ -166,6 +168,11 @@ class ROS2RobotInterface:
         if t.endswith(suffix):
             node = t[: -len(suffix)]
             return node if node else ""
+        # WBC 分通道，如 /ocs2_wbc_controller/target_joint_position/body
+        sub_channel = "/target_joint_position/"
+        if sub_channel in t:
+            node = t.split(sub_channel, 1)[0]
+            return node if node else ""
         i = t.rfind("/")
         if i <= 0:
             return ""
@@ -239,7 +246,9 @@ class ROS2RobotInterface:
             namespace=""
         )
     
-    def _auto_detect_configuration(self, topic_names: List[str]) -> bool:
+    def _auto_detect_configuration(
+        self, topic_names: List[str], action_names: Optional[List[str]] = None
+    ) -> bool:
         """Auto-detect robot configuration from topics. Returns True if dual-arm detected."""
         is_dual_arm = False
         self.is_wbc = False
@@ -308,11 +317,29 @@ class ROS2RobotInterface:
             self.config.right_gripper_target_percent_topic = "/right_gripper_controller/target_percent"
             logger.info("Detected right gripper target_percent topic")
 
-        if "/head_joint_controller/target_joint_position" in topic_names:
-            self.config.head_joint_controller_topic = "/head_joint_controller/target_joint_position"
-        
-        if "/body_joint_controller/target_joint_position" in topic_names:
-            self.config.body_joint_controller_topic = "/body_joint_controller/target_joint_position"
+        # 躯干/头部关节：WBC 分 topic 优先，否则回退 split 控制器 topic（二选一）
+        # 供 send_body_joint_positions / send_head_joint_positions 使用
+        if "/ocs2_wbc_controller/target_joint_position/body" in topic_names:
+            self.config.body_joint_controller_topic = (
+                "/ocs2_wbc_controller/target_joint_position/body"
+            )
+            logger.info("Detected WBC body joint topic: /ocs2_wbc_controller/target_joint_position/body")
+        elif "/body_joint_controller/target_joint_position" in topic_names:
+            self.config.body_joint_controller_topic = (
+                "/body_joint_controller/target_joint_position"
+            )
+            logger.info("Detected split body joint topic: /body_joint_controller/target_joint_position")
+
+        if "/ocs2_wbc_controller/target_joint_position/head" in topic_names:
+            self.config.head_joint_controller_topic = (
+                "/ocs2_wbc_controller/target_joint_position/head"
+            )
+            logger.info("Detected WBC head joint topic: /ocs2_wbc_controller/target_joint_position/head")
+        elif "/head_joint_controller/target_joint_position" in topic_names:
+            self.config.head_joint_controller_topic = (
+                "/head_joint_controller/target_joint_position"
+            )
+            logger.info("Detected split head joint topic: /head_joint_controller/target_joint_position")
 
         if "/body_joint_controller/current_target_joint" in topic_names:
             self.config.body_joint_current_target_topic = "/body_joint_controller/current_target_joint"
@@ -335,6 +362,18 @@ class ROS2RobotInterface:
                 "/ocs2_wbc_controller/waist_lifting_pose_absolute"
             )
             logger.info("Detected WBC waist lifting pose absolute topic")
+
+        # 腰部位姿 action：只使用 action 发现结果精确匹配。
+        action_name_list = action_names or []
+        if self.config.waist_lifting_pose_action_name is None:
+            for candidate in (
+                "/ocs2_wbc_controller/waist_lifting_pose",
+                "/body_joint_controller/waist_lifting_pose",
+            ):
+                if candidate in action_name_list:
+                    self.config.waist_lifting_pose_action_name = candidate
+                    logger.info(f"Detected waist lifting pose action: {candidate}")
+                    break
 
         if "/body_joint_controller/waist_lifting_command" in topic_names:
             self.config.waist_lifting_command_topic = "/body_joint_controller/waist_lifting_command"
@@ -409,7 +448,14 @@ class ROS2RobotInterface:
             is_dual_arm_detected = False
             try:
                 topic_names = _discover_topics()
-                is_dual_arm_detected = self._auto_detect_configuration(topic_names)
+                try:
+                    action_names = _discover_actions()
+                except Exception as action_exc:
+                    logger.warning(f"Failed to discover actions: {action_exc}")
+                    action_names = []
+                is_dual_arm_detected = self._auto_detect_configuration(
+                    topic_names, action_names
+                )
             except Exception as e:
                 logger.warning(f"Failed to auto-detect configuration: {e}")
                 is_dual_arm_detected = False
@@ -500,6 +546,16 @@ class ROS2RobotInterface:
                     self.config.movec_action_name,
                 )
                 logger.info(f"Created MOVC action client: {self.config.movec_action_name}")
+
+            if self.config.waist_lifting_pose_action_name:
+                self.waist_lifting_pose_action_client = ActionClient(
+                    self.robot_node,
+                    WaistLiftingPose,
+                    self.config.waist_lifting_pose_action_name,
+                )
+                logger.info(
+                    f"Created waist lifting pose action client: {self.config.waist_lifting_pose_action_name}"
+                )
 
             # Subscribe WBC current state for mode-aware command timing.
             if self.is_wbc:
@@ -952,6 +1008,12 @@ class ROS2RobotInterface:
         if self.movec_action_client is None:
             return False
         return self.movec_action_client.wait_for_server(timeout_sec=timeout)
+
+    def wait_for_waist_lifting_pose_action_server(self, timeout: float = 5.0) -> bool:
+        """等待腰部位姿 action server 可用。"""
+        if self.waist_lifting_pose_action_client is None:
+            return False
+        return self.waist_lifting_pose_action_client.wait_for_server(timeout_sec=timeout)
 
     def wait_for_joint_trajectory_action_server(self, timeout: float = 5.0) -> bool:
         """Wait for the configured parameterized MoveJ action server."""
@@ -1915,6 +1977,85 @@ class ROS2RobotInterface:
         msg.data = [x, z, phi]
         self.waist_lifting_pose_absolute_pub.publish(msg)
         logger.debug(f"Published waist lifting pose absolute: {[x, z, phi]}")
+
+    def execute_waist_lifting_pose_action(
+        self,
+        mode: int,
+        x: float,
+        z: float,
+        phi: float,
+        *,
+        auto_switch_fsm: bool = True,
+        feedback_callback: Optional[Callable[[Any], None]] = None,
+        timeout: float = 30.0,
+        wait_for_server_timeout: float = 5.0,
+    ) -> Any:
+        """Send a waist lifting pose action goal and wait for the result.
+
+        Args:
+            mode: WaistLiftingPose.Goal.MODE_ABSOLUTE 或 MODE_RELATIVE。
+            x, z, phi: 绝对目标或相对增量（取决于 mode）。
+
+        Returns:
+            action 的 result 对象（含 reachable/success/planned_x/z/phi/message/error_code），
+            goal 被拒绝或超时时返回 None。
+        """
+        goal_msg = WaistLiftingPose.Goal()
+        goal_msg.mode = int(mode)
+        goal_msg.x = float(x)
+        goal_msg.z = float(z)
+        goal_msg.phi = float(phi)
+        return self._send_motion_action_goal(
+            self.waist_lifting_pose_action_client,
+            goal_msg,
+            action_label="WaistLiftingPose",
+            control_type="body_joint" if auto_switch_fsm else None,
+            feedback_callback=feedback_callback,
+            timeout=timeout,
+            wait_for_server_timeout=wait_for_server_timeout,
+        )
+
+    def execute_waist_lifting_pose_absolute_action(
+        self,
+        x: float,
+        z: float,
+        phi: float,
+        *,
+        auto_switch_fsm: bool = True,
+        feedback_callback: Optional[Callable[[Any], None]] = None,
+        timeout: float = 30.0,
+        wait_for_server_timeout: float = 5.0,
+    ) -> Any:
+        """腰部绝对位姿运动（等待到位/可达结果）。x/z/phi 为 body_base 下绝对目标。"""
+        return self.execute_waist_lifting_pose_action(
+            WaistLiftingPose.Goal.MODE_ABSOLUTE,
+            x, z, phi,
+            auto_switch_fsm=auto_switch_fsm,
+            feedback_callback=feedback_callback,
+            timeout=timeout,
+            wait_for_server_timeout=wait_for_server_timeout,
+        )
+
+    def execute_waist_lifting_pose_relative_action(
+        self,
+        dx: float,
+        dz: float,
+        dphi: float,
+        *,
+        auto_switch_fsm: bool = True,
+        feedback_callback: Optional[Callable[[Any], None]] = None,
+        timeout: float = 30.0,
+        wait_for_server_timeout: float = 5.0,
+    ) -> Any:
+        """腰部相对位姿运动（等待到位/可达结果）。dx/dz/dphi 为相对增量。"""
+        return self.execute_waist_lifting_pose_action(
+            WaistLiftingPose.Goal.MODE_RELATIVE,
+            dx, dz, dphi,
+            auto_switch_fsm=auto_switch_fsm,
+            feedback_callback=feedback_callback,
+            timeout=timeout,
+            wait_for_server_timeout=wait_for_server_timeout,
+        )
 
     def send_waist_lifting_velocity_scale(self, velocity_scale: float) -> None:
         """Send target velocity for waist lifting."""
@@ -3292,6 +3433,10 @@ class ROS2RobotInterface:
         if self.movec_action_client:
             self.movec_action_client.destroy()
             self.movec_action_client = None
+
+        if self.waist_lifting_pose_action_client:
+            self.waist_lifting_pose_action_client.destroy()
+            self.waist_lifting_pose_action_client = None
 
         if self.dual_target_stamped_pub:
             self.dual_target_stamped_pub.destroy()
