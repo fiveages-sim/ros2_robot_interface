@@ -1661,19 +1661,25 @@ class ROS2RobotInterface:
         body_pose: Optional[Pose] = None,
         body_frame_id: str = "base_footprint",
         body_mode: Optional[str] = None,
+        movel_duration: Optional[float] = None,
     ) -> None:
         """Send dual-arm target poses to /dual_target/stamped topic.
 
-        When ``body_pose`` is provided, an additional 3rd pose will be appended:
-        ``[left, right, body]``. This matches PoseBasedReferenceManager dual-target
-        format that supports both 2-pose and 3-pose messages.
+        When ``body_pose`` is provided, this method requires WBC mode and uses
+        ``BODY_TRACKING`` so the controller can track the body target together
+        with the two arm targets. In that case an additional 3rd pose is appended:
+        ``[left, right, body]``.
 
         Args:
-            body_mode: Optional body mode command, e.g. ``BODY_TRACKING``,
-                ``BODY_FREE``, ``BODY_RELATIVE`` (alias: ``BODY_VERTICAL``),
-                ``BODY_LOCK``, ``BODY_HEAD_COUPLED``.
-                If set and mode is not BODY_TRACKING,
-                body target pose will not be appended.
+            body_pose: Optional body target pose. Supported only in WBC mode.
+            body_frame_id: Frame ID for ``body_pose`` when body tracking is used.
+            body_mode: Optional body mode command. When ``body_pose`` is provided,
+                only ``BODY_TRACKING`` or ``None`` is valid. When ``body_pose`` is
+                omitted, existing body-mode-only switching behavior is preserved.
+            movel_duration: Optional controller ``movel_duration`` in seconds.
+                This updates the controller node parameter before publishing the
+                target. It is a controller-wide parameter and remains in effect
+                for later calls until changed again.
         """
         if not self.is_connected:
             raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
@@ -1682,8 +1688,45 @@ class ROS2RobotInterface:
         if self.dual_target_stamped_pub is None:
             raise ROS2NotConnectedError("Dual target stamped publisher not initialized")
 
+        if body_pose is not None and not self.is_wbc:
+            raise ValueError(
+                "body_pose is only supported in WBC mode for send_dual_arm_target_stamped(). "
+                "Current interface is not in WBC mode."
+            )
+
+        if body_pose is not None and body_mode is not None:
+            requested_body_mode = body_mode.strip().upper()
+            if requested_body_mode != "BODY_TRACKING":
+                raise ValueError(
+                    "body_pose requires body_mode='BODY_TRACKING' in "
+                    "send_dual_arm_target_stamped(); other body modes do not track body_pose."
+                )
+
         self.auto_switch_fsm_for_control("arm_pose")
-        
+
+        if movel_duration is not None:
+            if movel_duration <= 0:
+                raise ValueError(
+                    "movel_duration must be positive when provided to "
+                    "send_dual_arm_target_stamped()."
+                )
+
+            controller_node = self.arm_controller
+            if not controller_node:
+                raise ROS2NotConnectedError(
+                    "Cannot set movel_duration: arm controller node is not available."
+                )
+
+            if not self.set_node_parameters(
+                full_node_name=controller_node,
+                parameters={"movel_duration": float(movel_duration)},
+            ):
+                raise RuntimeError(
+                    f"Failed to set movel_duration={movel_duration:.3f}s on {controller_node}"
+                )
+
+            print(f"Set movel_duration to {movel_duration:.3f}s", flush=True)
+
         stamp = self.robot_node.get_clock().now().to_msg()
         path_msg = Path()
         path_msg.header.stamp = stamp
@@ -1698,6 +1741,9 @@ class ROS2RobotInterface:
 
         desired_body_mode = self._normalize_body_mode(body_mode, body_pose)
         self._switch_body_mode_if_needed(desired_body_mode)
+
+        if body_pose is not None and desired_body_mode == "BODY_TRACKING":
+            print("Body mode switched to BODY_TRACKING for body_pose target", flush=True)
 
         # Only BODY_TRACKING needs body target in dual_target/stamped.
         if body_pose is not None and desired_body_mode == "BODY_TRACKING":
