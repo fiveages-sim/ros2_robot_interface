@@ -2211,9 +2211,11 @@ class ROS2RobotInterface:
             right_arm_positions: 右臂关节位置列表（弧度）
             body_positions: 躯干关节目标位置列表（弧度），仅 WBC 控制器生效。
                 传入时直接使用该值；省略时从当前关节状态读取（保持躯干不动）。
+                非 WBC（如 ocs2_arm_controller 统一 topic）时传入会被忽略并告警。
             head_positions: 头部关节目标位置列表（弧度），仅 WBC 控制器生效。
                 传入时直接使用该值；省略时从当前关节状态读取（保持头部不动）。
                 WBC 合成发布时会同步缓存，供 check_arrive(part='head'/'body') 使用。
+                非 WBC 时传入会被忽略并告警。
 
         Raises:
             ROS2NotConnectedError: 如果接口未连接或发布器未初始化
@@ -2431,6 +2433,20 @@ class ROS2RobotInterface:
             )
         else:
             # ARM 控制器只需要左臂 + 右臂
+            if body_positions is not None or head_positions is not None:
+                logger.warning(
+                    "send_dual_arm_joint_positions: body_positions/head_positions are ignored "
+                    "under non-WBC unified arm controller (%s). "
+                    "Only left+right arm joints are published. "
+                    "Use send_body_joint_positions / send_head_joint_positions "
+                    "(or send_coordinated_joint_positions) for body/head.",
+                    unified_topic,
+                )
+                print(
+                    "[warn] send_dual_arm_joint_positions: body/head targets will NOT execute "
+                    f"on non-WBC stack ({unified_topic}); only left+right arms are sent.",
+                    flush=True,
+                )
             combined_positions = left_arm_positions + right_arm_positions
             logger.debug(f"ARM controller: left={len(left_arm_positions)}, right={len(right_arm_positions)}, total={len(combined_positions)}")
 
