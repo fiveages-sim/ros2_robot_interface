@@ -2167,6 +2167,31 @@ class ROS2RobotInterface:
         self.right_hand_joint_controller_pub.publish(msg)
         logger.debug(f"Published right hand joint positions: {positions}")
 
+    def _cache_wbc_joint_targets(
+        self,
+        joint_names: List[str],
+        explicit_positions: Optional[List[float]],
+        name_to_cmd: Dict[str, float],
+        state_name_to_pos: Dict[str, float],
+        cache_attr: str,
+    ) -> None:
+        """Cache resolved body/head targets for check_arrive after WBC unified publish."""
+        if not joint_names:
+            return
+        if explicit_positions is not None:
+            setattr(self, cache_attr, list(explicit_positions))
+            return
+        resolved: List[float] = []
+        for joint_name in joint_names:
+            if joint_name in name_to_cmd:
+                resolved.append(name_to_cmd[joint_name])
+            elif joint_name in state_name_to_pos:
+                resolved.append(state_name_to_pos[joint_name])
+            else:
+                return
+        if len(resolved) == len(joint_names):
+            setattr(self, cache_attr, resolved)
+
     def send_dual_arm_joint_positions(
         self,
         left_arm_positions: List[float],
@@ -2188,6 +2213,7 @@ class ROS2RobotInterface:
                 传入时直接使用该值；省略时从当前关节状态读取（保持躯干不动）。
             head_positions: 头部关节目标位置列表（弧度），仅 WBC 控制器生效。
                 传入时直接使用该值；省略时从当前关节状态读取（保持头部不动）。
+                WBC 合成发布时会同步缓存，供 check_arrive(part='head'/'body') 使用。
 
         Raises:
             ROS2NotConnectedError: 如果接口未连接或发布器未初始化
@@ -2264,6 +2290,7 @@ class ROS2RobotInterface:
                         logger.warning("Body joint positions not available, using zeros for WBC controller")
                         resolved_body = [0.0] * 4
                     combined_positions = list(resolved_body) + combined_positions
+                    self.body_target_positions = list(resolved_body)
             else:
                 body_joint_names: List[str] = []
                 left_arm_joint_names: List[str] = []
@@ -2375,6 +2402,23 @@ class ROS2RobotInterface:
                     raise ValueError(
                         "WBC command dimension mismatch: "
                         f"got {len(combined_positions)}, expected {expected_total}"
+                    )
+
+                if include_body_in_unified:
+                    self._cache_wbc_joint_targets(
+                        body_joint_names,
+                        body_positions,
+                        body_name_to_cmd,
+                        state_name_to_pos,
+                        "body_target_positions",
+                    )
+                if include_head_in_unified:
+                    self._cache_wbc_joint_targets(
+                        head_joint_names,
+                        head_positions,
+                        head_name_to_cmd,
+                        state_name_to_pos,
+                        "head_target_positions",
                     )
 
             logger.debug(
