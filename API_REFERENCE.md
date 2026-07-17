@@ -308,21 +308,29 @@ while True:
 
 这些方法通过 `ROS2RobotInterface` 直接访问，用于同时控制左臂和右臂。
 
-#### `send_dual_arm_target_stamped(left_pose: Pose, right_pose: Pose, frame_id: str = "arm_base") -> None`
+#### `send_dual_arm_target_stamped(left_pose: Pose, right_pose: Pose, frame_id: str = "arm_base", body_pose: Optional[Pose] = None, body_frame_id: str = "base_footprint", body_mode: Optional[str] = None, movel_duration: Optional[float] = None) -> None`
 
-**功能：** 发送双臂目标 pose（仅双臂模式）
+**功能：** 发送双臂目标 pose（仅双臂模式）；WBC 模式下可附带腰部/身体目标。
 
 **参数：**
 - `left_pose` (Pose): 左臂目标 pose（在 `frame_id` 指定的坐标系下）
 - `right_pose` (Pose): 右臂目标 pose（在 `frame_id` 指定的坐标系下）
 - `frame_id` (str, 可选): 坐标系 ID；省略时默认 `"arm_base"`（见下方说明）
+- `body_pose` (Pose, 可选): 腰部/身体目标 pose。仅 WBC 模式支持；非 WBC 模式传入会抛出 `ValueError`。
+- `body_frame_id` (str, 可选): `body_pose` 所在坐标系，默认 `"base_footprint"`。
+- `body_mode` (str, 可选): body 模式。传入 `body_pose` 时只能为 `"BODY_TRACKING"` 或省略；省略时自动使用 `"BODY_TRACKING"`。
+- `movel_duration` (float, 可选): 发布目标前设置控制器参数 `movel_duration`，单位秒。该参数是控制器全局参数，会影响后续调用，直到再次修改。
 
 **说明：**
 - **坐标系默认值**：不传 `frame_id` 时默认使用 `"arm_base"`。若你的机器人 TF 或末端位姿话题中**没有**名为 `arm_base` 的坐标系，必须显式传入与实际一致的 `frame_id`（例如与 `left_arm_handler.get_frame_id()` 或当前 pose 消息的 `header.frame_id` 一致）。
-- 发布到 `/dual_target/stamped` topic（使用 `nav_msgs/Path` 消息类型，包含2个 `PoseStamped`：第一个是左臂，第二个是右臂）
+- 发布到 `/dual_target/stamped` topic（使用 `nav_msgs/Path` 消息类型；双臂为 2 个 `PoseStamped`，WBC + body 时为 `[left, right, body]`）
 - **内部实现**：直接发布到 `/dual_target/stamped` topic，不调用 handler 的方法
 - 目标位姿会通过话题订阅获取（`/left_current_target` 和 `/right_current_target`），用于到达判断
 - 可以使用 `left_arm_handler.check_arrival()` 和 `right_arm_handler.check_arrival()` 分别检查到达状态
+- 只有 WBC 模式支持通过该接口发送 `body_pose`。分体模式如果传入 `body_pose` 会直接报错，避免“看起来发送了腰部目标但实际不生效”的误用。
+- 腰部目标要参与控制时必须使用 `BODY_TRACKING`。因此传入 `body_pose` 时，`body_mode` 只能省略或显式传 `"BODY_TRACKING"`。
+- 当传入 `body_pose` 并进入 `BODY_TRACKING` 时，接口会输出日志说明 body mode 已切换/使用 `BODY_TRACKING`。
+- `movel_duration` 不是消息字段，而是控制器节点参数。接口会在发布目标前修改参数，并输出日志说明修改后的值。
 
 **示例：**
 ```python
@@ -342,6 +350,19 @@ right_pose.orientation.w = 1.0
 
 # 发送双臂目标（pose 在 frame_id 指定的坐标系下，接收端会进行坐标转换）
 interface.send_dual_arm_target_stamped(left_pose, right_pose, frame_id="arm_base")
+
+# WBC：双臂 + 身体目标，并设置本次 movel_duration
+body_pose = Pose()
+body_pose.position.x = 0.1
+body_pose.position.z = 0.75
+body_pose.orientation.w = 1.0
+interface.send_dual_arm_target_stamped(
+    left_pose,
+    right_pose,
+    body_pose=body_pose,
+    body_mode="BODY_TRACKING",
+    movel_duration=3.0,
+)
 
 # 检查到达状态
 left_result = interface.left_arm_handler.check_arrival()
