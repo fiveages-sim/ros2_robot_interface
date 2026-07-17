@@ -6,10 +6,11 @@ This is a standalone implementation independent of LeRobot.
 """
 
 import logging
+import math
 import sys
 import threading
 import time
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import rclpy
@@ -71,6 +72,15 @@ class ROS2RobotInterface:
         "BODY_LOCK": "BODY_LOCK",
         "BODY_HEAD_COUPLED": "BODY_HEAD_COUPLED",
     }
+    # /mode_command 字符串 → (WbcCurrentState 字段名, 期望常量值)
+    # BODY_* 由 BODY_MODE_TO_STATE 派生，避免双份维护
+    MODE_COMMAND_TO_WBC_EXPECT: Dict[str, tuple[str, int]] = {
+        **{k: ("body_state", v) for k, v in BODY_MODE_TO_STATE.items()},
+        "ARMS_COUPLED": ("bimanual_state", WbcCurrentState.BIMANUAL_COUPLED),
+        "ARMS_INDEPENDENT": ("bimanual_state", WbcCurrentState.BIMANUAL_INDEPENDENT),
+        "BASE_LOCK": ("base_state", WbcCurrentState.BASE_LOCKED),
+        "BASE_UNLOCK": ("base_state", WbcCurrentState.BASE_UNLOCKED),
+    }
     MODE_SWITCH_SETTLE_TIME_SEC: float = 0.1
     
     def __init__(self, config: ROS2RobotInterfaceConfig):
@@ -112,6 +122,7 @@ class ROS2RobotInterface:
         # FSM state tracking
         self._current_fsm_state: int = 2  # Default to HOLD
         self._auto_switch_fsm_before_control: bool = bool(self.config.auto_switch_fsm_before_control)
+        self._defer_individual_joint_fsm_switch: bool = False
         self.is_wbc: bool = False
         # WBC unified joint topic capabilities discovered from ROS graph.
         # Some deployments expose body/head as dedicated sub-topics, and we use
@@ -1787,6 +1798,106 @@ class ROS2RobotInterface:
         self.mode_command_pub.publish(mode_msg)
         time.sleep(self.MODE_SWITCH_SETTLE_TIME_SEC)
 
+    def mode_command_matches_wbc_state(self, command: str) -> bool | None:
+        """对照 ``/ocs2_wbc_controller/current_state`` 判断 mode 是否已生效。
+
+        Returns:
+            True / False：可判定且已匹配 / 未匹配；
+            None：尚无 ``wbc_state``，或该 command 无对应字段（无法用 current_state 确认）。
+        """
+        return self.mode_commands_match_wbc_state([command])
+
+    def mode_commands_match_wbc_state(self, commands: list[str] | tuple[str, ...]) -> bool | None:
+        """对照 ``current_state`` 判断一组 mode 是否全部生效。
+
+        同一字段若有多条命令，以最后一条为准。全部无映射时返回 None。
+        """
+        expects: Dict[str, int] = {}
+        for raw in commands:
+            key = str(raw).strip().upper()
+            expect = self.MODE_COMMAND_TO_WBC_EXPECT.get(key)
+            if expect is None:
+                continue
+            field, value = expect
+            expects[field] = int(value)
+        if not expects:
+            return None
+        if self.wbc_state is None:
+            return None
+        for field, value in expects.items():
+            if int(getattr(self.wbc_state, field)) != value:
+                return False
+        return True
+
+    def wait_until_mode_command_applied(
+        self,
+        command: str,
+        *,
+        timeout: float = 5.0,
+        poll_period: float = 0.05,
+        time_now_fn: Optional[Callable[[], float]] = None,
+        sleep_fn: Optional[Callable[[float], None]] = None,
+    ) -> bool:
+        """等待 ``/ocs2_wbc_controller/current_state`` 反映给定 mode command。"""
+        return self.wait_until_mode_commands_applied(
+            [command],
+            timeout=timeout,
+            poll_period=poll_period,
+            time_now_fn=time_now_fn,
+            sleep_fn=sleep_fn,
+        )
+
+    def wait_until_mode_commands_applied(
+        self,
+        commands: list[str] | tuple[str, ...],
+        *,
+        timeout: float = 5.0,
+        poll_period: float = 0.05,
+        time_now_fn: Optional[Callable[[], float]] = None,
+        sleep_fn: Optional[Callable[[float], None]] = None,
+    ) -> bool:
+        """等待 ``current_state`` 同时满足一组 mode 的期望字段。
+
+        对可映射命令合并期望（同字段以后者为准）后轮询；全部无法映射时返回 True。
+        超时返回 False。
+        """
+        keys = [str(c).strip().upper() for c in commands if str(c).strip()]
+        expects: Dict[str, int] = {}
+        for key in keys:
+            expect = self.MODE_COMMAND_TO_WBC_EXPECT.get(key)
+            if expect is None:
+                continue
+            field, value = expect
+            expects[field] = int(value)
+        if not expects:
+            logger.debug(f"No WBC current_state mapping for modes={keys!r}; skip wait")
+            return True
+
+        now_fn = time_now_fn or time.monotonic
+        wait_fn = sleep_fn or time.sleep
+        start = now_fn()
+        while (now_fn() - start) <= max(0.0, float(timeout)):
+            matched = self.mode_commands_match_wbc_state(keys)
+            if matched is True:
+                logger.debug(
+                    f"Modes {keys!r} confirmed on /ocs2_wbc_controller/current_state "
+                    f"(expect {expects})"
+                )
+                return True
+            wait_fn(max(0.0, float(poll_period)))
+
+        cur: Dict[str, int | None] = {}
+        for field in expects:
+            if self.wbc_state is not None:
+                cur[field] = int(getattr(self.wbc_state, field))
+            else:
+                cur[field] = None
+        logger.warning(
+            f"Timeout waiting for modes {keys!r} on current_state "
+            f"(expect {expects}, got {cur})"
+        )
+        return False
+
     def auto_switch_fsm_state(self, target_state: int) -> bool:
         """Automatically switch FSM state only when needed.
 
@@ -1819,6 +1930,8 @@ class ROS2RobotInterface:
         """Auto-switch FSM state based on control category rules."""
         if not self._auto_switch_fsm_before_control:
             return False
+        if self._defer_individual_joint_fsm_switch:
+            return False
 
         normalized_type = control_type.strip().lower()
         valid_types = {"arm_pose", "arm_joint", "body_joint", "head_joint", "other"}
@@ -1833,20 +1946,27 @@ class ROS2RobotInterface:
         if normalized_type == "arm_pose":
             return self.auto_switch_fsm_state(FSM_OCS2)
 
-        if normalized_type == "arm_joint":
+        if normalized_type in ("arm_joint", "body_joint", "head_joint"):
             return self.auto_switch_fsm_state(FSM_MOVEJ)
 
-        if self.is_wbc:
-            return self.auto_switch_fsm_state(FSM_MOVEJ)
+        return False
 
-        # Non-WBC: MOVEJ or OCS2 are both acceptable; OCS2 is preferred when switching is needed.
-        current_state = self.get_fsm_state()
-        if current_state in (FSM_MOVEJ, FSM_OCS2):
-            logger.debug(
-                f"FSM state {current_state} is acceptable for {normalized_type} in non-WBC mode"
-            )
-            return False
-        return self.auto_switch_fsm_state(FSM_OCS2)
+    def _auto_switch_fsm_for_coordinated_joint_motion(
+        self,
+        *,
+        has_body: bool,
+        has_left: bool,
+        has_right: bool,
+        has_head: bool,
+    ) -> bool:
+        """``send_coordinated_joint_positions`` 入口：按本次下发的关节组选 FSM（WBC / 分体统一走 MoveJ）。"""
+        if has_left or has_right:
+            return self.auto_switch_fsm_for_control("arm_joint")
+        if has_body:
+            return self.auto_switch_fsm_for_control("body_joint")
+        if has_head:
+            return self.auto_switch_fsm_for_control("head_joint")
+        return False
     
     def get_fsm_state(self) -> int:
         """Get current FSM state code.
@@ -2358,12 +2478,18 @@ class ROS2RobotInterface:
         left_arm_positions: Optional[List[float]] = None,
         right_arm_positions: Optional[List[float]] = None,
         head_positions: Optional[List[float]] = None,
+        *,
+        auto_switch_fsm: bool = True,
     ) -> None:
         """一次性下发关节空间目标（MoveJ 语义），在 WBC 合成与 split 栈之间自动选路。
 
         低层 API（``send_dual_arm_joint_positions``、``send_body_joint_positions``、
         ``ArmHandler.send_joint_positions`` 等）仍适合**并行/分时**组合（例如手臂
         MoVEL 与腰部 MoveJ 分开发）；本方法面向**单步**「能一次发就一次发」的编排。
+
+        当 ``auto_switch_fsm=True``（默认）时，在本方法入口根据本次下发的关节组
+        （臂 / 躯干 / 头）自动切换 FSM（关节空间统一进 MOVEJ），再选路发布；分体与
+        WBC 均由 ``auto_switch_fsm_for_control`` 判定，skill 层无需显式 ``send_fsm_command``。
 
         路由概要：
 
@@ -2402,6 +2528,34 @@ class ROS2RobotInterface:
                 "left_arm_positions, right_arm_positions, head_positions must be non-empty"
             )
 
+        if auto_switch_fsm:
+            self._auto_switch_fsm_for_coordinated_joint_motion(
+                has_body=body is not None,
+                has_left=left is not None,
+                has_right=right is not None,
+                has_head=head is not None,
+            )
+
+        prev_defer = self._defer_individual_joint_fsm_switch
+        self._defer_individual_joint_fsm_switch = True
+        try:
+            self._send_coordinated_joint_positions_routed(
+                body=body,
+                left=left,
+                right=right,
+                head=head,
+            )
+        finally:
+            self._defer_individual_joint_fsm_switch = prev_defer
+
+    def _send_coordinated_joint_positions_routed(
+        self,
+        *,
+        body: Optional[List[float]],
+        left: Optional[List[float]],
+        right: Optional[List[float]],
+        head: Optional[List[float]],
+    ) -> None:
         unified_topic = self.config.unified_arm_joint_controller_topic or ""
         using_wbc_controller = "ocs2_wbc_controller" in unified_topic
         using_arm_controller = "ocs2_arm_controller" in unified_topic
@@ -2921,9 +3075,13 @@ class ROS2RobotInterface:
         left_target_positions: Optional[List[float]] = None,
         right_target_positions: Optional[List[float]] = None,
         body_target_positions: Optional[List[float]] = None,
+        left_check_indices: Optional[Sequence[int]] = None,
+        right_check_indices: Optional[Sequence[int]] = None,
+        body_check_indices: Optional[Sequence[int]] = None,
         timeout: float = 3.0,
         poll_period: float = 0.05,
         joint_tolerance: float = 0.03,
+        angular_wrap: bool = True,
         time_now_fn: Optional[Callable[[], float]] = None,
         sleep_fn: Optional[Callable[[float], None]] = None,
         on_poll: Optional[Callable[[Dict[str, Any], float], None]] = None,
@@ -2932,6 +3090,10 @@ class ROS2RobotInterface:
 
         Checks left arm, right arm, and optionally body joints.
         All specified groups must be within ``joint_tolerance`` to be considered arrived.
+
+        When ``*_check_indices`` is set, only those 0-based joint indices are compared
+        (passive hold-current slots from partial absolute specs are skipped).
+        ``angular_wrap`` uses shortest angular distance for revolute joints.
         """
         now_fn = time_now_fn or time.monotonic
         wait_fn = sleep_fn or time.sleep
@@ -2946,12 +3108,30 @@ class ROS2RobotInterface:
                 "reason": "no_target",
             }
 
-        def _max_abs_error(current: Optional[List[float]], target: Optional[List[float]]) -> Optional[float]:
+        def _joint_error(cur: float, tgt: float) -> float:
+            diff = abs(float(cur) - float(tgt))
+            if angular_wrap:
+                return min(diff, abs(2.0 * math.pi - diff))
+            return diff
+
+        def _max_abs_error(
+            current: Optional[List[float]],
+            target: Optional[List[float]],
+            check_indices: Optional[Sequence[int]] = None,
+        ) -> tuple[Optional[float], dict[int, float]]:
             if target is None:
-                return 0.0
+                return 0.0, {}
             if current is None or len(current) != len(target) or len(target) == 0:
-                return None
-            return max(abs(float(c) - float(t)) for c, t in zip(current, target))
+                return None, {}
+            indices = list(check_indices) if check_indices is not None else list(range(len(target)))
+            per_joint: dict[int, float] = {}
+            for i in indices:
+                if i < 0 or i >= len(target):
+                    continue
+                per_joint[i] = _joint_error(current[i], target[i])
+            if not per_joint:
+                return None, {}
+            return max(per_joint.values()), per_joint
 
         def _get_body_positions() -> Optional[List[float]]:
             try:
@@ -2979,9 +3159,15 @@ class ROS2RobotInterface:
             left_current, right_current = self._get_current_arm_joint_positions()
             body_current = _get_body_positions() if body_target_positions is not None else None
 
-            left_err  = _max_abs_error(left_current,  left_target_positions)
-            right_err = _max_abs_error(right_current, right_target_positions)
-            body_err  = _max_abs_error(body_current,  body_target_positions)
+            left_err, left_per = _max_abs_error(
+                left_current, left_target_positions, left_check_indices
+            )
+            right_err, right_per = _max_abs_error(
+                right_current, right_target_positions, right_check_indices
+            )
+            body_err, body_per = _max_abs_error(
+                body_current, body_target_positions, body_check_indices
+            )
 
             left_ok  = (left_err  is not None and left_err  <= joint_tolerance) if left_target_positions  is not None else True
             right_ok = (right_err is not None and right_err <= joint_tolerance) if right_target_positions is not None else True
@@ -2995,6 +3181,9 @@ class ROS2RobotInterface:
                 "left_error_max_abs": left_err,
                 "right_error_max_abs": right_err,
                 "body_error_max_abs": body_err,
+                "left_joint_errors": left_per,
+                "right_joint_errors": right_per,
+                "body_joint_errors": body_per,
                 "left_current_len": len(left_current) if left_current is not None else 0,
                 "right_current_len": len(right_current) if right_current is not None else 0,
                 "left_target_len": len(left_target_positions) if left_target_positions is not None else 0,

@@ -118,15 +118,24 @@ config = ROS2RobotInterfaceConfig(
 
 #### ROS2RobotInterface 主要方法
 
-- `connect()` - 连接到 ROS 2 并创建订阅器和发布器
-- `disconnect()` - 断开连接并清理资源
-- `get_joint_state(categorized=False)` - 获取关节状态
-- `send_fsm_command(command)` - 发送 FSM 状态切换命令
-- `send_head_joint_positions(positions)` - 发送头部关节位置
-- `send_body_joint_positions(positions)` - 发送身体关节位置
-- `send_dual_arm_target_stamped(left_pose, right_pose, frame_id)` - 发送双臂目标 pose
-- `check_arrive(part, ...)` - 统一检查到达状态
+**连接与发现**
+- `connect()` / `disconnect()` - 连接 / 断开 ROS 2
 - `list_nodes()` - 查询当前运行的 ROS 2 节点列表
+- `get_joint_state(categorized=False)` - 获取关节状态
+
+**FSM / Mode**
+- `send_fsm_command(command)` - 发送 FSM 状态切换命令
+- `send_mode_command(command)` - 向 `/mode_command` 发布 WBC / 底盘模式
+- `wait_until_mode_commands_applied(commands, ...)` - 对照 `/ocs2_wbc_controller/current_state` 确认一组 mode
+
+**运动下发**
+- `send_coordinated_joint_positions(...)` - 一次性协调下发臂/躯干/头关节（默认隐式 MOVEJ）
+- `send_head_joint_positions(positions)` / `send_body_joint_positions(positions)` - 头部 / 身体关节
+- `send_dual_arm_target_stamped(left_pose, right_pose, frame_id)` - 双臂笛卡尔目标 pose
+
+**到达检查**
+- `check_arrive(part, ...)` / `wait_until_arrive(...)` - 按 part 检查/等待（臂为笛卡尔位姿；头身为缓存关节目标）
+- `wait_until_joint_arrive(...)` - 按显式关节角目标等待（支持部分索引 / 角距离，适合 MoveJ）
 
 #### 属性
 
