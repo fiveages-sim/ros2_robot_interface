@@ -15,9 +15,11 @@
 支持的 control_type 及预期切换目标:
     arm_pose    末端笛卡尔位姿 / 路径控制  -> OCS2 (3)
     arm_joint   手臂关节空间控制          -> MOVEJ (4)
-    body_joint  身体 / 腰部关节控制        -> WBC: MOVEJ (4)；非 WBC: 已在 MOVEJ/OCS2 则不切，否则 OCS2 (3)
-    head_joint  头部关节控制              -> 规则同 body_joint
+    body_joint  身体 / 腰部关节控制        -> MOVEJ (4)
+    head_joint  头部关节控制              -> MOVEJ (4)
     other       不触发自动切换            -> 始终返回 False
+
+``send_coordinated_joint_positions`` 在入口按关节组切换一次，路由到分体/WBC 子 API 时抑制重复切换。
 
 FSM 状态码: 1=HOME, 2=HOLD, 3=OCS2, 4=MOVEJ
 

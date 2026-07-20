@@ -34,6 +34,8 @@ send_mode_command() 行为（本脚本依次调用该接口）:
     - 向 /mode_command 话题 publish std_msgs/String 命令字符串。
     - publish 后固定等待 MODE_SWITCH_SETTLE_TIME_SEC（默认 0.1s），
       避免后续指令在模式尚未切换时发出；这是盲等，不轮询对端确认。
+    - 若需确认生效，请在发完后调用 wait_until_mode_commands_applied([...])，
+      对照 /ocs2_wbc_controller/current_state（多条命令合并检查，勿按条重复 wait）。
     - 若 mode_command_pub 未初始化（对端无 /mode_command），仅 warning 并 return，
       不会抛出异常。
 

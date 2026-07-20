@@ -24,6 +24,8 @@
 - [统一接口方法](#统一接口方法)
   - [FSM状态切换](#fsm状态切换)
   - [FSM状态查询](#fsm状态查询)
+  - [模式命令与 WBC 状态确认](#模式命令与-wbc-状态确认)
+  - [协调关节下发](#协调关节下发)
   - [关节状态获取](#关节状态获取)
   - [手部关节控制](#手部关节控制)
   - [末端执行器位姿获取](#末端执行器位姿获取)
@@ -913,6 +915,7 @@ if result['arrived']:
 **说明：**
 - 发布到 `/fsm_command` topic
 - 用于切换机器人的控制模式
+- 多数控制 API（笛卡尔 / 关节下发）在 `config.auto_switch_fsm_before_control=True`（默认）时会**隐式**切 FSM：位姿类 → OCS2，关节类（臂/躯干/头）→ MOVEJ；一般无需手写 `send_fsm_command`
 
 **示例：**
 ```python
@@ -952,6 +955,85 @@ interface.send_fsm_command(4)
 cmd = interface.get_fsm_command()
 state = interface.get_fsm_state()
 print(f"FSM command={cmd}, state={state}")
+```
+
+---
+
+### 模式命令与 WBC 状态确认
+
+订阅 `/ocs2_wbc_controller/current_state`（`WbcCurrentState`），用于确认 `/mode_command` 是否生效。
+
+`MODE_COMMAND_TO_WBC_EXPECT` 将命令映射到消息字段：
+
+| `/mode_command` | 检查字段 | 说明 |
+|-----------------|----------|------|
+| `BODY_*` | `body_state` | 由 `BODY_MODE_TO_STATE` 派生（含 `BODY_VERTICAL` 别名） |
+| `ARMS_COUPLED` / `ARMS_INDEPENDENT` | `bimanual_state` | |
+| `BASE_LOCK` / `BASE_UNLOCK` | `base_state` | |
+
+#### `send_mode_command(command: str) -> None`
+
+**功能：** 向 `/mode_command` 发布模式字符串。
+
+**说明：**
+- publish 后盲等 `MODE_SWITCH_SETTLE_TIME_SEC`（默认 `0.1s`），**不**轮询 `current_state`。
+- 需要确认生效时，请在发完命令后调用下方 `wait_until_mode_commands_applied`。
+- 常见前提：FSM 已在 OCS2，否则控制器可能忽略 mode。
+
+#### `mode_command_matches_wbc_state(command: str) -> bool | None`
+
+#### `mode_commands_match_wbc_state(commands: list[str] \| tuple[str, ...]) -> bool | None`
+
+**功能：** 对照最新 `wbc_state` 判断一条 / 一组 mode 是否已生效。
+
+**返回值：**
+- `True` / `False`：可判定且全部匹配 / 未匹配
+- `None`：尚无 `wbc_state`，或命令均无映射
+
+**说明：** 多条命令合并期望字段；**同一字段以后者为准**（例如 `BODY_FREE` 再 `BODY_TRACKING` 只检查 TRACKING）。
+
+#### `wait_until_mode_command_applied(command, *, timeout=5.0, ...) -> bool`
+
+#### `wait_until_mode_commands_applied(commands, *, timeout=5.0, poll_period=0.05, time_now_fn=None, sleep_fn=None) -> bool`
+
+**功能：** 轮询 `current_state`，直到一组 mode 的期望字段**同时**满足（或超时）。
+
+**返回值：** 成功 `True`；超时 `False`；全部无映射则跳过等待返回 `True`。
+
+**推荐用法（多条 mode 往往只反映在一次 state 更新里）：**
+```python
+interface.send_mode_command("BODY_TRACKING")
+interface.send_mode_command("ARMS_COUPLED")
+ok = interface.wait_until_mode_commands_applied(
+    ["BODY_TRACKING", "ARMS_COUPLED"],
+    timeout=5.0,
+)
+```
+
+---
+
+### 协调关节下发
+
+#### `send_coordinated_joint_positions(body_positions=None, left_arm_positions=None, right_arm_positions=None, head_positions=None, *, auto_switch_fsm=True) -> None`
+
+**功能：** 一次性下发关节空间目标（MoveJ 语义），在 WBC 合成与分体栈之间自动选路。
+
+**参数：**
+- `body_positions` / `left_arm_positions` / `right_arm_positions` / `head_positions`：至少一组非空
+- `auto_switch_fsm`（默认 `True`）：下发前隐式切到 MOVEJ（关闭则保持当前 FSM）
+
+**路由概要：**
+- **WBC**：经 `send_dual_arm_joint_positions`；缺某一臂时从 `/joint_states` hold 当前角
+- **非 WBC 但有统一臂 topic**：双臂走统一 topic；躯干可再走 split body topic
+- **其它**：回退到左右臂 handler / `send_body_joint_positions`
+
+**示例：**
+```python
+interface.send_coordinated_joint_positions(
+    body_positions=[0.0, 0.0, 0.0, 0.5],
+    left_arm_positions=left_q,
+    right_arm_positions=right_q,
+)
 ```
 
 ---
@@ -1308,6 +1390,41 @@ if not wait_result["arrived"]:
     print(f"超时未到达，耗时: {wait_result['elapsed']:.2f}s")
 ```
 
+#### `wait_until_joint_arrive(*, left_target_positions=None, right_target_positions=None, body_target_positions=None, left_check_indices=None, right_check_indices=None, body_check_indices=None, timeout=3.0, poll_period=0.05, joint_tolerance=0.03, angular_wrap=True, ...) -> Dict[str, Any]`
+
+**功能：** 按关节角目标等待到达（适合 MoveJ / `send_coordinated_joint_positions` 后）。
+
+**参数：**
+- `*_target_positions`：各组目标角；至少一组非空
+- `*_check_indices`：仅比较这些 0-based 索引（偏绝对目标时跳过 hold 关节）
+- `joint_tolerance`：最大绝对误差阈值（弧度）
+- `angular_wrap`（默认 `True`）：用最短角距离比较旋转关节
+
+**返回值（节选）：**
+```python
+{
+    "arrived": bool,
+    "elapsed": float,
+    "left_error_max_abs": float | None,
+    "right_error_max_abs": float | None,
+    "body_error_max_abs": float | None,
+    "left_joint_errors": dict[int, float],   # 被检查关节的逐关节误差
+    "right_joint_errors": dict[int, float],
+    "body_joint_errors": dict[int, float],
+}
+```
+
+**示例：**
+```python
+# 只校验躯干第 4 个关节（相对腰转）
+result = interface.wait_until_joint_arrive(
+    body_target_positions=body_q,
+    body_check_indices=[3],
+    timeout=5.0,
+    joint_tolerance=0.03,
+)
+```
+
 ---
 
 ### 坐标转换
@@ -1512,6 +1629,11 @@ interface.send_fsm_command(FSM_OCS2)
 8. **目标位置获取**：
    - 手臂的目标位置通过话题订阅获取（`/left_current_target` 或 `/right_current_target`）
    - 如果未配置这些话题，`get_target_pose()` 和 `check_arrival()` 将无法正常工作
+
+9. **Mode 与 FSM**：
+   - `/mode_command` 控制 WBC 身体/双臂/底盘模式；`/fsm_command` 控制 HOME/HOLD/OCS2/MOVEJ
+   - 多条 mode 建议先全部 `send_mode_command`，再一次 `wait_until_mode_commands_applied`，不要按条等待（对端常只更新一次合并后的 `current_state`）
+   - 关节 / 位姿控制在开启 `auto_switch_fsm_before_control` 时会隐式切 FSM（关节→MOVEJ，位姿→OCS2）；一般不必显式调用自动切换 API
 
 ---
 
