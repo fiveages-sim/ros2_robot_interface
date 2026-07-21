@@ -6,7 +6,6 @@ Arm Handler - 单臂处理器
 """
 
 import logging
-import math
 from enum import Enum
 from typing import Optional, Dict, Any, List, Callable
 
@@ -18,6 +17,7 @@ from std_msgs.msg import Float64MultiArray
 
 from ..constants import FSM_MOVEJ, FSM_OCS2
 from ..utils.exceptions import ROS2NotConnectedError
+from ..utils.quat_pose import check_pose_arrival
 
 logger = logging.getLogger(__name__)
 
@@ -324,75 +324,15 @@ class ArmHandler:
         Returns:
             包含到达状态、距离等信息的字典
         """
-        # 使用 config 中的默认值
         pose_threshold = pose_threshold if pose_threshold is not None else self.config.pose_position_threshold
         orient_threshold = orient_threshold if orient_threshold is not None else self.config.pose_orientation_threshold
-        
-        arrived = False
-        pos_dist = float('inf')
-        orient_dist = float('inf')
-        orient_angle_deg = float('inf')
-        total_dist = float('inf')
-        status_msg = None
-        
-        current_pose = self.get_pose()
-        target_pose = self.get_target_pose()
-        
-        if target_pose is not None and current_pose is not None:
-            pos_dist = ((current_pose.position.x - target_pose.position.x) ** 2 +
-                       (current_pose.position.y - target_pose.position.y) ** 2 +
-                       (current_pose.position.z - target_pose.position.z) ** 2) ** 0.5
-
-            # Normalize both quaternions so arrival checking matches the
-            # diagnostic math used by wait_for_arrival() and avoids bias from
-            # non-unit pose messages.
-            cqx = current_pose.orientation.x
-            cqy = current_pose.orientation.y
-            cqz = current_pose.orientation.z
-            cqw = current_pose.orientation.w
-            current_norm = math.sqrt(cqx * cqx + cqy * cqy + cqz * cqz + cqw * cqw)
-            if current_norm > 1e-12:
-                cqx /= current_norm
-                cqy /= current_norm
-                cqz /= current_norm
-                cqw /= current_norm
-            else:
-                cqx, cqy, cqz, cqw = 0.0, 0.0, 0.0, 1.0
-
-            tqx = target_pose.orientation.x
-            tqy = target_pose.orientation.y
-            tqz = target_pose.orientation.z
-            tqw = target_pose.orientation.w
-            target_norm = math.sqrt(tqx * tqx + tqy * tqy + tqz * tqz + tqw * tqw)
-            if target_norm > 1e-12:
-                tqx /= target_norm
-                tqy /= target_norm
-                tqz /= target_norm
-                tqw /= target_norm
-            else:
-                tqx, tqy, tqz, tqw = 0.0, 0.0, 0.0, 1.0
-
-            dot_product = (cqw * tqw +
-                          cqx * tqx +
-                          cqy * tqy +
-                          cqz * tqz)
-            dot_product = max(-1.0, min(1.0, dot_product))
-            orient_dist = 1.0 - abs(dot_product)
-            orient_angle_deg = math.degrees(2.0 * math.acos(abs(dot_product)))
-
-            total_dist = pos_dist + orient_dist * 0.1
-            arrived = (pos_dist < pose_threshold and orient_angle_deg < orient_threshold)
-
-            status_msg = f"{self.label}已到达目标位置" if arrived else f"{self.label}未到达目标位置"
-
-        return {
-            'arrived': arrived,
-            'distance': total_dist,
-            'position_distance': pos_dist,
-            'orientation_distance': orient_dist,
-            'orientation_angle_deg': orient_angle_deg,
-            'status_message': status_msg
-        }
+        return check_pose_arrival(
+            self.label,
+            self.get_pose(),
+            self.get_target_pose(),
+            pose_threshold,
+            orient_threshold,
+        )
     
     def _copy_pose(self, src: Pose, dst: Pose) -> None:
         """复制 pose 数据从 src 到 dst"""

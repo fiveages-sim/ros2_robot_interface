@@ -6,8 +6,11 @@ Scalar-last **(x, y, z, w)** matches ROS / ``geometry_msgs`` and
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 from geometry_msgs.msg import Pose
+from typing import Any
 
 
 def euler_rpy_to_quat_wxyz(roll: float, pitch: float, yaw: float) -> tuple[float, float, float, float]:
@@ -88,3 +91,75 @@ def pose_from_tuple(
     pose.position.x, pose.position.y, pose.position.z = position
     pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w = orientation
     return pose
+
+
+def check_pose_arrival(
+    label: str,
+    current_pose: Pose | None,
+    target_pose: Pose | None,
+    pose_threshold: float,
+    orient_threshold: float,
+) -> dict[str, Any]:
+    """Cartesian pose arrival check (position Euclidean + quaternion angle).
+
+    Same algorithm as the historical ``ArmHandler.check_arrival`` path: normalize
+    both quaternions, use absolute dot product for angle (handles q/-q), and
+    require both position and orientation thresholds.
+    """
+    arrived = False
+    pos_dist = float("inf")
+    orient_dist = float("inf")
+    orient_angle_deg = float("inf")
+    total_dist = float("inf")
+    status_msg = None
+
+    if target_pose is not None and current_pose is not None:
+        pos_dist = (
+            (current_pose.position.x - target_pose.position.x) ** 2
+            + (current_pose.position.y - target_pose.position.y) ** 2
+            + (current_pose.position.z - target_pose.position.z) ** 2
+        ) ** 0.5
+
+        cqx = current_pose.orientation.x
+        cqy = current_pose.orientation.y
+        cqz = current_pose.orientation.z
+        cqw = current_pose.orientation.w
+        current_norm = math.sqrt(cqx * cqx + cqy * cqy + cqz * cqz + cqw * cqw)
+        if current_norm > 1e-12:
+            cqx /= current_norm
+            cqy /= current_norm
+            cqz /= current_norm
+            cqw /= current_norm
+        else:
+            cqx, cqy, cqz, cqw = 0.0, 0.0, 0.0, 1.0
+
+        tqx = target_pose.orientation.x
+        tqy = target_pose.orientation.y
+        tqz = target_pose.orientation.z
+        tqw = target_pose.orientation.w
+        target_norm = math.sqrt(tqx * tqx + tqy * tqy + tqz * tqz + tqw * tqw)
+        if target_norm > 1e-12:
+            tqx /= target_norm
+            tqy /= target_norm
+            tqz /= target_norm
+            tqw /= target_norm
+        else:
+            tqx, tqy, tqz, tqw = 0.0, 0.0, 0.0, 1.0
+
+        dot_product = cqw * tqw + cqx * tqx + cqy * tqy + cqz * tqz
+        dot_product = max(-1.0, min(1.0, dot_product))
+        orient_dist = 1.0 - abs(dot_product)
+        orient_angle_deg = math.degrees(2.0 * math.acos(abs(dot_product)))
+
+        total_dist = pos_dist + orient_dist * 0.1
+        arrived = pos_dist < pose_threshold and orient_angle_deg < orient_threshold
+        status_msg = f"{label}已到达目标位置" if arrived else f"{label}未到达目标位置"
+
+    return {
+        "arrived": arrived,
+        "distance": total_dist,
+        "position_distance": pos_dist,
+        "orientation_distance": orient_dist,
+        "orientation_angle_deg": orient_angle_deg,
+        "status_message": status_msg,
+    }

@@ -891,6 +891,53 @@ if result['arrived']:
     print("身体已到达目标位置")
 ```
 
+#### `get_body_current_pose() -> Optional[Pose]`
+
+**功能：** 获取最新的 body 当前笛卡尔位姿（来自 `/body_current_pose` 等 `PoseStamped` 话题的 `.pose`）
+
+**返回值：** `geometry_msgs.msg.Pose` 或 `None`（尚未收到消息时）
+
+#### `get_body_current_target_pose() -> Optional[Pose]`
+
+**功能：** 获取最新的 body 目标笛卡尔位姿（来自 `/body_current_target` 等 `PoseStamped` 话题的 `.pose`）
+
+**返回值：** `geometry_msgs.msg.Pose` 或 `None`（尚未收到消息时）
+
+#### `check_arrive(part='body_pose', arm_pose_threshold=None, arm_orient_threshold=None) -> Dict[str, Any]`
+
+**功能：** 检查 body 笛卡尔位姿是否到达目标（位置欧氏距离 + 姿态角度双阈值，与手臂一致）
+
+**参数：**
+- `part` (str): 设置为 `'body_pose'`
+- `arm_pose_threshold` (Optional[float]): 位置阈值（米）；`None` 时用 `config.pose_position_threshold`
+- `arm_orient_threshold` (Optional[float]): 姿态角度阈值（度）；`None` 时用 `config.pose_orientation_threshold`
+
+**返回值：**
+```python
+{
+    'arrived': bool,
+    'distance': float,
+    'position_distance': float,
+    'orientation_distance': float,
+    'orientation_angle_deg': float,
+    'status_message': str | None,
+}
+```
+
+**示例：**
+```python
+result = interface.check_arrive('body_pose')
+# 或轮询等待
+wait_result = interface.wait_until_arrive(
+    part='body_pose',
+    timeout=10.0,
+    arm_pose_threshold=0.05,
+    arm_orient_threshold=5.0,
+)
+```
+
+**配置：** 需设置 `body_current_pose_topic`（如 `"/body_current_pose"`）与 `body_current_target_pose_topic`（如 `"/body_current_target"`）。
+
 ---
 
 ## 统一接口方法
@@ -1288,14 +1335,18 @@ interface.send_joint_trajectory(joint_names, waypoints, trajectory_duration=5.0)
   - `'left_gripper'`: 左夹爪
   - `'right_gripper'`: 右夹爪（双臂模式）
   - `'head'`: 头部
-  - `'body'`: 身体
+  - `'body'`: 身体（关节空间）
+  - `'body_pose'`: 身体笛卡尔位姿（位置 + 姿态，阈值见 `arm_pose_threshold` / `arm_orient_threshold`）
   - `'arm'`: 手臂（单臂模式，会自动转换为 'left_arm'）
   - `'gripper'`: 夹爪（单臂模式，会自动转换为 'left_gripper'）
 - `position_threshold` (Optional[float]): 关节位置阈值（仅用于 head/body），如果为 None 则使用默认值
+- `arm_pose_threshold` (Optional[float]): 笛卡尔位置阈值（米），用于手臂与 `body_pose`
+- `arm_orient_threshold` (Optional[float]): 笛卡尔姿态角度阈值（度），用于手臂与 `body_pose`
 
 **说明：**
 - 手臂和夹爪使用各自 handler 的默认阈值（可通过直接调用 handler 的方法来自定义）
-- 头部和身体使用 `position_threshold` 参数或默认的 `self.position_threshold`
+- 头部和身体关节使用 `position_threshold` 参数或默认的 `self.position_threshold`
+- `body_pose` 使用 `arm_pose_threshold` / `arm_orient_threshold`（或 `config.pose_position_threshold` / `config.pose_orientation_threshold`）
 - 如果接口未连接，返回 `None` 而不是抛出异常
 
 **返回值：**
