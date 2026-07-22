@@ -359,6 +359,14 @@ class ROS2RobotInterface:
         if "/body_joint_controller/current_target_joint" in topic_names:
             self.config.body_joint_current_target_topic = "/body_joint_controller/current_target_joint"
 
+        if self.config.body_current_pose_topic is None and "/body_current_pose" in topic_names:
+            self.config.body_current_pose_topic = "/body_current_pose"
+            logger.info("Detected body current pose topic: /body_current_pose")
+
+        if self.config.body_current_target_pose_topic is None and "/body_current_target" in topic_names:
+            self.config.body_current_target_pose_topic = "/body_current_target"
+            logger.info("Detected body current target pose topic: /body_current_target")
+
         if "/body_joint_controller/waist_lifting" in topic_names:
             self.config.waist_lifting_topic = "/body_joint_controller/waist_lifting"
 
@@ -1813,6 +1821,8 @@ class ROS2RobotInterface:
             self.left_arm_handler.latest_target_pose = None
         if self.right_arm_handler:
             self.right_arm_handler.latest_target_pose = None
+        if body_pose is not None and desired_body_mode == "BODY_TRACKING":
+            self.body_current_target_pose = None
         
         self.dual_target_stamped_pub.publish(path_msg)
         if len(path_msg.poses) == 2:
@@ -3759,6 +3769,9 @@ class ROS2RobotInterface:
         if self.body_current_target_pose_sub:
             self.body_current_target_pose_sub.destroy()
             self.body_current_target_pose_sub = None
+
+        self.body_current_pose = None
+        self.body_current_target_pose = None
 
         if self.wbc_state_sub:
             self.wbc_state_sub.destroy()

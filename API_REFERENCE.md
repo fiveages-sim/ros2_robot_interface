@@ -936,7 +936,9 @@ wait_result = interface.wait_until_arrive(
 )
 ```
 
-**配置：** 需设置 `body_current_pose_topic`（如 `"/body_current_pose"`）与 `body_current_target_pose_topic`（如 `"/body_current_target"`）。
+**配置：** `connect()` 会自动检测 `/body_current_pose` 与 `/body_current_target`；也可手动设置 `body_current_pose_topic` / `body_current_target_pose_topic`。
+
+**示例脚本：** `examples/test/10_body_waist/check_body_pose_arrive.py`
 
 ---
 
