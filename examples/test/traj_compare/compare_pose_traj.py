@@ -74,6 +74,39 @@ def quaternion_to_euler(quat):
     """四元数转欧拉角（度）。输入格式 [qx, qy, qz, qw]，与 ROS geometry_msgs/Quaternion 一致。"""
     return R.from_quat(quat).as_euler('xyz', degrees=True)
 
+def dtw_distance(seq_a, seq_b):
+    """标准 DP 版 DTW 距离，衡量两条 3D 位置序列的形状相似度（忽略时间/速度错位）。
+
+    seq_a、seq_b 形如 (N,3) / (M,3)。局部代价用逐点欧氏距离，返回累计 DTW 距离
+    与归一化距离（累计距离 / 匹配路径长度），单位米。纯 numpy 实现，无外部依赖。
+    """
+    n, m = len(seq_a), len(seq_b)
+    cost = np.full((n + 1, m + 1), np.inf)
+    cost[0, 0] = 0.0
+    for i in range(1, n + 1):
+        diff = seq_b - seq_a[i - 1]          # (m,3)
+        d = np.sqrt(np.sum(diff * diff, axis=1))  # (m,) 逐点欧氏距离
+        for j in range(1, m + 1):
+            cost[i, j] = d[j - 1] + min(
+                cost[i - 1, j],       # 插入
+                cost[i, j - 1],       # 删除
+                cost[i - 1, j - 1],   # 匹配
+            )
+    # 回溯匹配路径长度，用于归一化
+    i, j, path_len = n, m, 0
+    while i > 0 and j > 0:
+        path_len += 1
+        step = min(cost[i - 1, j], cost[i, j - 1], cost[i - 1, j - 1])
+        if step == cost[i - 1, j - 1]:
+            i, j = i - 1, j - 1
+        elif step == cost[i - 1, j]:
+            i -= 1
+        else:
+            j -= 1
+    total = cost[n, m]
+    normalized = total / path_len if path_len > 0 else float('nan')
+    return total, normalized
+
 def prompt_file_path(prompt):
     """提示用户输入文件路径，支持去掉引号并展开 ~。"""
     while True:
@@ -394,6 +427,59 @@ def plot_comparison_quaternion(cal_timestamps, cal_quaternions, real_timestamps,
     plt.tight_layout()
     return fig
 
+def compute_and_print_error_metrics(cal_positions, cal_quaternions, cal_timestamps,
+                                    real_positions, real_quaternions, real_timestamps,
+                                    ref_label='Calculated'):
+    """计算并打印贴合指标：位置(合成3D) RMSE/Max、姿态(角度) RMSE/Max、形状 DTW。
+
+    - 位置与姿态：在时间对齐（重采样）后的共同时间轴上逐点比较。
+    - DTW：用原始位置序列（忽略时间/速度错位），衡量路径形状相似度。
+    """
+    # 时间对齐后的位置逐点欧氏误差
+    _, cal_p, real_p = interpolate_to_common_time(
+        cal_timestamps, cal_positions, real_timestamps, real_positions)
+    pos_err = np.sqrt(np.sum((cal_p - real_p) ** 2, axis=1))  # (N,) 合成 3D
+    pos_rmse = np.sqrt(np.mean(pos_err ** 2))
+    pos_max = np.max(pos_err)
+
+    # 时间对齐后的姿态测地角度误差（度）
+    _, cal_q, real_q = interpolate_quaternions_to_common_time(
+        cal_timestamps, cal_quaternions, real_timestamps, real_quaternions)
+    dots = np.abs(np.sum(cal_q * real_q, axis=1))       # |<q_ref, q_real>|，消 ±q 二义
+    dots = np.clip(dots, -1.0, 1.0)
+    ang_err = np.degrees(2.0 * np.arccos(dots))          # (N,) 最短旋转角，度
+    ang_rmse = np.sqrt(np.mean(ang_err ** 2))
+    ang_max = np.max(ang_err)
+
+    # 形状 DTW（原始位置序列，忽略时间）
+    dtw_total, dtw_norm = dtw_distance(cal_positions, real_positions)
+
+    print(f"\nError metrics ({ref_label} vs Actual):")
+    print(f"  Position (3D)  RMSE: {pos_rmse * 1000:.2f} mm, Max: {pos_max * 1000:.2f} mm")
+    print(f"  Orientation    RMSE: {ang_rmse:.3f} deg, Max: {ang_max:.3f} deg")
+    print(f"  Shape DTW      total: {dtw_total:.4f} m, normalized: {dtw_norm * 1000:.2f} mm/step")
+
+    return {
+        'pos_rmse_mm': pos_rmse * 1000,
+        'pos_max_mm': pos_max * 1000,
+        'ang_rmse_deg': ang_rmse,
+        'ang_max_deg': ang_max,
+        'dtw_total_m': dtw_total,
+        'dtw_norm_mm': dtw_norm * 1000,
+    }
+
+
+def _annotate_metrics(fig, lines):
+    """在图右上角叠加一个指标文本框，lines 为字符串列表。"""
+    fig.text(
+        0.98, 0.98, "\n".join(lines),
+        fontsize=10, family='monospace',
+        va='top', ha='right',
+        bbox=dict(boxstyle='round', facecolor='lightyellow',
+                  edgecolor='gray', alpha=0.9),
+    )
+
+
 def print_comparison_statistics(cal_positions, cal_quaternions, cal_timestamps,
                                real_positions, real_quaternions, real_timestamps,
                                ref_label='Calculated'):
@@ -431,6 +517,13 @@ def print_comparison_statistics(cal_positions, cal_quaternions, cal_timestamps,
     print(f"  {ref_label}: {cal_total:.3f} m")
     print(f"  Actual: {real_total:.3f} m")
     print(f"  Difference: {cal_total - real_total:.3f} m")
+
+    # 贴合指标：位置(3D) RMSE/Max、姿态(角度) RMSE/Max、形状 DTW
+    return compute_and_print_error_metrics(
+        cal_positions, cal_quaternions, cal_timestamps,
+        real_positions, real_quaternions, real_timestamps,
+        ref_label=ref_label,
+    )
 
 def select_run_directory():
     """列出 record_data/ 下的子目录供选择，返回所选子目录的绝对路径。
@@ -523,10 +616,15 @@ def run_comparison(cal_file, real_file, ref_channel, out_dir, out_suffix):
         real_positions, real_quaternions, real_timestamps, real_df = load_data_from_csv(
             real_file, 'real', align_motion_start=False)
 
-        # 打印对比统计信息
-        print_comparison_statistics(cal_positions, cal_quaternions, cal_timestamps,
-                                   real_positions, real_quaternions, real_timestamps,
-                                   ref_label=ref_label)
+        # 打印对比统计信息，并拿到贴合指标用于图上标注
+        metrics = print_comparison_statistics(
+            cal_positions, cal_quaternions, cal_timestamps,
+            real_positions, real_quaternions, real_timestamps,
+            ref_label=ref_label)
+
+        pos_line = f"Pos RMSE {metrics['pos_rmse_mm']:.2f} mm | Max {metrics['pos_max_mm']:.2f} mm"
+        ang_line = f"Ori RMSE {metrics['ang_rmse_deg']:.3f} deg | Max {metrics['ang_max_deg']:.3f} deg"
+        dtw_line = f"Shape DTW {metrics['dtw_norm_mm']:.2f} mm/step"
 
         # 创建图表
         print("\nGenerating comparison plots...")
@@ -536,28 +634,31 @@ def run_comparison(cal_file, real_file, ref_channel, out_dir, out_suffix):
         fig2_path = os.path.join(out_dir, f'position_comparison_aligned{out_suffix}.png')
         fig3_path = os.path.join(out_dir, f'quaternion_comparison_aligned{out_suffix}.png')
 
-        # 1. 合并3D轨迹对比图（两个轨迹在同一个坐标系）
+        # 1. 合并3D轨迹对比图（两个轨迹在同一个坐标系）：总览，叠加全部指标
         print("  Generating combined 3D trajectory comparison...")
-        plot_combined_3d_trajectory(cal_positions, cal_quaternions, cal_timestamps,
-                                     real_positions, real_quaternions, real_timestamps,
-                                     ref_label=ref_label)
-        plt.savefig(fig1_path, dpi=150, bbox_inches='tight')
+        fig1 = plot_combined_3d_trajectory(cal_positions, cal_quaternions, cal_timestamps,
+                                            real_positions, real_quaternions, real_timestamps,
+                                            ref_label=ref_label)
+        _annotate_metrics(fig1, [pos_line, ang_line, dtw_line])
+        fig1.savefig(fig1_path, dpi=150, bbox_inches='tight')
         print(f"  Saved: {fig1_path}")
 
-        # 2. 位置对比图（时间对齐）
+        # 2. 位置对比图（时间对齐）：叠加位置 + DTW
         print("  Generating position comparison (time-aligned)...")
-        plot_comparison_position(cal_timestamps, cal_positions,
-                                 real_timestamps, real_positions,
-                                 ref_label=ref_label)
-        plt.savefig(fig2_path, dpi=150, bbox_inches='tight')
+        fig2 = plot_comparison_position(cal_timestamps, cal_positions,
+                                        real_timestamps, real_positions,
+                                        ref_label=ref_label)
+        _annotate_metrics(fig2, [pos_line, dtw_line])
+        fig2.savefig(fig2_path, dpi=150, bbox_inches='tight')
         print(f"  Saved: {fig2_path}")
 
-        # 3. 四元数对比图（时间对齐，使用 Slerp）
+        # 3. 四元数对比图（时间对齐，使用 Slerp）：叠加姿态
         print("  Generating quaternion comparison (time-aligned with Slerp)...")
-        plot_comparison_quaternion(cal_timestamps, cal_quaternions,
-                                   real_timestamps, real_quaternions,
-                                   ref_label=ref_label)
-        plt.savefig(fig3_path, dpi=150, bbox_inches='tight')
+        fig3 = plot_comparison_quaternion(cal_timestamps, cal_quaternions,
+                                          real_timestamps, real_quaternions,
+                                          ref_label=ref_label)
+        _annotate_metrics(fig3, [ang_line])
+        fig3.savefig(fig3_path, dpi=150, bbox_inches='tight')
         print(f"  Saved: {fig3_path}")
 
         print(f"\n✅ [{out_suffix or 'result'}] plots generated successfully!")
