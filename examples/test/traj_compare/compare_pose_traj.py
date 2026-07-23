@@ -77,8 +77,9 @@ def quaternion_to_euler(quat):
 def dtw_distance(seq_a, seq_b):
     """标准 DP 版 DTW 距离，衡量两条 3D 位置序列的形状相似度（忽略时间/速度错位）。
 
-    seq_a、seq_b 形如 (N,3) / (M,3)。局部代价用逐点欧氏距离，返回累计 DTW 距离
-    与归一化距离（累计距离 / 匹配路径长度），单位米。纯 numpy 实现，无外部依赖。
+    seq_a、seq_b 形如 (N,3) / (M,3)。局部代价用逐点欧氏距离，返回累计 DTW 距离、
+    归一化距离（累计距离 / 匹配路径长度）以及匹配路径上配对点距离的最大值，单位米。
+    纯 numpy 实现，无外部依赖。
     """
     n, m = len(seq_a), len(seq_b)
     cost = np.full((n + 1, m + 1), np.inf)
@@ -92,10 +93,14 @@ def dtw_distance(seq_a, seq_b):
                 cost[i, j - 1],       # 删除
                 cost[i - 1, j - 1],   # 匹配
             )
-    # 回溯匹配路径长度，用于归一化
+    # 回溯匹配路径：记录路径长度（归一化用）与配对点距离最大值
     i, j, path_len = n, m, 0
+    max_pair = 0.0
     while i > 0 and j > 0:
         path_len += 1
+        pair_dist = float(np.linalg.norm(seq_a[i - 1] - seq_b[j - 1]))  # 该配对点距离
+        if pair_dist > max_pair:
+            max_pair = pair_dist
         step = min(cost[i - 1, j], cost[i, j - 1], cost[i - 1, j - 1])
         if step == cost[i - 1, j - 1]:
             i, j = i - 1, j - 1
@@ -105,7 +110,7 @@ def dtw_distance(seq_a, seq_b):
             j -= 1
     total = cost[n, m]
     normalized = total / path_len if path_len > 0 else float('nan')
-    return total, normalized
+    return total, normalized, max_pair
 
 def prompt_file_path(prompt):
     """提示用户输入文件路径，支持去掉引号并展开 ~。"""
@@ -452,12 +457,13 @@ def compute_and_print_error_metrics(cal_positions, cal_quaternions, cal_timestam
     ang_max = np.max(ang_err)
 
     # 形状 DTW（原始位置序列，忽略时间）
-    dtw_total, dtw_norm = dtw_distance(cal_positions, real_positions)
+    dtw_total, dtw_norm, dtw_max = dtw_distance(cal_positions, real_positions)
 
     print(f"\nError metrics ({ref_label} vs Actual):")
     print(f"  Position (3D)  RMSE: {pos_rmse * 1000:.2f} mm, Max: {pos_max * 1000:.2f} mm")
     print(f"  Orientation    RMSE: {ang_rmse:.3f} deg, Max: {ang_max:.3f} deg")
-    print(f"  Shape DTW      total: {dtw_total:.4f} m, normalized: {dtw_norm * 1000:.2f} mm/step")
+    print(f"  Shape DTW      total: {dtw_total:.4f} m, normalized: {dtw_norm * 1000:.2f} mm/step, "
+          f"Max(matched): {dtw_max * 1000:.2f} mm")
 
     return {
         'pos_rmse_mm': pos_rmse * 1000,
@@ -466,6 +472,7 @@ def compute_and_print_error_metrics(cal_positions, cal_quaternions, cal_timestam
         'ang_max_deg': ang_max,
         'dtw_total_m': dtw_total,
         'dtw_norm_mm': dtw_norm * 1000,
+        'dtw_max_mm': dtw_max * 1000,
     }
 
 
@@ -624,7 +631,8 @@ def run_comparison(cal_file, real_file, ref_channel, out_dir, out_suffix):
 
         pos_line = f"Pos RMSE {metrics['pos_rmse_mm']:.2f} mm | Max {metrics['pos_max_mm']:.2f} mm"
         ang_line = f"Ori RMSE {metrics['ang_rmse_deg']:.3f} deg | Max {metrics['ang_max_deg']:.3f} deg"
-        dtw_line = f"Shape DTW {metrics['dtw_norm_mm']:.2f} mm/step"
+        dtw_line = (f"Shape DTW {metrics['dtw_norm_mm']:.2f} mm/step | "
+                    f"Max {metrics['dtw_max_mm']:.2f} mm")
 
         # 创建图表
         print("\nGenerating comparison plots...")
