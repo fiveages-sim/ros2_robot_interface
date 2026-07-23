@@ -3,22 +3,54 @@
 规划轨迹与实际末端轨迹录制脚本（框架版）
 ==========================================
 
-配合控制器内的 TrajectoryRecorder 使用：通过 ROS 参数控制录制的开始/结束，
-录制窗口内执行要测试的运动（MoveL / MoveC / MoveJ 等），控制器会在窗口结束时
-把 pred（MPC 预测）与 real（实际 FK）轨迹落盘为 CSV，供 compare_pose_traj.py 对比。
+工作原理
+--------
+本脚本本质上是通过设置控制器的两个 ROS 2 参数来管理 TrajectoryRecorder：
+1. traj_record_dir：设置本次 CSV 的保存目录；
+2. traj_record_enabled：设为 True 时清空旧缓存并开始录制，设回 False 时停止录制，
+   并将缓存同步写入 traj_record_dir。
+
+因此，轨迹是由控制器进程采样和保存的，并不要求运动指令必须由本脚本发出。录制窗口内
+可以执行 MoveL / MoveC / MoveJ，也可以从其他程序、命令行或遥操作设备发送运动指令。
+控制器会按运动链路输出 pred（MPC 预测）或 cal（IK 笛卡尔规划），并同时输出 real
+（实际 FK）轨迹，供 compare_pose_traj.py 对比。
+
+run_test_motion 只是可选的测试辅助
+-----------------------------------
+main() 中的
+    motion_ok = run_test_motion(interface)
+只是为了方便一键执行示例运动和验证录制功能，不是启动或维持录制所必需的调用。
+
+如需记录外部指令或遥操作，可在成功设置 traj_record_dir 并开启
+traj_record_enabled=True 后，不调用 run_test_motion，而让脚本保持运行一段时间，例如：
+    time.sleep(60.0)  # 这段时间内从其他程序或遥操作设备发送运动指令
+等待结束后再设置 traj_record_enabled=False，即可停止录制并落盘。sleep 时长就是本次
+录制窗口，可按实际测试需要调整；无论正常路径还是异常退出，都应确保最终关闭录制参数。
 
 录制流程
 --------
 1. 连接 ROS2RobotInterface。
 2. 设置控制器参数 traj_record_dir = <保存目录>。
 3. 设置 traj_record_enabled = True（false->true 会清空缓存并开始录制）。
-4. 执行要测试的运动（见 run_test_motion，切换注释选定测试项）。
+4. 可选：调用 run_test_motion 执行内置测试；或保持脚本运行，从外部发送运动指令。
 5. 设置 traj_record_enabled = False（true->false 触发控制器同步落盘）。
 6. 提示产物路径。
+
+录制时长与容量
+--------------
+TrajectoryRecorder 为每个通道预分配 30000 个采样点。当前控制器约以 100 Hz 记录，
+因此预分配容量约覆盖 300 秒，即 5 分钟。
+
+30000 点不是硬上限：超过后不会自动停止、覆盖或丢弃已有数据，std::vector 会继续动态
+扩容，所以技术上没有固定的最长录制时间。但扩容会增加内存占用，并可能带来控制周期
+抖动；录制越久，关闭参数时同步写 CSV 的耗时和磁盘占用也越大。为避免录制期间扩容，
+建议单次录制控制在 5 分钟以内。若必须长时间录制，应评估内存、磁盘与实时性影响，
+并考虑增大控制器预分配容量或对记录数据降采样。
 
 产物（由控制器写入 traj_record_dir）
 ------------------------------------
     pred_left.csv / pred_right.csv  MPC 预测末端轨迹（被预测时刻绝对时间戳）
+    cal_left.csv / cal_right.csv    IK 笛卡尔规划轨迹
     real_left.csv / real_right.csv  实际 FK 末端轨迹（录制窗口内始终记录）
 
 注意
@@ -28,6 +60,7 @@
 - 必须先设 dir 再设 enabled=True，否则用控制器默认目录。
 - 运动 action 同步返回后再关闭录制，保证窗口恰好包住运动。
 - 控制器与本脚本需在同一台机器（CSV 落在控制器端的 traj_record_dir）。
+- 建议每次录制都明确执行 True->False；若长期保持 True，缓存会持续占用更多内存。
 """
 
 import os
