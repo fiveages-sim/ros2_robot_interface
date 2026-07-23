@@ -336,7 +336,7 @@ def test_execute_movel(interface: ROS2RobotInterface) -> bool:
     if cur_pose is None:
         print("    无法获取左臂当前位姿（检查 pose 话题）")
         return False
-    endpoint = _offset_pose(cur_pose, dx=-0.2, dy=0.0, dz=-0.10)
+    endpoint = _offset_pose(cur_pose, dx=-0.2, dy=0.0, dz=-0.0)
     print(f"    MoveL left: z {cur_pose.position.z:.3f} -> {endpoint.position.z:.3f}")
     result = interface.execute_movel_action(
         "left",
