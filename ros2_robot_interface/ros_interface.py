@@ -1564,7 +1564,15 @@ class ROS2RobotInterface:
         dst.orientation.w = src.orientation.w
     
     def send_target_path(self, left_poses: List[Pose | PoseStamped], right_poses: List[Pose | PoseStamped], frame_id: Optional[str] = None) -> None:
-        """Send target path for dual-arm robot."""
+        """Send target path for dual-arm robot.
+
+        .. deprecated::
+            第一代双臂路径接口，通过发布 ``/target_path`` topic 下发路径。已被第二代
+            ExecutePath service 接口取代：请改用 :meth:`execute_path`、
+            :meth:`execute_left_path`、:meth:`execute_right_path`。第二代接口支持
+            ``trajectory_duration``、返回 ``success``、允许左右路径不等长、空侧保持
+            原有参考轨迹。本方法暂予保留仅为向后兼容，新代码不应再使用。
+        """
         if not self.is_connected:
             raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
         
