@@ -407,7 +407,16 @@ def main() -> int:
             print("    警告: 测试运动未成功完成，仍会停止并落盘已录数据")
 
         print("\n[5] 停止录制并落盘...")
-        set_record_enabled(interface, controller_node, False)>
+        set_record_enabled(interface, controller_node, False)
+        record_started = False
+        # 落盘为同步操作，设置返回后产物应已写出
+        time.sleep(0.2)
+
+        # 录制已关闭后再回 HOME，回程轨迹不会被录入 CSV。
+        print("\n[6] 回到 HOME 位置...")
+        try:
+            interface.send_fsm_command(1)  # 1: HOME（内部会自动先切 HOLD）
+            print("    已发送 HOME 指令")
         except Exception as home_exc:  # noqa: BLE001
             print(f"    警告: 回 HOME 失败: {home_exc}")
 
