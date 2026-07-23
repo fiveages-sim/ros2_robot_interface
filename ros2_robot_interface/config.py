@@ -73,6 +73,8 @@ class ROS2RobotInterfaceConfig:
     waist_lifting_command_topic: str | None = None  # 【可自动检测】腰部升降速度控制话题，例如 "/body_joint_controller/waist_lifting_command"
     waist_turning_command_topic: str | None = None  # 【可自动检测】腰部旋转速度控制话题，例如 "/body_joint_controller/waist_turning_command"
     body_joint_current_target_topic: str | None = None  # 【可自动检测】腰部关节控制器话题，例如 "/body_joint_controller/target_joint_position"
+    body_current_pose_topic: str | None = None  # 【可自动检测】body 当前笛卡尔位姿话题（PoseStamped），例如 "/body_current_pose"，用于 body pose 到位判定
+    body_current_target_pose_topic: str | None = None  # 【可自动检测】body 目标笛卡尔位姿话题（PoseStamped），例如 "/body_current_target"，用于 body pose 到位判定
     
     # ============================================================================
     # 手臂关节控制器话题（自动检测，无需手动配置）

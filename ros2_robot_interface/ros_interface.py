@@ -40,7 +40,7 @@ from arms_ros2_control_msgs.srv import ExecutePath
 from .config import ControlType, ROS2RobotInterfaceConfig
 from .constants import FSM_HOLD, FSM_HOME, FSM_MOVEJ, FSM_OCS2
 from .utils.exceptions import ROS2AlreadyConnectedError, ROS2NotConnectedError
-from .utils.quat_pose import quat_multiply, rotate_vector_by_quat
+from .utils.quat_pose import check_pose_arrival, quat_multiply, rotate_vector_by_quat
 from .handler import ArmHandler, ArmType, GripperHandler, GripperType
 from .utils.discovery import (
     discover_topics as _discover_topics,
@@ -94,6 +94,8 @@ class ROS2RobotInterface:
         self.fsm_state_sub: Subscription | None = None
         self.robot_description_sub: Subscription | None = None
         self.body_current_target_sub: Subscription | None = None
+        self.body_current_pose_sub: Subscription | None = None
+        self.body_current_target_pose_sub: Subscription | None = None
         self.wbc_state_sub: Subscription | None = None
         self.target_path_pub: Publisher | None = None
         self.execute_path_client: Client | None = None
@@ -143,6 +145,8 @@ class ROS2RobotInterface:
         self.head_target_positions: Optional[List[float]] = None
         self.body_target_positions: Optional[List[float]] = None
         self.body_current_target: Optional[List[float]] = None
+        self.body_current_pose: Optional[Pose] = None
+        self.body_current_target_pose: Optional[Pose] = None
         self.wbc_state: Optional[WbcCurrentState] = None
         
         self.tf_buffer: Optional[tf2_ros.Buffer] = None
@@ -355,6 +359,14 @@ class ROS2RobotInterface:
         if "/body_joint_controller/current_target_joint" in topic_names:
             self.config.body_joint_current_target_topic = "/body_joint_controller/current_target_joint"
 
+        if self.config.body_current_pose_topic is None and "/body_current_pose" in topic_names:
+            self.config.body_current_pose_topic = "/body_current_pose"
+            logger.info("Detected body current pose topic: /body_current_pose")
+
+        if self.config.body_current_target_pose_topic is None and "/body_current_target" in topic_names:
+            self.config.body_current_target_pose_topic = "/body_current_target"
+            logger.info("Detected body current target pose topic: /body_current_target")
+
         if "/body_joint_controller/waist_lifting" in topic_names:
             self.config.waist_lifting_topic = "/body_joint_controller/waist_lifting"
 
@@ -531,6 +543,24 @@ class ROS2RobotInterface:
                     10
                 )
                 logger.info("✅ Subscribed to {} for body target tracking".format(self.config.body_joint_current_target_topic))
+
+            if self.config.body_current_pose_topic:
+                self.body_current_pose_sub = self.robot_node.create_subscription(
+                    PoseStamped,
+                    self.config.body_current_pose_topic,
+                    self._body_current_pose_callback,
+                    10
+                )
+                logger.info("✅ Subscribed to {} for body current pose tracking".format(self.config.body_current_pose_topic))
+
+            if self.config.body_current_target_pose_topic:
+                self.body_current_target_pose_sub = self.robot_node.create_subscription(
+                    PoseStamped,
+                    self.config.body_current_target_pose_topic,
+                    self._body_current_target_pose_callback,
+                    10
+                )
+                logger.info("✅ Subscribed to {} for body target pose tracking".format(self.config.body_current_target_pose_topic))
 
             if self.config.joint_trajectory_action_name:
                 self.joint_trajectory_action_client = ActionClient(
@@ -759,6 +789,20 @@ class ROS2RobotInterface:
             logger.debug(f"Body current target updated: {self.body_current_target}")
         except Exception as e:
             logger.error(f"Error in body current target callback: {e}", exc_info=True)
+
+    def _body_current_pose_callback(self, msg: PoseStamped) -> None:
+        """Callback for body current cartesian pose messages."""
+        try:
+            self.body_current_pose = msg.pose
+        except Exception as e:
+            logger.error(f"Error in body current pose callback: {e}", exc_info=True)
+
+    def _body_current_target_pose_callback(self, msg: PoseStamped) -> None:
+        """Callback for body target cartesian pose messages."""
+        try:
+            self.body_current_target_pose = msg.pose
+        except Exception as e:
+            logger.error(f"Error in body current target pose callback: {e}", exc_info=True)
 
     def _wbc_state_callback(self, msg: WbcCurrentState) -> None:
         """Callback for /ocs2_wbc_controller/current_state."""
@@ -1007,6 +1051,14 @@ class ROS2RobotInterface:
         if self.body_current_target is None:
             return None
         return list(self.body_current_target)
+
+    def get_body_current_pose(self) -> Optional[Pose]:
+        """Get latest body current cartesian pose (PoseStamped.pose)."""
+        return self.body_current_pose
+
+    def get_body_current_target_pose(self) -> Optional[Pose]:
+        """Get latest body target cartesian pose (PoseStamped.pose)."""
+        return self.body_current_target_pose
 
     def wait_for_movel_action_server(self, timeout: float = 5.0) -> bool:
         """Wait for the configured parameterized MOVL action server."""
@@ -1769,6 +1821,8 @@ class ROS2RobotInterface:
             self.left_arm_handler.latest_target_pose = None
         if self.right_arm_handler:
             self.right_arm_handler.latest_target_pose = None
+        if body_pose is not None and desired_body_mode == "BODY_TRACKING":
+            self.body_current_target_pose = None
         
         self.dual_target_stamped_pub.publish(path_msg)
         if len(path_msg.poses) == 2:
@@ -2954,14 +3008,14 @@ class ROS2RobotInterface:
         arm_pose_threshold: Optional[float] = None,
         arm_orient_threshold: Optional[float] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Check if head, body joints, arm poses, or grippers have arrived at target positions/poses.
+        """Check if head, body joints, body pose, arm poses, or grippers have arrived at target positions/poses.
         
         Args:
-            part: 要检查的部分，可选值：None（所有部分）、'head'、'body'、'left_arm'、'right_arm'、
+            part: 要检查的部分，可选值：None（所有部分）、'head'、'body'、'body_pose'、'left_arm'、'right_arm'、
                   'left_gripper'、'right_gripper'、'arm'（单臂模式）、'gripper'（单臂模式）
             position_threshold: 关节位置阈值（仅用于 head 和 body），如果为 None 则使用默认值
-            arm_pose_threshold: 笛卡尔末端位置容差（米），传给左右臂 ``check_arrival``；None 用 handler 默认
-            arm_orient_threshold: 笛卡尔末端姿态角度容差（度）；None 用 handler 默认
+            arm_pose_threshold: 笛卡尔末端位置容差（米），传给左右臂 ``check_arrival`` 与 body_pose；None 用 config 默认
+            arm_orient_threshold: 笛卡尔末端姿态角度容差（度）；None 用 config 默认
         
         Returns:
             包含到达状态和距离信息的字典，如果未连接则返回 None
@@ -2996,6 +3050,18 @@ class ROS2RobotInterface:
             if part == 'body':
                 return body_result
             result['body'] = body_result
+
+        if part is None or part == 'body_pose':
+            body_pose_result = check_pose_arrival(
+                'BODY_POSE',
+                self.get_body_current_pose(),
+                self.get_body_current_target_pose(),
+                arm_pose_threshold if arm_pose_threshold is not None else self.config.pose_position_threshold,
+                arm_orient_threshold if arm_orient_threshold is not None else self.config.pose_orientation_threshold,
+            )
+            if part == 'body_pose':
+                return body_pose_result
+            result['body_pose'] = body_pose_result
         
         if part is None or part == 'left_arm':
             arm_result = self.left_arm_handler.check_arrival(arm_pose_threshold, arm_orient_threshold)
@@ -3058,12 +3124,12 @@ class ROS2RobotInterface:
 
         Args:
             part: Part name accepted by ``check_arrive`` (e.g. ``arm``, ``gripper``,
-                ``left_arm``, ``left_gripper``).
+                ``left_arm``, ``left_gripper``, ``body_pose``).
             timeout: Maximum wait time in seconds.
             poll_period: Polling interval in seconds.
             position_threshold: Optional threshold forwarded to ``check_arrive`` (head/body 关节)。
-            arm_pose_threshold: 左右臂笛卡尔到位：位置阈值（米），见 ``check_arrive``。
-            arm_orient_threshold: 左右臂笛卡尔到位：姿态角度阈值（度），见 ``check_arrive``。
+            arm_pose_threshold: 笛卡尔到位位置阈值（米），用于手臂与 ``body_pose``，见 ``check_arrive``。
+            arm_orient_threshold: 笛卡尔到位姿态角度阈值（度），用于手臂与 ``body_pose``，见 ``check_arrive``。
             time_now_fn: Optional custom clock function. Use this when timeout should
                 follow simulation time instead of wall time.
             sleep_fn: Optional sleep function paired with ``time_now_fn``.
@@ -3695,6 +3761,17 @@ class ROS2RobotInterface:
         if self.body_current_target_sub:
             self.body_current_target_sub.destroy()
             self.body_current_target_sub = None
+
+        if self.body_current_pose_sub:
+            self.body_current_pose_sub.destroy()
+            self.body_current_pose_sub = None
+
+        if self.body_current_target_pose_sub:
+            self.body_current_target_pose_sub.destroy()
+            self.body_current_target_pose_sub = None
+
+        self.body_current_pose = None
+        self.body_current_target_pose = None
 
         if self.wbc_state_sub:
             self.wbc_state_sub.destroy()
