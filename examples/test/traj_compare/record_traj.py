@@ -144,7 +144,7 @@ def test_send_target_stamped(interface: ROS2RobotInterface) -> bool:
     if left_pose is None:
         print("    无法获取左臂当前位姿（检查 pose 话题）")
         return False
-    left_target = _offset_pose(left_pose, dz=-0.10)
+    left_target = _offset_pose(left_pose, dx=-0.2, dy=0.0, dz=-0.10)
     print(f"    左臂 stamped: z {left_pose.position.z:.3f} -> {left_target.position.z:.3f}")
     interface.left_arm_handler.send_target_stamped(left_target)
     ok_left = _wait_arrival(interface.left_arm_handler, "左臂")
@@ -155,10 +155,11 @@ def test_send_target_stamped(interface: ROS2RobotInterface) -> bool:
     if right_pose is None:
         print("    无法获取右臂当前位姿（检查 pose 话题）")
         return False
-    right_target = _offset_pose(right_pose, dz=-0.10)
+    right_target = _offset_pose(right_pose, dx=-0.2, dy=0.0, dz=-0.10)
     print(f"    右臂 stamped: z {right_pose.position.z:.3f} -> {right_target.position.z:.3f}")
     interface.right_arm_handler.send_target_stamped(right_target)
-    return ok_left and _wait_arrival(interface.right_arm_handler, "右臂")
+    ok_right = _wait_arrival(interface.right_arm_handler, "右臂")
+    return ok_left and ok_right
 
 
 def test_send_target(interface: ROS2RobotInterface) -> bool:
@@ -168,7 +169,7 @@ def test_send_target(interface: ROS2RobotInterface) -> bool:
     if left_pose is None:
         print("    无法获取左臂当前位姿（检查 pose 话题）")
         return False
-    left_target = _offset_pose(left_pose, dz=-0.10)
+    left_target = _offset_pose(left_pose, dx=-0.2, dy=0.0, dz=-0.10)
     print(f"    左臂 target: z {left_pose.position.z:.3f} -> {left_target.position.z:.3f}")
     interface.left_arm_handler.send_target(left_target)
     ok_left = _wait_arrival(interface.left_arm_handler, "左臂")
@@ -179,10 +180,11 @@ def test_send_target(interface: ROS2RobotInterface) -> bool:
     if right_pose is None:
         print("    无法获取右臂当前位姿（检查 pose 话题）")
         return False
-    right_target = _offset_pose(right_pose, dz=-0.10)
+    right_target = _offset_pose(right_pose, dx=-0.2, dy=0.0, dz=-0.10)
     print(f"    右臂 target: z {right_pose.position.z:.3f} -> {right_target.position.z:.3f}")
     interface.right_arm_handler.send_target(right_target)
-    return ok_left and _wait_arrival(interface.right_arm_handler, "右臂")
+    ok_right = _wait_arrival(interface.right_arm_handler, "右臂")
+    return ok_left and ok_right
 
 
 def test_send_dual_arm_target_stamped(interface: ROS2RobotInterface) -> bool:
@@ -195,8 +197,8 @@ def test_send_dual_arm_target_stamped(interface: ROS2RobotInterface) -> bool:
     if left_pose is None or right_pose is None:
         print("    无法获取左/右臂当前位姿（检查 pose 话题）")
         return False
-    left_target = _offset_pose(left_pose, dz=-0.10)
-    right_target = _offset_pose(right_pose, dz=-0.10)
+    left_target = _offset_pose(left_pose, dx=-0.2, dy=0.0, dz=-0.10)
+    right_target = _offset_pose(right_pose, dx=-0.2, dy=0.0, dz=-0.10)
     print(f"    双臂 stamped: 左 z->{left_target.position.z:.3f} 右 z->{right_target.position.z:.3f}")
     interface.send_dual_arm_target_stamped(left_target, right_target, frame_id="arm_base")
     ok_left = _wait_arrival(interface.left_arm_handler, "左臂")
@@ -217,8 +219,8 @@ def test_send_dual_arm_body_target(interface: ROS2RobotInterface) -> bool:
     if left_pose is None or right_pose is None:
         print("    无法获取左/右臂当前位姿（检查 pose 话题）")
         return False
-    left_target = _offset_pose(left_pose, dz=-0.10)
-    right_target = _offset_pose(right_pose, dz=-0.10)
+    left_target = _offset_pose(left_pose, dx=-0.2, dy=0.0, dz=-0.10)
+    right_target = _offset_pose(right_pose, dx=-0.2, dy=0.0, dz=-0.10)
     body_target = _offset_pose(left_pose, dz=-0.03)  # body 目标：保守的小平移
     print("    双臂+body: body dz=-0.030")
     interface.send_dual_arm_target_stamped(
@@ -312,13 +314,13 @@ def run_test_motion(interface: ROS2RobotInterface) -> bool:
 
     每次运行只执行一个测试项，录制为一段 pred + real。
     """
-    return test_send_target_stamped(interface)
+    # return test_send_target_stamped(interface)
     # return test_send_target(interface)
     # return test_send_dual_arm_target_stamped(interface)
     # return test_send_dual_arm_body_target(interface)
     # return test_execute_left_path(interface)
     # return test_execute_right_path(interface)
-    # return test_execute_path(interface)
+    return test_execute_path(interface)
 
 
 def main() -> int:
@@ -363,6 +365,14 @@ def main() -> int:
         record_started = False
         # 落盘为同步操作，设置返回后产物应已写出
         time.sleep(0.2)
+
+        # 录制已关闭后再回 HOME，回程轨迹不会被录入 CSV。
+        print("\n[6] 回到 HOME 位置...")
+        try:
+            interface.send_fsm_command(1)  # 1: HOME（内部会自动先切 HOLD）
+            print("    已发送 HOME 指令")
+        except Exception as home_exc:  # noqa: BLE001
+            print(f"    警告: 回 HOME 失败: {home_exc}")
 
         print("\n完成。产物位于本次运行目录（控制器端）:")
         print(f"    {run_dir}/pred_left.csv")
