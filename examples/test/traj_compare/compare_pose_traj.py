@@ -456,6 +456,10 @@ def compute_and_print_error_metrics(cal_positions, cal_quaternions, cal_timestam
     ang_rmse = np.sqrt(np.mean(ang_err ** 2))
     ang_max = np.max(ang_err)
 
+    # 终点误差（口径 B：重叠区间末尾同一时刻，即对齐序列最后一点）
+    endpoint_pos_err = pos_err[-1]      # 3D 欧氏，米
+    endpoint_ang_err = ang_err[-1]      # 测地角度，度
+
     # 形状 DTW（原始位置序列，忽略时间）
     dtw_total, dtw_norm, dtw_max = dtw_distance(cal_positions, real_positions)
 
@@ -464,6 +468,8 @@ def compute_and_print_error_metrics(cal_positions, cal_quaternions, cal_timestam
     print(f"  Orientation    RMSE: {ang_rmse:.3f} deg, Max: {ang_max:.3f} deg")
     print(f"  Shape DTW      total: {dtw_total:.4f} m, normalized: {dtw_norm * 1000:.2f} mm/step, "
           f"Max(matched): {dtw_max * 1000:.2f} mm")
+    print(f"  Endpoint       Pos: {endpoint_pos_err * 1000:.2f} mm, "
+          f"Ori: {endpoint_ang_err:.3f} deg")
 
     return {
         'pos_rmse_mm': pos_rmse * 1000,
@@ -473,6 +479,8 @@ def compute_and_print_error_metrics(cal_positions, cal_quaternions, cal_timestam
         'dtw_total_m': dtw_total,
         'dtw_norm_mm': dtw_norm * 1000,
         'dtw_max_mm': dtw_max * 1000,
+        'endpoint_pos_mm': endpoint_pos_err * 1000,
+        'endpoint_ang_deg': endpoint_ang_err,
     }
 
 
@@ -629,10 +637,11 @@ def run_comparison(cal_file, real_file, ref_channel, out_dir, out_suffix):
             real_positions, real_quaternions, real_timestamps,
             ref_label=ref_label)
 
-        pos_line = f"Pos RMSE {metrics['pos_rmse_mm']:.2f} mm | Max {metrics['pos_max_mm']:.2f} mm"
-        ang_line = f"Ori RMSE {metrics['ang_rmse_deg']:.3f} deg | Max {metrics['ang_max_deg']:.3f} deg"
+        # 图上只标注 DTW（过程形状差异）与终点误差；完整 RMSE 等仅在终端打印
         dtw_line = (f"Shape DTW {metrics['dtw_norm_mm']:.2f} mm/step | "
                     f"Max {metrics['dtw_max_mm']:.2f} mm")
+        endpoint_line = (f"Endpoint err  Pos {metrics['endpoint_pos_mm']:.2f} mm | "
+                         f"Ori {metrics['endpoint_ang_deg']:.3f} deg")
 
         # 创建图表
         print("\nGenerating comparison plots...")
@@ -647,7 +656,7 @@ def run_comparison(cal_file, real_file, ref_channel, out_dir, out_suffix):
         fig1 = plot_combined_3d_trajectory(cal_positions, cal_quaternions, cal_timestamps,
                                             real_positions, real_quaternions, real_timestamps,
                                             ref_label=ref_label)
-        _annotate_metrics(fig1, [pos_line, ang_line, dtw_line])
+        _annotate_metrics(fig1, [dtw_line, endpoint_line])
         fig1.savefig(fig1_path, dpi=150, bbox_inches='tight')
         print(f"  Saved: {fig1_path}")
 
@@ -656,7 +665,7 @@ def run_comparison(cal_file, real_file, ref_channel, out_dir, out_suffix):
         fig2 = plot_comparison_position(cal_timestamps, cal_positions,
                                         real_timestamps, real_positions,
                                         ref_label=ref_label)
-        _annotate_metrics(fig2, [pos_line, dtw_line])
+        _annotate_metrics(fig2, [dtw_line, endpoint_line])
         fig2.savefig(fig2_path, dpi=150, bbox_inches='tight')
         print(f"  Saved: {fig2_path}")
 
@@ -665,7 +674,7 @@ def run_comparison(cal_file, real_file, ref_channel, out_dir, out_suffix):
         fig3 = plot_comparison_quaternion(cal_timestamps, cal_quaternions,
                                           real_timestamps, real_quaternions,
                                           ref_label=ref_label)
-        _annotate_metrics(fig3, [ang_line])
+        _annotate_metrics(fig3, [dtw_line, endpoint_line])
         fig3.savefig(fig3_path, dpi=150, bbox_inches='tight')
         print(f"  Saved: {fig3_path}")
 
