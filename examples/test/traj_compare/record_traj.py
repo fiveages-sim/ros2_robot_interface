@@ -200,7 +200,11 @@ def test_send_dual_arm_target_stamped(interface: ROS2RobotInterface) -> bool:
     left_target = _offset_pose(left_pose, dx=-0.2, dy=0.0, dz=-0.10)
     right_target = _offset_pose(right_pose, dx=-0.2, dy=0.0, dz=-0.10)
     print(f"    双臂 stamped: 左 z->{left_target.position.z:.3f} 右 z->{right_target.position.z:.3f}")
-    interface.send_dual_arm_target_stamped(left_target, right_target, frame_id="arm_base")
+    interface.send_dual_arm_target_stamped(
+        left_target,
+        right_target,
+        frame_id="arm_base",
+    )
     ok_left = _wait_arrival(interface.left_arm_handler, "左臂")
     ok_right = _wait_arrival(interface.right_arm_handler, "右臂")
     return ok_left and ok_right
@@ -224,8 +228,11 @@ def test_send_dual_arm_body_target(interface: ROS2RobotInterface) -> bool:
     body_target = _offset_pose(left_pose, dz=-0.03)  # body 目标：保守的小平移
     print("    双臂+body: body dz=-0.030")
     interface.send_dual_arm_target_stamped(
-        left_target, right_target, frame_id="arm_base",
-        body_pose=body_target, body_mode="BODY_TRACKING",
+        left_target,
+        right_target,
+        frame_id="arm_base",
+        body_pose=body_target,
+        body_mode="BODY_TRACKING",
     )
     ok_left = _wait_arrival(interface.left_arm_handler, "左臂")
     ok_right = _wait_arrival(interface.right_arm_handler, "右臂")
@@ -259,8 +266,12 @@ def test_execute_path(interface: ROS2RobotInterface) -> bool:
         _offset_pose(right_pose, dx=-0.06, dy=0.0, dz=0.0),
     ]
     print(f"    execute_path: 左 {len(left_poses)} 点 右 {len(right_poses)} 点")
-    ok = interface.execute_path(left_poses, right_poses,
-                                trajectory_duration=3.0, frame_id="arm_base")
+    ok = interface.execute_path(
+        left_poses,
+        right_poses,
+        trajectory_duration=3.0,
+        frame_id="arm_base",
+    )
     print(f"    execute_path service success={ok}")
     ok_left = _wait_arrival(interface.left_arm_handler, "左臂")
     ok_right = _wait_arrival(interface.right_arm_handler, "右臂")
@@ -282,8 +293,11 @@ def test_execute_left_path(interface: ROS2RobotInterface) -> bool:
         _offset_pose(left_pose, dx=-0.06, dy=0.0, dz=0.0),
     ]
     print(f"    execute_left_path: 左 {len(left_poses)} 点")
-    ok = interface.execute_left_path(left_poses, trajectory_duration=3.0,
-                                     frame_id="arm_base")
+    ok = interface.execute_left_path(
+        left_poses,
+        trajectory_duration=3.0,
+        frame_id="arm_base",
+    )
     print(f"    execute_left_path service success={ok}")
     return ok and _wait_arrival(interface.left_arm_handler, "左臂")
 
@@ -303,16 +317,47 @@ def test_execute_right_path(interface: ROS2RobotInterface) -> bool:
         _offset_pose(right_pose, dx=-0.06, dy=0.0, dz=0.0),
     ]
     print(f"    execute_right_path: 右 {len(right_poses)} 点")
-    ok = interface.execute_right_path(right_poses, trajectory_duration=3.0,
-                                      frame_id="arm_base")
+    ok = interface.execute_right_path(
+        right_poses,
+        trajectory_duration=3.0,
+        frame_id="arm_base",
+    )
     print(f"    execute_right_path service success={ok}")
     return ok and _wait_arrival(interface.right_arm_handler, "右臂")
+
+
+def test_execute_movel(interface: ROS2RobotInterface) -> bool:
+    """IK MoveL（单臂直线）：走 StateMoveJ 笛卡尔插值链路，产 cal + real。
+
+    走 IK 链路（不进 evaluatePolicy），对比口径为 cal ↔ real。action 为阻塞式，
+    返回时运动已结束，故无需再单独等待到位。默认测左臂。
+    """
+    cur_pose = interface.left_arm_handler.get_pose()
+    if cur_pose is None:
+        print("    无法获取左臂当前位姿（检查 pose 话题）")
+        return False
+    endpoint = _offset_pose(cur_pose, dx=-0.2, dy=0.0, dz=-0.10)
+    print(f"    MoveL left: z {cur_pose.position.z:.3f} -> {endpoint.position.z:.3f}")
+    result = interface.execute_movel_action(
+        "left",
+        endpoint,
+        duration=3.0,
+        frame_id="arm_base",
+    )
+    if result is None:
+        print("    MoveL action 未成功返回（被拒/超时）")
+        return False
+    ok = bool(getattr(result, "success", True))
+    print(f"    MoveL action success={ok}, message={getattr(result, 'message', '')}")
+    return ok
 
 
 def run_test_motion(interface: ROS2RobotInterface) -> bool:
     """测试入口：取消目标函数的注释，只保留一个调用。
 
-    每次运行只执行一个测试项，录制为一段 pred + real。
+    每次运行只执行一个测试项，录制为一段轨迹：
+    - MPC 链路（send_*/execute_*_path）产 pred + real；
+    - IK 链路（execute_movel 等）产 cal + real。
     """
     # return test_send_target_stamped(interface)
     # return test_send_target(interface)
@@ -320,7 +365,8 @@ def run_test_motion(interface: ROS2RobotInterface) -> bool:
     # return test_send_dual_arm_body_target(interface)
     # return test_execute_left_path(interface)
     # return test_execute_right_path(interface)
-    return test_execute_path(interface)
+    # return test_execute_path(interface)
+    return test_execute_movel(interface)
 
 
 def main() -> int:
@@ -361,24 +407,14 @@ def main() -> int:
             print("    警告: 测试运动未成功完成，仍会停止并落盘已录数据")
 
         print("\n[5] 停止录制并落盘...")
-        set_record_enabled(interface, controller_node, False)
-        record_started = False
-        # 落盘为同步操作，设置返回后产物应已写出
-        time.sleep(0.2)
-
-        # 录制已关闭后再回 HOME，回程轨迹不会被录入 CSV。
-        print("\n[6] 回到 HOME 位置...")
-        try:
-            interface.send_fsm_command(1)  # 1: HOME（内部会自动先切 HOLD）
-            print("    已发送 HOME 指令")
+        set_record_enabled(interface, controller_node, False)>
         except Exception as home_exc:  # noqa: BLE001
             print(f"    警告: 回 HOME 失败: {home_exc}")
 
-        print("\n完成。产物位于本次运行目录（控制器端）:")
-        print(f"    {run_dir}/pred_left.csv")
-        print(f"    {run_dir}/pred_right.csv")
-        print(f"    {run_dir}/real_left.csv")
-        print(f"    {run_dir}/real_right.csv")
+        print("\n完成。产物位于本次运行目录（控制器端），按测试类型择一存在:")
+        print(f"    MPC: {run_dir}/pred_left.csv, pred_right.csv")
+        print(f"    IK : {run_dir}/cal_left.csv, cal_right.csv")
+        print(f"    实测: {run_dir}/real_left.csv, real_right.csv")
         return 0 if motion_ok else 1
 
     except Exception as exc:  # noqa: BLE001
