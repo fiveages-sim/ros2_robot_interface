@@ -10,6 +10,33 @@
   - pred：MPC 一步预测末端位姿（future_state FK，时间戳为被预测绝对时刻）↔ real
   - cal ：IK 笛卡尔规划逐点（MoveL/MoveC）↔ real
 
+主要对比内容
+------------
+脚本重点比较三类结果：
+1. 轨迹形状：观察参考轨迹与 actual 是否经过相同的空间路径，使用 DTW 指标衡量。
+2. Cross-track 路径偏差：Cross-track 使用 actual 第一帧为基准，以 0.01 mm、连续 3 帧检测运动起点；
+   从运动起点开始，不做时间对齐，计算 actual 点到完整参考 3D 折线的最近线段距离；
+   Mean/Max 为单向 actual → reference 路径偏差，静止段被排除。
+3. 共同时间区间末尾误差：比较两条轨迹在最后一个共同绝对时刻的位置与姿态差异。
+   位置误差是 3D 欧氏距离，单位为 mm；姿态误差是四元数间的最短旋转角，单位为度。
+终端还会输出绝对时间对齐后整个重叠区间内的位置/姿态 RMSE 和最大误差。
+
+DTW 如何处理 pred 与 actual 时间不同
+-------------------------------------
+轨迹形状使用 DTW（Dynamic Time Warping，动态时间规整）比较原始 3D 位置序列。
+DTW 不使用 CSV 中的绝对时间戳，只保持轨迹点的先后顺序，以两个 3D 点之间的欧氏距离
+作为局部代价，寻找累计代价最小的匹配路径。匹配路径允许一对一、一对多和多对一，
+相当于对两条序列进行局部拉伸或压缩。
+
+因此，pred 与 actual 即使采样点数、采样频率或运动速度不同，DTW 仍可以把空间位置相近
+的轨迹段对应起来，比较路径的几何形状。DTW 输出累计距离、按匹配路径长度归一化的
+mm/step，以及匹配路径上的最大点距。DTW 越小，表示两条空间路径的形状越接近。
+
+需要注意：DTW 忽略时间，所以不能反映跟踪延迟、速度差异或同一绝对时刻的位置偏差；
+这些时间相关误差由绝对时间对齐后的 RMSE、最大误差和共同时间区间末尾误差反映。
+DTW 算法本身不要求两条轨迹的绝对时间范围重叠，但当前完整对比流程还会计算时间相关
+指标，因此输入的 pred/cal 与 real 仍需具有有效的绝对时间重叠区间。
+
 CSV 格式（pred / cal / real 统一同一套列，均由控制器录制产出）
 ------------------------------------------------------------
 必需列（顺序不限，多余列忽略，缺列会报 KeyError）：
@@ -70,9 +97,50 @@ from scipy import interpolate
 plt.rcParams['font.family'] = 'DejaVu Sans'
 plt.rcParams['axes.unicode_minus'] = False
 
+CROSS_TRACK_MOTION_THRESHOLD_M = 0.01e-3
+CROSS_TRACK_CONSECUTIVE_FRAMES = 3
+
 def quaternion_to_euler(quat):
     """四元数转欧拉角（度）。输入格式 [qx, qy, qz, qw]，与 ROS geometry_msgs/Quaternion 一致。"""
     return R.from_quat(quat).as_euler('xyz', degrees=True)
+
+def dtw_distance(seq_a, seq_b):
+    """标准 DP 版 DTW 距离，衡量两条 3D 位置序列的形状相似度（忽略时间/速度错位）。
+
+    seq_a、seq_b 形如 (N,3) / (M,3)。局部代价用逐点欧氏距离，返回累计 DTW 距离、
+    归一化距离（累计距离 / 匹配路径长度）以及匹配路径上配对点距离的最大值，单位米。
+    纯 numpy 实现，无外部依赖。
+    """
+    n, m = len(seq_a), len(seq_b)
+    cost = np.full((n + 1, m + 1), np.inf)
+    cost[0, 0] = 0.0
+    for i in range(1, n + 1):
+        diff = seq_b - seq_a[i - 1]          # (m,3)
+        d = np.sqrt(np.sum(diff * diff, axis=1))  # (m,) 逐点欧氏距离
+        for j in range(1, m + 1):
+            cost[i, j] = d[j - 1] + min(
+                cost[i - 1, j],       # 插入
+                cost[i, j - 1],       # 删除
+                cost[i - 1, j - 1],   # 匹配
+            )
+    # 回溯匹配路径：记录路径长度（归一化用）与配对点距离最大值
+    i, j, path_len = n, m, 0
+    max_pair = 0.0
+    while i > 0 and j > 0:
+        path_len += 1
+        pair_dist = float(np.linalg.norm(seq_a[i - 1] - seq_b[j - 1]))  # 该配对点距离
+        if pair_dist > max_pair:
+            max_pair = pair_dist
+        step = min(cost[i - 1, j], cost[i, j - 1], cost[i - 1, j - 1])
+        if step == cost[i - 1, j - 1]:
+            i, j = i - 1, j - 1
+        elif step == cost[i - 1, j]:
+            i -= 1
+        else:
+            j -= 1
+    total = cost[n, m]
+    normalized = total / path_len if path_len > 0 else float('nan')
+    return total, normalized, max_pair
 
 def prompt_file_path(prompt):
     """提示用户输入文件路径，支持去掉引号并展开 ~。"""
@@ -109,6 +177,58 @@ def detect_motion_start_index(positions, position_threshold=0.002, consecutive_f
         f"consecutive_frames={consecutive_frames}; using first sample as actual t=0."
     )
     return 0
+
+def point_to_polyline_distances(points, polyline):
+    """返回每个 3D point 到 3D polyline 最近线段的欧氏距离，单位米。"""
+    points = np.asarray(points, dtype=float)
+    polyline = np.asarray(polyline, dtype=float)
+    if points.ndim != 2 or points.shape[1] != 3 or len(points) == 0:
+        raise ValueError("points must be a non-empty array with shape (N, 3)")
+    if polyline.ndim != 2 or polyline.shape[1] != 3 or len(polyline) == 0:
+        raise ValueError("polyline must be a non-empty array with shape (M, 3)")
+    if len(polyline) == 1:
+        return np.linalg.norm(points - polyline[0], axis=1)
+
+    starts = polyline[:-1]
+    segments = polyline[1:] - starts
+    length_sq = np.sum(segments * segments, axis=1)
+    distances = np.empty(len(points), dtype=float)
+    for index, point in enumerate(points):
+        projection = np.zeros(len(segments), dtype=float)
+        np.divide(
+            np.sum((point - starts) * segments, axis=1),
+            length_sq,
+            out=projection,
+            where=length_sq > 0.0,
+        )
+        projection = np.clip(projection, 0.0, 1.0)
+        closest = starts + projection[:, None] * segments
+        distances[index] = np.min(np.linalg.norm(point - closest, axis=1))
+    return distances
+
+def compute_cross_track_metrics(reference_positions, actual_positions,
+                                position_threshold=CROSS_TRACK_MOTION_THRESHOLD_M,
+                                consecutive_frames=CROSS_TRACK_CONSECUTIVE_FRAMES):
+    """对运动起点后的 actual 计算到完整 reference 折线的单向 Cross-track。"""
+    reference_positions = np.asarray(reference_positions, dtype=float)
+    actual_positions = np.asarray(actual_positions, dtype=float)
+    if len(reference_positions) == 0 or len(actual_positions) == 0:
+        raise ValueError("reference_positions and actual_positions must not be empty")
+    start_index = detect_motion_start_index(
+        actual_positions,
+        position_threshold=position_threshold,
+        consecutive_frames=consecutive_frames,
+    )
+    distances = point_to_polyline_distances(
+        actual_positions[start_index:], reference_positions)
+    return {
+        "motion_start_index": start_index,
+        "position_threshold_m": position_threshold,
+        "consecutive_frames": consecutive_frames,
+        "distances_m": distances,
+        "mean_mm": float(np.mean(distances) * 1000.0),
+        "max_mm": float(np.max(distances) * 1000.0),
+    }
 
 def load_data_from_csv(file_path, file_type='cal', align_motion_start=False):
     df = pd.read_csv(file_path)
@@ -394,6 +514,89 @@ def plot_comparison_quaternion(cal_timestamps, cal_quaternions, real_timestamps,
     plt.tight_layout()
     return fig
 
+def compute_and_print_error_metrics(cal_positions, cal_quaternions, cal_timestamps,
+                                    real_positions, real_quaternions, real_timestamps,
+                                    ref_label='Calculated'):
+    """计算并打印贴合指标：位置(合成3D) RMSE/Max、姿态(角度) RMSE/Max、Cross-track、形状 DTW。
+
+    - 位置与姿态：在时间对齐（重采样）后的共同时间轴上逐点比较。
+    - Cross-track：actual 运动起点起，到完整参考折线的单向路径偏差（不做时间对齐）。
+    - DTW：用原始位置序列（忽略时间/速度错位），衡量路径形状相似度。
+    """
+    # 时间对齐后的位置逐点欧氏误差
+    _, cal_p, real_p = interpolate_to_common_time(
+        cal_timestamps, cal_positions, real_timestamps, real_positions)
+    pos_err = np.sqrt(np.sum((cal_p - real_p) ** 2, axis=1))  # (N,) 合成 3D
+    pos_rmse = np.sqrt(np.mean(pos_err ** 2))
+    pos_max = np.max(pos_err)
+
+    # 时间对齐后的姿态测地角度误差（度）
+    _, cal_q, real_q = interpolate_quaternions_to_common_time(
+        cal_timestamps, cal_quaternions, real_timestamps, real_quaternions)
+    dots = np.abs(np.sum(cal_q * real_q, axis=1))       # |<q_ref, q_real>|，消 ±q 二义
+    dots = np.clip(dots, -1.0, 1.0)
+    ang_err = np.degrees(2.0 * np.arccos(dots))          # (N,) 最短旋转角，度
+    ang_rmse = np.sqrt(np.mean(ang_err ** 2))
+    ang_max = np.max(ang_err)
+
+    # 终点误差（口径 B：重叠区间末尾同一时刻，即对齐序列最后一点）
+    endpoint_pos_err = pos_err[-1]      # 3D 欧氏，米
+    endpoint_ang_err = ang_err[-1]      # 测地角度，度
+
+    # Cross-track（actual 运动起点起，到完整参考折线的单向路径偏差）
+    cross_track = compute_cross_track_metrics(cal_positions, real_positions)
+    motion_start_index = cross_track["motion_start_index"]
+    motion_start_time = real_timestamps[motion_start_index]
+
+    # 形状 DTW（原始位置序列，忽略时间）
+    dtw_total, dtw_norm, dtw_max = dtw_distance(cal_positions, real_positions)
+
+    print(f"\nError metrics ({ref_label} vs Actual):")
+    print(f"  Position (3D)  RMSE: {pos_rmse * 1000:.2f} mm, Max: {pos_max * 1000:.2f} mm")
+    print(f"  Orientation    RMSE: {ang_rmse:.3f} deg, Max: {ang_max:.3f} deg")
+    print(
+        "  Actual motion  "
+        f"index: {motion_start_index}, time: {motion_start_time:.9f} s, "
+        f"threshold: {cross_track['position_threshold_m'] * 1000:.2f} mm, "
+        f"consecutive: {cross_track['consecutive_frames']} frames"
+    )
+    print(
+        f"  Cross-track    Mean: {cross_track['mean_mm']:.2f} mm, "
+        f"Max: {cross_track['max_mm']:.2f} mm"
+    )
+    print(f"  Shape DTW      total: {dtw_total:.4f} m, normalized: {dtw_norm * 1000:.2f} mm/step, "
+          f"Max(matched): {dtw_max * 1000:.2f} mm")
+    print(f"  Endpoint       Pos: {endpoint_pos_err * 1000:.2f} mm, "
+          f"Ori: {endpoint_ang_err:.3f} deg")
+
+    return {
+        'pos_rmse_mm': pos_rmse * 1000,
+        'pos_max_mm': pos_max * 1000,
+        'ang_rmse_deg': ang_rmse,
+        'ang_max_deg': ang_max,
+        'cross_track_mean_mm': cross_track["mean_mm"],
+        'cross_track_max_mm': cross_track["max_mm"],
+        'cross_track_motion_start_index': motion_start_index,
+        'cross_track_motion_start_time_sec': motion_start_time,
+        'dtw_total_m': dtw_total,
+        'dtw_norm_mm': dtw_norm * 1000,
+        'dtw_max_mm': dtw_max * 1000,
+        'endpoint_pos_mm': endpoint_pos_err * 1000,
+        'endpoint_ang_deg': endpoint_ang_err,
+    }
+
+
+def _annotate_metrics(fig, lines):
+    """在图右上角叠加一个指标文本框，lines 为字符串列表。"""
+    fig.text(
+        0.98, 0.98, "\n".join(lines),
+        fontsize=10, family='monospace',
+        va='top', ha='right',
+        bbox=dict(boxstyle='round', facecolor='lightyellow',
+                  edgecolor='gray', alpha=0.9),
+    )
+
+
 def print_comparison_statistics(cal_positions, cal_quaternions, cal_timestamps,
                                real_positions, real_quaternions, real_timestamps,
                                ref_label='Calculated'):
@@ -431,6 +634,13 @@ def print_comparison_statistics(cal_positions, cal_quaternions, cal_timestamps,
     print(f"  {ref_label}: {cal_total:.3f} m")
     print(f"  Actual: {real_total:.3f} m")
     print(f"  Difference: {cal_total - real_total:.3f} m")
+
+    # 贴合指标：位置(3D) RMSE/Max、姿态(角度) RMSE/Max、Cross-track、形状 DTW
+    return compute_and_print_error_metrics(
+        cal_positions, cal_quaternions, cal_timestamps,
+        real_positions, real_quaternions, real_timestamps,
+        ref_label=ref_label,
+    )
 
 def select_run_directory():
     """列出 record_data/ 下的子目录供选择，返回所选子目录的绝对路径。
@@ -523,10 +733,21 @@ def run_comparison(cal_file, real_file, ref_channel, out_dir, out_suffix):
         real_positions, real_quaternions, real_timestamps, real_df = load_data_from_csv(
             real_file, 'real', align_motion_start=False)
 
-        # 打印对比统计信息
-        print_comparison_statistics(cal_positions, cal_quaternions, cal_timestamps,
-                                   real_positions, real_quaternions, real_timestamps,
-                                   ref_label=ref_label)
+        # 打印对比统计信息，并拿到贴合指标用于图上标注
+        metrics = print_comparison_statistics(
+            cal_positions, cal_quaternions, cal_timestamps,
+            real_positions, real_quaternions, real_timestamps,
+            ref_label=ref_label)
+
+        # 图上标注 Cross-track、DTW 与终点误差；完整 RMSE 等仅在终端打印
+        cross_track_line = (
+            f"Cross-track Mean {metrics['cross_track_mean_mm']:.2f} mm | "
+            f"Max {metrics['cross_track_max_mm']:.2f} mm"
+        )
+        dtw_line = (f"Shape DTW {metrics['dtw_norm_mm']:.2f} mm/step | "
+                    f"Max {metrics['dtw_max_mm']:.2f} mm")
+        endpoint_line = (f"Endpoint err  Pos {metrics['endpoint_pos_mm']:.2f} mm | "
+                         f"Ori {metrics['endpoint_ang_deg']:.3f} deg")
 
         # 创建图表
         print("\nGenerating comparison plots...")
@@ -536,28 +757,31 @@ def run_comparison(cal_file, real_file, ref_channel, out_dir, out_suffix):
         fig2_path = os.path.join(out_dir, f'position_comparison_aligned{out_suffix}.png')
         fig3_path = os.path.join(out_dir, f'quaternion_comparison_aligned{out_suffix}.png')
 
-        # 1. 合并3D轨迹对比图（两个轨迹在同一个坐标系）
+        # 1. 合并3D轨迹对比图（两个轨迹在同一个坐标系）：总览，叠加全部指标
         print("  Generating combined 3D trajectory comparison...")
-        plot_combined_3d_trajectory(cal_positions, cal_quaternions, cal_timestamps,
-                                     real_positions, real_quaternions, real_timestamps,
-                                     ref_label=ref_label)
-        plt.savefig(fig1_path, dpi=150, bbox_inches='tight')
+        fig1 = plot_combined_3d_trajectory(cal_positions, cal_quaternions, cal_timestamps,
+                                            real_positions, real_quaternions, real_timestamps,
+                                            ref_label=ref_label)
+        _annotate_metrics(fig1, [cross_track_line, dtw_line, endpoint_line])
+        fig1.savefig(fig1_path, dpi=150, bbox_inches='tight')
         print(f"  Saved: {fig1_path}")
 
-        # 2. 位置对比图（时间对齐）
+        # 2. 位置对比图（时间对齐）：叠加 Cross-track + DTW + Endpoint
         print("  Generating position comparison (time-aligned)...")
-        plot_comparison_position(cal_timestamps, cal_positions,
-                                 real_timestamps, real_positions,
-                                 ref_label=ref_label)
-        plt.savefig(fig2_path, dpi=150, bbox_inches='tight')
+        fig2 = plot_comparison_position(cal_timestamps, cal_positions,
+                                        real_timestamps, real_positions,
+                                        ref_label=ref_label)
+        _annotate_metrics(fig2, [cross_track_line, dtw_line, endpoint_line])
+        fig2.savefig(fig2_path, dpi=150, bbox_inches='tight')
         print(f"  Saved: {fig2_path}")
 
-        # 3. 四元数对比图（时间对齐，使用 Slerp）
+        # 3. 四元数对比图（时间对齐，使用 Slerp）：叠加姿态
         print("  Generating quaternion comparison (time-aligned with Slerp)...")
-        plot_comparison_quaternion(cal_timestamps, cal_quaternions,
-                                   real_timestamps, real_quaternions,
-                                   ref_label=ref_label)
-        plt.savefig(fig3_path, dpi=150, bbox_inches='tight')
+        fig3 = plot_comparison_quaternion(cal_timestamps, cal_quaternions,
+                                          real_timestamps, real_quaternions,
+                                          ref_label=ref_label)
+        _annotate_metrics(fig3, [dtw_line, endpoint_line])
+        fig3.savefig(fig3_path, dpi=150, bbox_inches='tight')
         print(f"  Saved: {fig3_path}")
 
         print(f"\n✅ [{out_suffix or 'result'}] plots generated successfully!")

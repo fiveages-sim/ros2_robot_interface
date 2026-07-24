@@ -3,23 +3,55 @@
 规划轨迹与实际末端轨迹录制脚本（框架版）
 ==========================================
 
-配合控制器内的 TrajectoryRecorder 使用：通过 ROS 参数控制录制的开始/结束，
-录制窗口内执行要测试的运动（MoveL / MoveC / MoveJ 等），控制器会在窗口结束时
-把 cal（规划）与 real（实际 FK）轨迹落盘为 CSV，供 compare_pose_traj.py 对比。
+工作原理
+--------
+本脚本本质上是通过设置控制器的两个 ROS 2 参数来管理 TrajectoryRecorder：
+1. traj_record_dir：设置本次 CSV 的保存目录；
+2. traj_record_enabled：设为 True 时清空旧缓存并开始录制，设回 False 时停止录制，
+   并将缓存同步写入 traj_record_dir。
+
+因此，轨迹是由控制器进程采样和保存的，并不要求运动指令必须由本脚本发出。录制窗口内
+可以执行 MoveL / MoveC / MoveJ，也可以从其他程序、命令行或遥操作设备发送运动指令。
+控制器会按运动链路输出 pred（MPC 预测）或 cal（IK 笛卡尔规划），并同时输出 real
+（实际 FK）轨迹，供 compare_pose_traj.py 对比。
+
+run_test_motion 只是可选的测试辅助
+-----------------------------------
+main() 中的
+    motion_ok = run_test_motion(interface)
+只是为了方便一键执行示例运动和验证录制功能，不是启动或维持录制所必需的调用。
+
+如需记录外部指令或遥操作，可在成功设置 traj_record_dir 并开启
+traj_record_enabled=True 后，不调用 run_test_motion，而让脚本保持运行一段时间，例如：
+    time.sleep(60.0)  # 这段时间内从其他程序或遥操作设备发送运动指令
+等待结束后再设置 traj_record_enabled=False，即可停止录制并落盘。sleep 时长就是本次
+录制窗口，可按实际测试需要调整；无论正常路径还是异常退出，都应确保最终关闭录制参数。
 
 录制流程
 --------
 1. 连接 ROS2RobotInterface。
 2. 设置控制器参数 traj_record_dir = <保存目录>。
 3. 设置 traj_record_enabled = True（false->true 会清空缓存并开始录制）。
-4. 执行要测试的运动（见 run_test_motion，当前为占位，待填充）。
+4. 可选：调用 run_test_motion 执行内置测试；或保持脚本运行，从外部发送运动指令。
 5. 设置 traj_record_enabled = False（true->false 触发控制器同步落盘）。
 6. 提示产物路径。
 
+录制时长与容量
+--------------
+TrajectoryRecorder 为每个通道预分配 30000 个采样点。当前控制器约以 100 Hz 记录，
+因此预分配容量约覆盖 300 秒，即 5 分钟。
+
+30000 点不是硬上限：超过后不会自动停止、覆盖或丢弃已有数据，std::vector 会继续动态
+扩容，所以技术上没有固定的最长录制时间。但扩容会增加内存占用，并可能带来控制周期
+抖动；录制越久，关闭参数时同步写 CSV 的耗时和磁盘占用也越大。为避免录制期间扩容，
+建议单次录制控制在 5 分钟以内。若必须长时间录制，应评估内存、磁盘与实时性影响，
+并考虑增大控制器预分配容量或对记录数据降采样。
+
 产物（由控制器写入 traj_record_dir）
 ------------------------------------
-    cal_left.csv / cal_right.csv    规划轨迹（MoveL/MoveC 才有；纯 MoveJ 不产生 cal）
-    real_left.csv / real_right.csv  实际末端轨迹（录制窗口内始终记录）
+    pred_left.csv / pred_right.csv  MPC 预测末端轨迹（被预测时刻绝对时间戳）
+    cal_left.csv / cal_right.csv    IK 笛卡尔规划轨迹
+    real_left.csv / real_right.csv  实际 FK 末端轨迹（录制窗口内始终记录）
 
 注意
 ----
@@ -28,6 +60,7 @@
 - 必须先设 dir 再设 enabled=True，否则用控制器默认目录。
 - 运动 action 同步返回后再关闭录制，保证窗口恰好包住运动。
 - 控制器与本脚本需在同一台机器（CSV 落在控制器端的 traj_record_dir）。
+- 建议每次录制都明确执行 True->False；若长期保持 True，缓存会持续占用更多内存。
 """
 
 import os
@@ -97,8 +130,6 @@ def set_record_dir(interface: ROS2RobotInterface, node: str, out_dir: str) -> bo
 
 
 # ---------------------- 测试运动参数（按需修改） ----------------------
-MOTION_FRAME = "arm_base"      # 目标位姿所在坐标系
-MOTION_DZ = -0.10           # 末端 Z 方向偏移（米）
 ARRIVE_TIMEOUT = 15.0       # 等待到位超时（秒）
 ARRIVE_INTERVAL = 0.3       # 到位检查间隔（秒）
 POSE_THRESHOLD = 0.02       # 到位位置阈值（米）
@@ -106,11 +137,12 @@ ORIENT_THRESHOLD = 3.0      # 到位姿态阈值（度）
 # ---------------------------------------------------------------------
 
 
-def _offset_pose(src, dz: float):
-    """基于当前位姿，仅在 Z 方向施加偏移，姿态保持不变。"""
+def _offset_pose(src, dx: float = 0.0, dy: float = 0.0, dz: float = 0.0):
+    """基于当前位姿施加平移，姿态保持不变。"""
     from geometry_msgs.msg import Pose, Point, Quaternion
     return Pose(
-        position=Point(x=src.position.x, y=src.position.y, z=src.position.z + dz),
+        position=Point(x=src.position.x + dx, y=src.position.y + dy,
+                       z=src.position.z + dz),
         orientation=Quaternion(
             x=src.orientation.x, y=src.orientation.y,
             z=src.orientation.z, w=src.orientation.w,
@@ -133,38 +165,241 @@ def _wait_arrival(handler, label: str) -> bool:
     return False
 
 
-def run_test_motion(interface: ROS2RobotInterface) -> bool:
-    """测试运动：左、右臂各发一次 send_target_stamped（走 MPC 链路，产生 cal）。
+def test_send_target_stamped(interface: ROS2RobotInterface) -> bool:
+    """带 frame 的单点目标：左右臂各发一次 send_target_stamped（走 MPC，产 pred）。
 
-    读取当前末端位姿，令其沿 Z 偏移 MOTION_DZ 作为目标，分别发左臂、右臂并等待到位。
-    单臂机器人只发左臂。
+    不显式传 frame_id：send_target_stamped 会回退到 handler 从 pose 话题订阅到的
+    frame（self.frame_id），与目标 pose 的来源坐标系一致；能取到 pose 即说明该
+    frame 已就绪。
     """
     is_dual = interface.config.right_end_effector_pose_topic is not None
-
-    # 左臂
     left_pose = interface.left_arm_handler.get_pose()
     if left_pose is None:
         print("    无法获取左臂当前位姿（检查 pose 话题）")
         return False
-    left_target = _offset_pose(left_pose, MOTION_DZ)
-    print(f"    发送左臂目标: z {left_pose.position.z:.3f} -> {left_target.position.z:.3f}")
-    interface.left_arm_handler.send_target_stamped(MOTION_FRAME, left_target)
+    left_target = _offset_pose(left_pose, dx=-0.2, dy=0.0, dz=-0.10)
+    print(f"    左臂 stamped: z {left_pose.position.z:.3f} -> {left_target.position.z:.3f}")
+    interface.left_arm_handler.send_target_stamped(left_target)
     ok_left = _wait_arrival(interface.left_arm_handler, "左臂")
-
-    ok_right = True
-    if is_dual:
-        right_pose = interface.right_arm_handler.get_pose()
-        if right_pose is None:
-            print("    无法获取右臂当前位姿（检查 pose 话题）")
-            return False
-        right_target = _offset_pose(right_pose, MOTION_DZ)
-        print(f"    发送右臂目标: z {right_pose.position.z:.3f} -> {right_target.position.z:.3f}")
-        interface.right_arm_handler.send_target_stamped(MOTION_FRAME, right_target)
-        ok_right = _wait_arrival(interface.right_arm_handler, "右臂")
-    else:
+    if not is_dual:
         print("    单臂模式，跳过右臂")
-
+        return ok_left
+    right_pose = interface.right_arm_handler.get_pose()
+    if right_pose is None:
+        print("    无法获取右臂当前位姿（检查 pose 话题）")
+        return False
+    right_target = _offset_pose(right_pose, dx=-0.2, dy=0.0, dz=-0.10)
+    print(f"    右臂 stamped: z {right_pose.position.z:.3f} -> {right_target.position.z:.3f}")
+    interface.right_arm_handler.send_target_stamped(right_target)
+    ok_right = _wait_arrival(interface.right_arm_handler, "右臂")
     return ok_left and ok_right
+
+
+def test_send_target(interface: ROS2RobotInterface) -> bool:
+    """无 frame 的单点目标：左右臂各发一次 send_target（Pose，基准坐标系解释）。"""
+    is_dual = interface.config.right_end_effector_pose_topic is not None
+    left_pose = interface.left_arm_handler.get_pose()
+    if left_pose is None:
+        print("    无法获取左臂当前位姿（检查 pose 话题）")
+        return False
+    left_target = _offset_pose(left_pose, dx=-0.2, dy=0.0, dz=-0.10)
+    print(f"    左臂 target: z {left_pose.position.z:.3f} -> {left_target.position.z:.3f}")
+    interface.left_arm_handler.send_target(left_target)
+    ok_left = _wait_arrival(interface.left_arm_handler, "左臂")
+    if not is_dual:
+        print("    单臂模式，跳过右臂")
+        return ok_left
+    right_pose = interface.right_arm_handler.get_pose()
+    if right_pose is None:
+        print("    无法获取右臂当前位姿（检查 pose 话题）")
+        return False
+    right_target = _offset_pose(right_pose, dx=-0.2, dy=0.0, dz=-0.10)
+    print(f"    右臂 target: z {right_pose.position.z:.3f} -> {right_target.position.z:.3f}")
+    interface.right_arm_handler.send_target(right_target)
+    ok_right = _wait_arrival(interface.right_arm_handler, "右臂")
+    return ok_left and ok_right
+
+
+def test_send_dual_arm_target_stamped(interface: ROS2RobotInterface) -> bool:
+    """双臂同步 stamped：一次调用 send_dual_arm_target_stamped 下发左右臂目标。"""
+    if interface.config.right_end_effector_target_topic is None:
+        print("    需要双臂模式（未检测到右臂 target topic），跳过")
+        return False
+    left_pose = interface.left_arm_handler.get_pose()
+    right_pose = interface.right_arm_handler.get_pose()
+    if left_pose is None or right_pose is None:
+        print("    无法获取左/右臂当前位姿（检查 pose 话题）")
+        return False
+    left_target = _offset_pose(left_pose, dx=-0.2, dy=0.0, dz=-0.10)
+    right_target = _offset_pose(right_pose, dx=-0.2, dy=0.0, dz=-0.10)
+    print(f"    双臂 stamped: 左 z->{left_target.position.z:.3f} 右 z->{right_target.position.z:.3f}")
+    interface.send_dual_arm_target_stamped(
+        left_target,
+        right_target,
+        frame_id="arm_base",
+    )
+    ok_left = _wait_arrival(interface.left_arm_handler, "左臂")
+    ok_right = _wait_arrival(interface.right_arm_handler, "右臂")
+    return ok_left and ok_right
+
+
+def test_send_dual_arm_body_target(interface: ROS2RobotInterface) -> bool:
+    """双臂 + body：WBC 下 send_dual_arm_target_stamped 附带 body_pose。"""
+    if interface.config.right_end_effector_target_topic is None:
+        print("    需要双臂模式（未检测到右臂 target topic），跳过")
+        return False
+    if not interface.is_wbc:
+        print("    需要 WBC 模式（interface.is_wbc=False），跳过")
+        return False
+    left_pose = interface.left_arm_handler.get_pose()
+    right_pose = interface.right_arm_handler.get_pose()
+    if left_pose is None or right_pose is None:
+        print("    无法获取左/右臂当前位姿（检查 pose 话题）")
+        return False
+    left_target = _offset_pose(left_pose, dx=-0.2, dy=0.0, dz=-0.10)
+    right_target = _offset_pose(right_pose, dx=-0.2, dy=0.0, dz=-0.10)
+    body_target = _offset_pose(left_pose, dz=-0.03)  # body 目标：保守的小平移
+    print("    双臂+body: body dz=-0.030")
+    interface.send_dual_arm_target_stamped(
+        left_target,
+        right_target,
+        frame_id="arm_base",
+        body_pose=body_target,
+        body_mode="BODY_TRACKING",
+    )
+    ok_left = _wait_arrival(interface.left_arm_handler, "左臂")
+    ok_right = _wait_arrival(interface.right_arm_handler, "右臂")
+    return ok_left and ok_right
+
+
+# 注意：send_target_path()（发布 /target_path topic）为第一代双臂路径接口，
+# 现已被第二代 ExecutePath service 接口取代（execute_path / execute_left_path /
+# execute_right_path，支持 trajectory_duration、返回 success、左右可不等长、空侧保持
+# 原参考）。因此不再为 send_target_path 单列测试项，路径类测试统一走下面的 execute_* 系列。
+
+
+def test_execute_path(interface: ROS2RobotInterface) -> bool:
+    """ExecutePath service：双臂各一条多路点路径。需双臂配置。"""
+    if interface.config.right_end_effector_target_topic is None:
+        print("    需要双臂模式（未检测到右臂 target topic），跳过")
+        return False
+    left_pose = interface.left_arm_handler.get_pose()
+    right_pose = interface.right_arm_handler.get_pose()
+    if left_pose is None or right_pose is None:
+        print("    无法获取左/右臂当前位姿（检查 pose 话题）")
+        return False
+    left_poses = [
+        _offset_pose(left_pose, dx=0.0, dy=0.0, dz=0.0),
+        _offset_pose(left_pose, dx=0.03, dy=0.0, dz=-0.03),
+        _offset_pose(left_pose, dx=-0.06, dy=0.0, dz=0.0),
+    ]
+    right_poses = [
+        _offset_pose(right_pose, dx=0.0, dy=0.0, dz=0.0),
+        _offset_pose(right_pose, dx=0.03, dy=0.0, dz=-0.03),
+        _offset_pose(right_pose, dx=-0.06, dy=0.0, dz=0.0),
+    ]
+    print(f"    execute_path: 左 {len(left_poses)} 点 右 {len(right_poses)} 点")
+    ok = interface.execute_path(
+        left_poses,
+        right_poses,
+        trajectory_duration=3.0,
+        frame_id="arm_base",
+    )
+    print(f"    execute_path service success={ok}")
+    ok_left = _wait_arrival(interface.left_arm_handler, "左臂")
+    ok_right = _wait_arrival(interface.right_arm_handler, "右臂")
+    return ok and ok_left and ok_right
+
+
+def test_execute_left_path(interface: ROS2RobotInterface) -> bool:
+    """ExecutePath 左臂包装：只动左臂，右臂保持原参考。需双臂配置。"""
+    if interface.config.right_end_effector_target_topic is None:
+        print("    需要双臂模式（未检测到右臂 target topic），跳过")
+        return False
+    left_pose = interface.left_arm_handler.get_pose()
+    if left_pose is None:
+        print("    无法获取左臂当前位姿（检查 pose 话题）")
+        return False
+    left_poses = [
+        _offset_pose(left_pose, dx=0.0, dy=0.0, dz=0.0),
+        _offset_pose(left_pose, dx=0.03, dy=0.0, dz=-0.03),
+        _offset_pose(left_pose, dx=-0.06, dy=0.0, dz=0.0),
+    ]
+    print(f"    execute_left_path: 左 {len(left_poses)} 点")
+    ok = interface.execute_left_path(
+        left_poses,
+        trajectory_duration=3.0,
+        frame_id="arm_base",
+    )
+    print(f"    execute_left_path service success={ok}")
+    return ok and _wait_arrival(interface.left_arm_handler, "左臂")
+
+
+def test_execute_right_path(interface: ROS2RobotInterface) -> bool:
+    """ExecutePath 右臂包装：只动右臂，左臂保持原参考。需双臂配置。"""
+    if interface.config.right_end_effector_target_topic is None:
+        print("    需要双臂模式（未检测到右臂 target topic），跳过")
+        return False
+    right_pose = interface.right_arm_handler.get_pose()
+    if right_pose is None:
+        print("    无法获取右臂当前位姿（检查 pose 话题）")
+        return False
+    right_poses = [
+        _offset_pose(right_pose, dx=0.0, dy=0.0, dz=0.0),
+        _offset_pose(right_pose, dx=0.03, dy=0.0, dz=-0.03),
+        _offset_pose(right_pose, dx=-0.06, dy=0.0, dz=0.0),
+    ]
+    print(f"    execute_right_path: 右 {len(right_poses)} 点")
+    ok = interface.execute_right_path(
+        right_poses,
+        trajectory_duration=3.0,
+        frame_id="arm_base",
+    )
+    print(f"    execute_right_path service success={ok}")
+    return ok and _wait_arrival(interface.right_arm_handler, "右臂")
+
+
+def test_execute_movel(interface: ROS2RobotInterface) -> bool:
+    """IK MoveL（单臂直线）：走 StateMoveJ 笛卡尔插值链路，产 cal + real。
+
+    走 IK 链路（不进 evaluatePolicy），对比口径为 cal ↔ real。action 为阻塞式，
+    返回时运动已结束，故无需再单独等待到位。默认测左臂。
+    """
+    cur_pose = interface.left_arm_handler.get_pose()
+    if cur_pose is None:
+        print("    无法获取左臂当前位姿（检查 pose 话题）")
+        return False
+    endpoint = _offset_pose(cur_pose, dx=-0.2, dy=0.0, dz=-0.0)
+    print(f"    MoveL left: z {cur_pose.position.z:.3f} -> {endpoint.position.z:.3f}")
+    result = interface.execute_movel_action(
+        "left",
+        endpoint,
+        duration=3.0,
+        frame_id="arm_base",
+    )
+    if result is None:
+        print("    MoveL action 未成功返回（被拒/超时）")
+        return False
+    ok = bool(getattr(result, "success", True))
+    print(f"    MoveL action success={ok}, message={getattr(result, 'message', '')}")
+    return ok
+
+
+def run_test_motion(interface: ROS2RobotInterface) -> bool:
+    """测试入口：取消目标函数的注释，只保留一个调用。
+
+    每次运行只执行一个测试项，录制为一段轨迹：
+    - MPC 链路（send_*/execute_*_path）产 pred + real；
+    - IK 链路（execute_movel 等）产 cal + real。
+    """
+    # return test_send_target_stamped(interface)
+    # return test_send_target(interface)
+    # return test_send_dual_arm_target_stamped(interface)
+    # return test_send_dual_arm_body_target(interface)
+    # return test_execute_left_path(interface)
+    # return test_execute_right_path(interface)
+    # return test_execute_path(interface)
+    return test_execute_movel(interface)
 
 
 def main() -> int:
@@ -210,11 +445,18 @@ def main() -> int:
         # 落盘为同步操作，设置返回后产物应已写出
         time.sleep(0.2)
 
-        print("\n完成。产物位于本次运行目录（控制器端）:")
-        print(f"    {run_dir}/cal_left.csv   ")
-        print(f"    {run_dir}/cal_right.csv  ")
-        print(f"    {run_dir}/real_left.csv")
-        print(f"    {run_dir}/real_right.csv ")
+        # 录制已关闭后再回 HOME，回程轨迹不会被录入 CSV。
+        print("\n[6] 回到 HOME 位置...")
+        try:
+            interface.send_fsm_command(1)  # 1: HOME（内部会自动先切 HOLD）
+            print("    已发送 HOME 指令")
+        except Exception as home_exc:  # noqa: BLE001
+            print(f"    警告: 回 HOME 失败: {home_exc}")
+
+        print("\n完成。产物位于本次运行目录（控制器端），按测试类型择一存在:")
+        print(f"    MPC: {run_dir}/pred_left.csv, pred_right.csv")
+        print(f"    IK : {run_dir}/cal_left.csv, cal_right.csv")
+        print(f"    实测: {run_dir}/real_left.csv, real_right.csv")
         return 0 if motion_ok else 1
 
     except Exception as exc:  # noqa: BLE001
