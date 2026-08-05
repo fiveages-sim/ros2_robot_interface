@@ -1,7 +1,10 @@
-"""W2 拉并抓料箱任务示例。
+"""W2 拉并抓料箱任务 IK Motion Planning 示例。
 
 动作点位来自项目根目录的《拉并抓料箱.txt》。左夹爪先拉箱，
-右夹爪随后抓取并抬起料箱。
+右夹爪随后抓取并抬起料箱。第 1 步使用 MoveJ，其余双臂
+笛卡尔动作使用阻塞式 MoveL + DLS IK。
+
+运行前需确保 /ocs2_arm_controller/execute_linear Action 可用。
 """
 
 import sys
@@ -16,9 +19,10 @@ from ros2_robot_interface import ROS2RobotInterface, ROS2RobotInterfaceConfig
 FRAME_ID = "arm_base"
 DATA_SETTLE_TIME = 2.0
 ARRIVAL_TIMEOUT = 30.0
+ACTION_SERVER_TIMEOUT = 5.0
 MOVEJ_DURATION = 5.0
 MOVEL_DURATION = 5.0
-APPROACH_TRAJECTORY_DURATION = 6.0
+APPROACH_MOVEL_SEGMENT_DURATION = 5.0
 GRIPPER_OPEN_PERCENT = 1.0
 GRIPPER_CLOSED_PERCENT = 0.0
 
@@ -130,62 +134,70 @@ def require_arrival(result: dict, step_name: str, part: str) -> None:
         )
 
 
-def execute_dual_pose(
+def require_motion_success(result: object, step_name: str) -> None:
+    """Motion Planning Action 失败时终止任务并保留返回消息。"""
+    if result is None or not bool(getattr(result, "success", False)):
+        message = (
+            getattr(result, "message", "no action result")
+            if result is not None
+            else "no action result"
+        )
+        raise RuntimeError(f"{step_name}: motion planning failed: {message}")
+
+
+def execute_dual_movel(
     interface: ROS2RobotInterface,
     step_name: str,
     left_vector: Sequence[float],
     right_vector: Sequence[float],
-    movel_duration: float,
+    duration: float,
+    ik_type: str = "DLS",
 ) -> None:
-    """发送双臂单点目标，等待请求时长后要求左右臂均到位。"""
+    """通过阻塞式 MoveL Action 规划并执行双臂逐点 IK 轨迹。"""
     print(f"\n{step_name}")
-    interface.send_dual_arm_target_stamped(
+    result = interface.execute_movel_action(
+        "both",
         vector_to_pose(left_vector),
-        vector_to_pose(right_vector),
+        right_endpoint_pose=vector_to_pose(right_vector),
+        duration=duration,
+        time_mode=True,
         frame_id=FRAME_ID,
-        movel_duration=movel_duration,
+        ik_type=ik_type,
+        timeout=max(ARRIVAL_TIMEOUT, duration + ACTION_SERVER_TIMEOUT),
+        wait_for_server_timeout=ACTION_SERVER_TIMEOUT,
     )
-    time.sleep(movel_duration)
-    require_arrival(
-        interface.wait_until_arrive(part="left_arm", timeout=ARRIVAL_TIMEOUT),
-        step_name,
-        "left_arm",
-    )
-    require_arrival(
-        interface.wait_until_arrive(part="right_arm", timeout=ARRIVAL_TIMEOUT),
-        step_name,
-        "right_arm",
-    )
+    require_motion_success(result, step_name)
 
 
-def execute_dual_path(
+def execute_dual_movel_path(
     interface: ROS2RobotInterface,
     step_name: str,
     left_path: Sequence[Sequence[float]],
     right_path: Sequence[Sequence[float]],
+    segment_duration: float,
+    ik_type: str = "DLS",
 ) -> None:
-    """通过 ExecutePath Service 执行双臂路径并检查最终到位。"""
-    print(f"\n{step_name}")
-    accepted = interface.execute_path(
-        left_poses=[vector_to_pose(vector) for vector in left_path],
-        right_poses=[vector_to_pose(vector) for vector in right_path],
-        trajectory_duration=APPROACH_TRAJECTORY_DURATION,
-        frame_id=FRAME_ID,
-    )
-    if not accepted:
-        raise RuntimeError(f"{step_name}: ExecutePath service returned success=False")
+    """将双臂路径拆成多个阻塞式 MoveL Action 依次执行。"""
+    if not left_path or not right_path:
+        raise ValueError(f"{step_name}: left and right paths must not be empty")
+    if len(left_path) != len(right_path):
+        raise ValueError(
+            f"{step_name}: path length mismatch: "
+            f"left={len(left_path)}, right={len(right_path)}"
+        )
 
-    time.sleep(APPROACH_TRAJECTORY_DURATION)
-    require_arrival(
-        interface.wait_until_arrive(part="left_arm", timeout=ARRIVAL_TIMEOUT),
-        step_name,
-        "left_arm",
-    )
-    require_arrival(
-        interface.wait_until_arrive(part="right_arm", timeout=ARRIVAL_TIMEOUT),
-        step_name,
-        "right_arm",
-    )
+    waypoint_count = len(left_path)
+    for index, (left_vector, right_vector) in enumerate(
+        zip(left_path, right_path), start=1
+    ):
+        execute_dual_movel(
+            interface,
+            f"{step_name} [{index}/{waypoint_count}]",
+            left_vector,
+            right_vector,
+            segment_duration,
+            ik_type=ik_type,
+        )
 
 
 def command_gripper(
@@ -215,7 +227,7 @@ def command_gripper(
 
 
 def validate_capabilities(interface: ROS2RobotInterface) -> None:
-    """在机器人运动前验证双臂及百分比夹爪控制能力。"""
+    """在机器人运动前验证双臂、夹爪和 MoveL Action 能力。"""
     if interface.config.right_end_effector_target_topic is None:
         raise RuntimeError("This demo requires dual-arm mode")
     for side, handler in (
@@ -226,10 +238,14 @@ def validate_capabilities(interface: ROS2RobotInterface) -> None:
             raise RuntimeError(
                 f"This demo requires {side} gripper target_percent control"
             )
+    if not interface.wait_for_movel_action_server(timeout=ACTION_SERVER_TIMEOUT):
+        raise RuntimeError(
+            f"{interface.config.movel_action_name} Action is not available"
+        )
 
 
 def run_task(interface: ROS2RobotInterface) -> None:
-    """严格按《拉并抓料箱.txt》的顺序执行双臂、腰部和夹爪动作。"""
+    """严格按《拉并抓料箱.txt》的顺序执行 MoveJ、MoveL IK 和夹爪动作。"""
     validate_capabilities(interface)
 
     print(f"等待状态数据 {DATA_SETTLE_TIME:.1f}s...")
@@ -239,7 +255,7 @@ def run_task(interface: ROS2RobotInterface) -> None:
     command_gripper(interface, "[准备] 打开左夹爪", "left", GRIPPER_OPEN_PERCENT)
     command_gripper(interface, "[准备] 打开右夹爪", "right", GRIPPER_OPEN_PERCENT)
 
-    print("\n[1/9] 移动到初始关节位置")
+    print("\n[1/9] 移动到初始关节位置（MoveJ）")
     interface.send_coordinated_joint_positions(
         body_positions=INITIAL_BODY_JOINTS,
         left_arm_positions=LEFT_INITIAL_JOINTS,
@@ -255,25 +271,26 @@ def run_task(interface: ROS2RobotInterface) -> None:
     if not initial_result.get("arrived", False):
         raise RuntimeError(f"[1/9] Initial joints did not arrive: {initial_result}")
 
-    execute_dual_pose(
+    execute_dual_movel(
         interface,
-        "[2/9] 移动到视觉 first 点",
+        "[2/9] 移动到视觉 first 点（MoveL + DLS IK）",
         VISUAL_FIRST_LEFT,
         VISUAL_FIRST_RIGHT,
         MOVEL_DURATION,
     )
-    execute_dual_pose(
+    execute_dual_movel(
         interface,
-        "[3/9] 单独移动到视觉 second 点",
+        "[3/9] 单独移动到视觉 second 点（MoveL + DLS IK）",
         VISUAL_SECOND_LEFT,
         VISUAL_SECOND_RIGHT,
         MOVEL_DURATION,
     )
-    execute_dual_path(
+    execute_dual_movel_path(
         interface,
-        "[4/9] 执行拉箱四段逼近路径",
+        "[4/9] 执行拉箱四段逼近路径（MoveL + DLS IK）",
         PULL_APPROACH_LEFT_PATH,
         PULL_APPROACH_RIGHT_PATH,
+        APPROACH_MOVEL_SEGMENT_DURATION,
     )
 
     print("\n[5/9] 左夹爪抓取并轻提")
@@ -283,33 +300,34 @@ def run_task(interface: ROS2RobotInterface) -> None:
         "left",
         GRIPPER_CLOSED_PERCENT,
     )
-    execute_dual_pose(
+    execute_dual_movel(
         interface,
-        "[5/9] 合爪后轻提",
+        "[5/9] 合爪后轻提（MoveL + DLS IK）",
         PULL_LIFT_LEFT,
         PULL_LIFT_RIGHT,
         MOVEL_DURATION,
     )
-    execute_dual_pose(
+    execute_dual_movel(
         interface,
-        "[6/9] 横拉箱体",
+        "[6/9] 横拉箱体（MoveL + DLS IK）",
         PULL_END_LEFT,
         PULL_END_RIGHT,
         MOVEL_DURATION,
     )
 
-    execute_dual_pose(
+    execute_dual_movel(
         interface,
-        "[7/9] 单独移动到视觉 third 点",
+        "[7/9] 单独移动到视觉 third 点（MoveL + DLS IK）",
         VISUAL_THIRD_LEFT,
         VISUAL_THIRD_RIGHT,
         MOVEL_DURATION,
     )
-    execute_dual_path(
+    execute_dual_movel_path(
         interface,
-        "[8/9] 执行抓取四段逼近路径",
+        "[8/9] 执行抓取四段逼近路径（MoveL + DLS IK）",
         GRASP_APPROACH_LEFT_PATH,
         GRASP_APPROACH_RIGHT_PATH,
+        APPROACH_MOVEL_SEGMENT_DURATION,
     )
 
     print("\n[9/9] 右夹爪抓取并抬起")
@@ -319,9 +337,9 @@ def run_task(interface: ROS2RobotInterface) -> None:
         "right",
         GRIPPER_CLOSED_PERCENT,
     )
-    execute_dual_pose(
+    execute_dual_movel(
         interface,
-        "[9/9] 抓取后抬起",
+        "[9/9] 抓取后抬起（MoveL + DLS IK）",
         GRASP_LIFT_LEFT,
         GRASP_LIFT_RIGHT,
         MOVEL_DURATION,
@@ -329,19 +347,19 @@ def run_task(interface: ROS2RobotInterface) -> None:
 
 
 def main() -> int:
-    """连接 ROS2，执行任务并保证资源清理。"""
+    """连接 ROS2，执行 IK Motion Planning 任务并保证资源清理。"""
     interface = ROS2RobotInterface(ROS2RobotInterfaceConfig())
     try:
         print("连接 ROS2RobotInterface...")
         interface.connect()
         run_task(interface)
-        print("\n拉并抓料箱任务执行完成")
+        print("\nIK Motion Planning 拉并抓料箱任务执行完成")
         return 0
     except KeyboardInterrupt:
-        print("\n操作人员中止拉并抓料箱任务")
+        print("\n操作人员中止 IK Motion Planning 拉并抓料箱任务")
         return 130
     except Exception as exc:
-        print(f"\n拉并抓料箱任务失败: {exc}")
+        print(f"\nIK Motion Planning 拉并抓料箱任务失败: {exc}")
         return 1
     finally:
         interface.disconnect()
