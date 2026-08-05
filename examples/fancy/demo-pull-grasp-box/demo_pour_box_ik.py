@@ -3,10 +3,9 @@
 动作点位来自项目根目录的《倾倒任务.txt》。本示例只控制双臂和腰部，
 不控制夹爪，也不会在结束时自动回 HOME。
 第 1、6 步使用 MoveJ；第 2～5 步使用双臂 MoveL + DLS IK；
-第 7 步使用双臂 MoveC + DLS IK 倾倒，再用 MoveL + DLS IK 回正。
+第 7 步使用两段双臂 MoveL + AUTO IK 倾倒，再用 MoveL + DLS IK 回正。
 
-运行前需确保 /ocs2_arm_controller/execute_linear 和
-/ocs2_arm_controller/execute_circle_use_ik Action 可用。
+运行前需确保 /ocs2_arm_controller/execute_linear Action 可用。
 """
 
 import math
@@ -25,7 +24,7 @@ ARRIVAL_TIMEOUT = 30.0
 ACTION_SERVER_TIMEOUT = 5.0
 MOVEJ_DURATION = 5.0
 MOVEL_DURATION = 5.0
-POUR_MOVEC_DURATION = 5.0
+POUR_MOVEL_SEGMENT_DURATION = 5.0
 RETURN_MOVEL_DURATION = 5.0
 
 LEFT_INITIAL_JOINTS = [
@@ -119,6 +118,7 @@ def execute_dual_movel(
     left_vector: Sequence[float],
     right_vector: Sequence[float],
     duration: float,
+    ik_type: str = "DLS",
 ) -> None:
     """通过阻塞式 MoveL Action 规划并执行双臂逐点 IK 轨迹。"""
     print(f"\n{step_name}")
@@ -129,7 +129,7 @@ def execute_dual_movel(
         duration=duration,
         time_mode=True,
         frame_id=FRAME_ID,
-        ik_type="DLS",
+        ik_type=ik_type,
         timeout=max(ARRIVAL_TIMEOUT, duration + ACTION_SERVER_TIMEOUT),
         wait_for_server_timeout=ACTION_SERVER_TIMEOUT,
     )
@@ -137,7 +137,7 @@ def execute_dual_movel(
 
 
 def run_task(interface: ROS2RobotInterface) -> None:
-    """按《倾倒任务.txt》顺序执行 MoveJ、MoveL IK 和 MoveC IK。"""
+    """按《倾倒任务.txt》顺序执行 MoveJ 和 MoveL IK。"""
     if interface.config.right_end_effector_target_topic is None:
         raise RuntimeError("This demo requires dual-arm mode")
 
@@ -148,11 +148,6 @@ def run_task(interface: ROS2RobotInterface) -> None:
         raise RuntimeError(
             f"{interface.config.movel_action_name} Action is not available"
         )
-    if not interface.wait_for_movec_action_server(timeout=ACTION_SERVER_TIMEOUT):
-        raise RuntimeError(
-            f"{interface.config.movec_action_name} Action is not available"
-        )
-
     print("\n[1/7] 移动到初始关节位置（MoveJ）")
     interface.send_coordinated_joint_positions(
         body_positions=INITIAL_BODY_JOINTS,
@@ -208,22 +203,22 @@ def run_task(interface: ROS2RobotInterface) -> None:
     if not body_result.get("arrived", False):
         raise RuntimeError(f"[6/7] Body joints did not arrive: {body_result}")
 
-    print("\n[7A] 准备点经 point1 到 point2（MoveC + DLS IK）")
-    pour_result = interface.execute_movec_action_three_point(
-        "both",
-        midpoint_pose=vector_to_pose(POUR_LEFT_PATH[0]),
-        endpoint_pose=vector_to_pose(POUR_LEFT_PATH[1]),
-        right_midpoint_pose=vector_to_pose(POUR_RIGHT_PATH[0]),
-        right_endpoint_pose=vector_to_pose(POUR_RIGHT_PATH[1]),
-        duration=POUR_MOVEC_DURATION,
-        time_mode=True,
-        frame_id=FRAME_ID,
-        ik_type="DLS",
-        use_slerp_for_orientation=True,
-        timeout=max(ARRIVAL_TIMEOUT, POUR_MOVEC_DURATION + ACTION_SERVER_TIMEOUT),
-        wait_for_server_timeout=ACTION_SERVER_TIMEOUT,
+    execute_dual_movel(
+        interface,
+        "[7A-1] 准备点到 point1（MoveL + AUTO IK）",
+        POUR_LEFT_PATH[0],
+        POUR_RIGHT_PATH[0],
+        POUR_MOVEL_SEGMENT_DURATION,
+        ik_type="AUTO",
     )
-    require_motion_success(pour_result, "[7A] 双臂圆弧倾倒")
+    execute_dual_movel(
+        interface,
+        "[7A-2] point1 到 point2（MoveL + AUTO IK）",
+        POUR_LEFT_PATH[1],
+        POUR_RIGHT_PATH[1],
+        POUR_MOVEL_SEGMENT_DURATION,
+        ik_type="AUTO",
+    )
 
     execute_dual_movel(
         interface,
