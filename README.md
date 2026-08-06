@@ -128,6 +128,11 @@ config = ROS2RobotInterfaceConfig(
 - `send_mode_command(command)` - 向 `/mode_command` 发布 WBC / 底盘模式
 - `wait_until_mode_commands_applied(commands, ...)` - 对照 `/ocs2_wbc_controller/current_state` 确认一组 mode
 
+**六维力 / COMPLIANCE**
+- `get_wrench(side)` - 读取左右 FT 原始 wrench 缓存
+- `enter_compliance()` - 进入 COMPLIANCE FSM（自动 HOLD 中转）
+- `set_compliance_force(task_selection, force_setpoint)` - 写入 6 维任务选择与目标力
+
 **运动下发**
 - `send_coordinated_joint_positions(...)` - 一次性协调下发臂/躯干/头关节（默认隐式 MOVEJ）
 - `send_head_joint_positions(positions)` / `send_body_joint_positions(positions)` - 头部 / 身体关节

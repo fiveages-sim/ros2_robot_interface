@@ -75,6 +75,12 @@ class ROS2RobotInterfaceConfig:
     body_joint_current_target_topic: str | None = None  # 【可自动检测】腰部关节控制器话题，例如 "/body_joint_controller/target_joint_position"
     body_current_pose_topic: str | None = None  # 【可自动检测】body 当前笛卡尔位姿话题（PoseStamped），例如 "/body_current_pose"，用于 body pose 到位判定
     body_current_target_pose_topic: str | None = None  # 【可自动检测】body 目标笛卡尔位姿话题（PoseStamped），例如 "/body_current_target"，用于 body pose 到位判定
+
+    # ============================================================================
+    # 六维力 FT wrench 话题（可自动检测；robot.local.yaml 中 left_ft/right_ft 为 none 时可能不存在）
+    # ============================================================================
+    left_ft_wrench_topic: str | None = None   # 【可自动检测】默认探测 /left_ft_broadcaster/wrench
+    right_ft_wrench_topic: str | None = None  # 【可自动检测】默认探测 /right_ft_broadcaster/wrench
     
     # ============================================================================
     # 手臂关节控制器话题（自动检测，无需手动配置）
