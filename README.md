@@ -129,7 +129,9 @@ config = ROS2RobotInterfaceConfig(
 - `wait_until_mode_commands_applied(commands, ...)` - 对照 `/ocs2_wbc_controller/current_state` 确认一组 mode
 
 **六维力 / COMPLIANCE**
-- `get_wrench(side)` - 读取左右 FT 原始 wrench 缓存
+- `get_original_wrench(side)` - 读取左右 FT 原始 wrench 缓存
+- `get_filtered_wrench(side)` - 读取左右 FT 滤波 wrench 缓存（通常 COMPLIANCE 下有数据）
+- `call_compliance_zero_wrench()` - 请求零力校准（不等待 `zero_cal_done`）
 - `enter_compliance()` - 进入 COMPLIANCE FSM（自动 HOLD 中转）
 - `set_compliance_force(task_selection, force_setpoint)` - 写入 6 维任务选择与目标力
 

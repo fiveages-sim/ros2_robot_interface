@@ -27,6 +27,7 @@ from rclpy.subscription import Subscription
 from rclpy.time import Time
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Float64, Float64MultiArray, Int32, String
+from std_srvs.srv import Trigger
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 import tf2_ros
 from tf2_ros import TransformException
@@ -101,6 +102,11 @@ class ROS2RobotInterface:
         self.right_ft_wrench_sub: Subscription | None = None
         self._latest_wrench_left: Dict[str, Any] | None = None
         self._latest_wrench_right: Dict[str, Any] | None = None
+        self.left_ft_wrench_filtered_sub: Subscription | None = None
+        self.right_ft_wrench_filtered_sub: Subscription | None = None
+        self._latest_wrench_filtered_left: Dict[str, Any] | None = None
+        self._latest_wrench_filtered_right: Dict[str, Any] | None = None
+        self.compliance_zero_wrench_client: Client | None = None
         self.target_path_pub: Publisher | None = None
         self.execute_path_client: Client | None = None
         self.joint_trajectory_action_client: ActionClient | None = None
@@ -468,7 +474,26 @@ class ROS2RobotInterface:
         if self.config.right_ft_wrench_topic is None and "/right_ft_broadcaster/wrench" in topic_names:
             self.config.right_ft_wrench_topic = "/right_ft_broadcaster/wrench"
             logger.info("Detected right FT wrench topic: /right_ft_broadcaster/wrench")
-        
+
+        # filtered 仅在 COMPLIANCE 期间发布，connect 时通常不在 graph → 按 original 对称推导，提前订阅
+        def _default_filtered_topic(original: str | None, fallback: str) -> str | None:
+            if not original:
+                return None
+            if original.endswith("/wrench"):
+                return original[: -len("/wrench")] + "/wrench_filtered"
+            return fallback
+
+        if self.config.left_ft_wrench_filtered_topic is None:
+            self.config.left_ft_wrench_filtered_topic = _default_filtered_topic(
+                self.config.left_ft_wrench_topic,
+                "/left_ft_broadcaster/wrench_filtered",
+            )
+        if self.config.right_ft_wrench_filtered_topic is None:
+            self.config.right_ft_wrench_filtered_topic = _default_filtered_topic(
+                self.config.right_ft_wrench_topic,
+                "/right_ft_broadcaster/wrench_filtered",
+            )
+
         return is_dual_arm
     
     def connect(self) -> None:
@@ -620,12 +645,15 @@ class ROS2RobotInterface:
                 )
                 logger.info("✅ Subscribed to /ocs2_wbc_controller/current_state for WBC mode tracking")
 
+            # FT publishers (sensor + COMPLIANCE filtered) use SensorDataQoS (BEST_EFFORT).
+            from rclpy.qos import qos_profile_sensor_data
+
             if self.config.left_ft_wrench_topic:
                 self.left_ft_wrench_sub = self.robot_node.create_subscription(
                     WrenchStamped,
                     self.config.left_ft_wrench_topic,
                     self._left_ft_wrench_callback,
-                    10,
+                    qos_profile_sensor_data,
                 )
                 logger.info(f"✅ Subscribed to {self.config.left_ft_wrench_topic} for left FT wrench")
             else:
@@ -636,12 +664,42 @@ class ROS2RobotInterface:
                     WrenchStamped,
                     self.config.right_ft_wrench_topic,
                     self._right_ft_wrench_callback,
-                    10,
+                    qos_profile_sensor_data,
                 )
                 logger.info(f"✅ Subscribed to {self.config.right_ft_wrench_topic} for right FT wrench")
             else:
                 logger.info("No right FT wrench topic configured; skipping right FT subscription")
-            
+
+            if self.config.left_ft_wrench_filtered_topic:
+                self.left_ft_wrench_filtered_sub = self.robot_node.create_subscription(
+                    WrenchStamped,
+                    self.config.left_ft_wrench_filtered_topic,
+                    self._left_ft_wrench_filtered_callback,
+                    qos_profile_sensor_data,
+                )
+                logger.info(
+                    f"✅ Subscribed to {self.config.left_ft_wrench_filtered_topic} for left FT filtered wrench"
+                )
+            else:
+                logger.info("No left FT filtered wrench topic configured; skipping left FT filtered subscription")
+
+            if self.config.right_ft_wrench_filtered_topic:
+                self.right_ft_wrench_filtered_sub = self.robot_node.create_subscription(
+                    WrenchStamped,
+                    self.config.right_ft_wrench_filtered_topic,
+                    self._right_ft_wrench_filtered_callback,
+                    qos_profile_sensor_data,
+                )
+                logger.info(
+                    f"✅ Subscribed to {self.config.right_ft_wrench_filtered_topic} for right FT filtered wrench"
+                )
+            else:
+                logger.info("No right FT filtered wrench topic configured; skipping right FT filtered subscription")
+
+            self.compliance_zero_wrench_client = self.robot_node.create_client(
+                Trigger, "/compliance_zero_wrench"
+            )
+
             # Initialize TF buffer first (needed by ArmHandler)
             self.tf_buffer = tf2_ros.Buffer()
             self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self.robot_node)
@@ -868,6 +926,20 @@ class ROS2RobotInterface:
             self._latest_wrench_right = self._wrench_stamped_to_dict(msg)
         except Exception as e:
             logger.error(f"Error in right FT wrench callback: {e}", exc_info=True)
+
+    def _left_ft_wrench_filtered_callback(self, msg: WrenchStamped) -> None:
+        """Callback for left FT filtered WrenchStamped."""
+        try:
+            self._latest_wrench_filtered_left = self._wrench_stamped_to_dict(msg)
+        except Exception as e:
+            logger.error(f"Error in left FT filtered wrench callback: {e}", exc_info=True)
+
+    def _right_ft_wrench_filtered_callback(self, msg: WrenchStamped) -> None:
+        """Callback for right FT filtered WrenchStamped."""
+        try:
+            self._latest_wrench_filtered_right = self._wrench_stamped_to_dict(msg)
+        except Exception as e:
+            logger.error(f"Error in right FT filtered wrench callback: {e}", exc_info=True)
 
     def _normalize_body_mode(self, body_mode: Optional[str], body_pose: Optional[Pose]) -> Optional[str]:
         """Normalize/validate body mode and preserve backward compatibility."""
@@ -1947,14 +2019,36 @@ class ROS2RobotInterface:
 
         _publish_and_wait(command)
 
-    def get_wrench(self, side: str) -> dict:
-        """Get latest raw FT wrench for left or right arm.
-
-        Returns a shallow copy of the cached WrenchStamped fields:
-        ``force``, ``torque``, ``frame_id``, ``stamp`` (float seconds).
-        """
+    def _get_cached_wrench(
+        self,
+        side: str,
+        *,
+        topic: str | None,
+        cache: dict | None,
+        kind: str,
+    ) -> dict:
         if not self.is_connected:
             raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+        side_key = side.lower()
+        if side_key not in ("left", "right"):
+            raise ValueError(f"side must be 'left' or 'right', got: {side!r}")
+        if not topic:
+            raise ROS2InterfaceError(
+                f"No FT {kind} wrench topic configured for side={side_key!r}"
+            )
+        if cache is None:
+            raise ROS2InterfaceError(
+                f"No {kind} wrench message received yet on {topic} (side={side_key})"
+            )
+        return {
+            "force": list(cache["force"]),
+            "torque": list(cache["torque"]),
+            "frame_id": cache["frame_id"],
+            "stamp": cache["stamp"],
+        }
+
+    def get_original_wrench(self, side: str) -> dict:
+        """Latest raw FT wrench (/…/wrench)."""
         side_key = side.lower()
         if side_key not in ("left", "right"):
             raise ValueError(f"side must be 'left' or 'right', got: {side!r}")
@@ -1964,21 +2058,24 @@ class ROS2RobotInterface:
             else self.config.right_ft_wrench_topic
         )
         cache = self._latest_wrench_left if side_key == "left" else self._latest_wrench_right
-        if not topic:
-            raise ROS2InterfaceError(
-                f"No FT wrench topic configured for side={side_key!r}; "
-                "check robot.local.yaml left_ft/right_ft and topic discovery"
-            )
-        if cache is None:
-            raise ROS2InterfaceError(
-                f"No wrench message received yet on {topic} (side={side_key})"
-            )
-        return {
-            "force": list(cache["force"]),
-            "torque": list(cache["torque"]),
-            "frame_id": cache["frame_id"],
-            "stamp": cache["stamp"],
-        }
+        return self._get_cached_wrench(side, topic=topic, cache=cache, kind="original")
+
+    def get_filtered_wrench(self, side: str) -> dict:
+        """Latest filtered FT wrench (/…/wrench_filtered; COMPLIANCE only)."""
+        side_key = side.lower()
+        if side_key not in ("left", "right"):
+            raise ValueError(f"side must be 'left' or 'right', got: {side!r}")
+        topic = (
+            self.config.left_ft_wrench_filtered_topic
+            if side_key == "left"
+            else self.config.right_ft_wrench_filtered_topic
+        )
+        cache = (
+            self._latest_wrench_filtered_left
+            if side_key == "left"
+            else self._latest_wrench_filtered_right
+        )
+        return self._get_cached_wrench(side, topic=topic, cache=cache, kind="filtered")
 
     def enter_compliance(self) -> None:
         """Enter COMPLIANCE FSM (auto HOLD transit via send_fsm_command)."""
@@ -2027,6 +2124,30 @@ class ROS2RobotInterface:
         )
         if not ok:
             raise ROS2InterfaceError(f"Failed to set compliance force parameters on {ctrl}")
+
+    def call_compliance_zero_wrench(self, timeout_sec: float = 5.0) -> None:
+        """Request FT zero calibration (Trigger). Does not wait for zero_cal_done."""
+        if not self.is_connected:
+            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+        client = self.compliance_zero_wrench_client
+        if client is None:
+            raise ROS2InterfaceError("compliance_zero_wrench client not initialized")
+        if not client.wait_for_service(timeout_sec=2.0):
+            raise ROS2InterfaceError(
+                "/compliance_zero_wrench not available; enter COMPLIANCE first"
+            )
+        future = client.call_async(Trigger.Request())
+        event = threading.Event()
+        future.add_done_callback(lambda _: event.set())
+        if not event.wait(timeout=timeout_sec):
+            raise ROS2InterfaceError("compliance_zero_wrench service call timed out")
+        response = future.result()
+        if response is None:
+            raise ROS2InterfaceError("compliance_zero_wrench service call failed")
+        if not response.success:
+            raise ROS2InterfaceError(
+                f"compliance_zero_wrench rejected: {response.message}"
+            )
 
     def send_mode_command(self, command: str) -> None:
         """Send mode command to /mode_command.
@@ -3933,7 +4054,20 @@ class ROS2RobotInterface:
             self.right_ft_wrench_sub = None
         self._latest_wrench_left = None
         self._latest_wrench_right = None
-        
+
+        if self.left_ft_wrench_filtered_sub:
+            self.left_ft_wrench_filtered_sub.destroy()
+            self.left_ft_wrench_filtered_sub = None
+        if self.right_ft_wrench_filtered_sub:
+            self.right_ft_wrench_filtered_sub.destroy()
+            self.right_ft_wrench_filtered_sub = None
+        self._latest_wrench_filtered_left = None
+        self._latest_wrench_filtered_right = None
+
+        if self.compliance_zero_wrench_client:
+            self.compliance_zero_wrench_client.destroy()
+            self.compliance_zero_wrench_client = None
+
         # Cleanup arm handlers
         if self.left_arm_handler:
             self.left_arm_handler.cleanup()

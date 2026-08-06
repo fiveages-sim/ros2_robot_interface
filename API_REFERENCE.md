@@ -986,15 +986,15 @@ interface.send_fsm_command(5)
 
 ### 六维力与 COMPLIANCE 力控
 
-依赖真机 `robot.local.yaml` 中启用的 FT（如 `left_ft=kwr75_485`）以及 `ocs2_arm_controller`。`connect()` 会自动探测并订阅 `/left_ft_broadcaster/wrench`、`/right_ft_broadcaster/wrench`（也可在 config 中手动指定）。
+依赖真机 `robot.local.yaml` 中启用的 FT（如 `left_ft=kwr75_485`）以及 `ocs2_arm_controller`。`connect()` 会自动探测并订阅 `/left_ft_broadcaster/wrench`、`/right_ft_broadcaster/wrench`（也可在 config 中手动指定）；探测到 original 时默认同时订阅对应的 `/…/wrench_filtered`（connect 时 publisher 可能尚未出现，先挂订阅），并创建 `/compliance_zero_wrench` 服务客户端。
 
 轴序约定（与 COMPLIANCE.md 一致）：`[Fx, Fy, Fz, Mx, My, Mz]`（力 N，力矩 Nm）。
 
-**不提供** `wait_zero_force_calibration`：当前无 `/compliance_force_status` 话题；进入 COMPLIANCE 后若控制器仍有内部零力校准，调用方自行等待足够时间再设力。
+**暂不封装** `wait_zero_force_calibration`：清零结束状态可通过 `/compliance_force_status.zero_cal_done` 自行确认。
 
-#### `get_wrench(side: str) -> dict`
+#### `get_original_wrench(side: str) -> dict`
 
-**功能：** 返回指定侧原始 `WrenchStamped` 缓存的浅拷贝。
+**功能：** 返回指定侧原始 `WrenchStamped`（`/…/wrench`）缓存的浅拷贝。
 
 **参数：**
 - `side`: `"left"` / `"right"`
@@ -1011,6 +1011,18 @@ interface.send_fsm_command(5)
 
 **异常：** 未连接 → `ROS2NotConnectedError`；侧非法 → `ValueError`；话题未配置 / 尚无消息 → `ROS2InterfaceError`。
 
+#### `get_filtered_wrench(side: str) -> dict`
+
+**功能：** 返回指定侧滤波后 `WrenchStamped`（`/…/wrench_filtered`，通常仅在 COMPLIANCE 下有数据）缓存的浅拷贝。返回值结构与 `get_original_wrench` 相同。
+
+**异常：** 同 `get_original_wrench`。
+
+#### `call_compliance_zero_wrench(timeout_sec: float = 5.0) -> None`
+
+**功能：** 调用 `/compliance_zero_wrench`（`std_srvs/Trigger`）发起零力校准。**只请求，不等待校准完成**；结束请自行观察 `/compliance_force_status.zero_cal_done`。服务通常仅在进入 COMPLIANCE 后可用。
+
+**异常：** 未连接 → `ROS2NotConnectedError`；client 未初始化 / 服务不可用 / 超时 / `success=False` → `ROS2InterfaceError`。
+
 #### `enter_compliance() -> None`
 
 **功能：** 进入 COMPLIANCE FSM（内部 `send_fsm_command(FSM_COMPLIANCE)`，自动 HOLD 中转）。不等待零力校准。
@@ -1025,13 +1037,24 @@ interface.send_fsm_command(5)
 
 **示例：**
 ```python
-from ros2_robot_interface import FSM_HOLD, ROS2RobotInterface, ROS2RobotInterfaceConfig
+from ros2_robot_interface import (
+    FSM_HOLD,
+    ROS2InterfaceError,
+    ROS2RobotInterface,
+    ROS2RobotInterfaceConfig,
+)
 
 interface = ROS2RobotInterface(ROS2RobotInterfaceConfig())
 interface.connect()
-wrench = interface.get_wrench("left")
+original = interface.get_original_wrench("left")
+# COMPLIANCE 前 filtered 可能尚无数据
+try:
+    filtered = interface.get_filtered_wrench("left")
+except ROS2InterfaceError:
+    filtered = None
 interface.enter_compliance()
-# 必要时自行等待控制器内部零力校准后再设力
+interface.call_compliance_zero_wrench()  # 不等待 zero_cal_done
+# 必要时自行确认 /compliance_force_status.zero_cal_done 后再设力
 interface.set_compliance_force([1, 0, 0, 0, 0, 0], [0, 0, 0, 0, 0, 0])  # X 轴力控，目标 0 N
 interface.send_fsm_command(FSM_HOLD)
 interface.disconnect()
