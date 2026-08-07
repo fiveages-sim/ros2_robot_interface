@@ -1027,13 +1027,15 @@ interface.send_fsm_command(5)
 
 **功能：** 进入 COMPLIANCE FSM（内部 `send_fsm_command(FSM_COMPLIANCE)`，自动 HOLD 中转）。不等待零力校准。
 
-#### `set_compliance_force(task_selection, force_setpoint) -> None`
+#### `set_compliance_force(task_selection, force_setpoint, force_xmax_lin=None, force_xmax_ang=None) -> None`
 
-**功能：** 向 `arm_controller`（通常 `/ocs2_arm_controller`）写入完整 6 维 `compliance_task_selection` 与 `compliance_force_setpoint`。
+**功能：** 向 `arm_controller`（通常 `/ocs2_arm_controller`）写入完整 6 维 `compliance_task_selection` 与 `compliance_force_setpoint`；可选写入 `compliance_hybrid_force_xmax_lin` / `compliance_hybrid_force_xmax_ang`。
 
 **参数：**
 - `task_selection`: 长度 6；`1.0` = 该轴力控，`0.0` = 位置控
 - `force_setpoint`: 长度 6；目标 wrench（仅 `task_selection==1` 的轴作为力目标生效）
+- `force_xmax_lin`: 可选，平移软限 [m]；`None` 表示不修改控制器现有值（控制器默认通常为 `0.2`）
+- `force_xmax_ang`: 可选，旋转软限 [rad]；`None` 表示不修改（控制器默认通常为 `0.3`）
 
 **示例：**
 ```python
@@ -1055,7 +1057,12 @@ except ROS2InterfaceError:
 interface.enter_compliance()
 interface.call_compliance_zero_wrench()  # 不等待 zero_cal_done
 # 必要时自行确认 /compliance_force_status.zero_cal_done 后再设力
-interface.set_compliance_force([1, 0, 0, 0, 0, 0], [0, 0, 0, 0, 0, 0])  # X 轴力控，目标 0 N
+interface.set_compliance_force(
+    [1, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0],
+    force_xmax_lin=0.05,
+    force_xmax_ang=0.3,
+)
 interface.send_fsm_command(FSM_HOLD)
 interface.disconnect()
 ```

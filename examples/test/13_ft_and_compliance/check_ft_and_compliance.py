@@ -129,11 +129,21 @@ try:
         except (ROS2InterfaceError, ValueError) as exc:
             print(f"[warn] call_compliance_zero_wrench failed: {exc}")
 
-        # 示例用 0 N，避免危险接触；X 轴力控、其余位置控
+        # 示例用 0 N，避免危险接触；X 轴力控、其余位置控；显式限制平移软限 50 mm
         task_selection = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         force_setpoint = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-        print(f"set_compliance_force({task_selection}, {force_setpoint})")
-        interface.set_compliance_force(task_selection, force_setpoint)
+        force_xmax_lin = 0.05
+        force_xmax_ang = 0.3
+        print(
+            f"set_compliance_force({task_selection}, {force_setpoint}, "
+            f"force_xmax_lin={force_xmax_lin}, force_xmax_ang={force_xmax_ang})"
+        )
+        interface.set_compliance_force(
+            task_selection,
+            force_setpoint,
+            force_xmax_lin=force_xmax_lin,
+            force_xmax_ang=force_xmax_ang,
+        )
         print("set_compliance_force ok")
 
         print("-" * 70)

@@ -2087,10 +2087,12 @@ class ROS2RobotInterface:
         self,
         task_selection: Sequence[float],
         force_setpoint: Sequence[float],
+        force_xmax_lin: float | None = None,
+        force_xmax_ang: float | None = None,
     ) -> None:
-        """Set COMPLIANCE hybrid selection and force setpoint (6-D, same axis order).
+        """Set COMPLIANCE hybrid selection, force setpoint, and optional displacement soft limits.
 
-        Axis order for both arrays (base / teleop frame, default base_link):
+        Axis order for task_selection / force_setpoint (base / teleop frame, default base_link):
             [0]=Fx, [1]=Fy, [2]=Fz, [3]=Mx, [4]=My, [5]=Mz
             (force in N, torque in Nm)
 
@@ -2098,10 +2100,17 @@ class ROS2RobotInterface:
             1.0 = force control on that axis, 0.0 = position control
         force_setpoint:
             desired wrench; only axes with task_selection==1 are applied as force targets
+        force_xmax_lin:
+            optional translational soft limit in meters for force axes (Fx/Fy/Fz shared);
+            maps to compliance_hybrid_force_xmax_lin. None = leave controller value unchanged.
+        force_xmax_ang:
+            optional rotational soft limit in radians for force axes (Mx/My/Mz shared);
+            maps to compliance_hybrid_force_xmax_ang. None = leave controller value unchanged.
 
-        Example — X-axis force control at 5 N, other axes position:
+        Example — X-axis force control at 5 N, other axes position, 50 mm linear soft limit:
             task_selection = [1, 0, 0, 0, 0, 0]
             force_setpoint = [5, 0, 0, 0, 0, 0]
+            set_compliance_force(task_selection, force_setpoint, force_xmax_lin=0.05)
         """
         if not self.is_connected:
             raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
@@ -2112,16 +2121,32 @@ class ROS2RobotInterface:
                 "task_selection and force_setpoint must each have length 6 "
                 f"[Fx,Fy,Fz,Mx,My,Mz] (got {len(sel)}, {len(fdes)})"
             )
+
+        params: dict[str, object] = {
+            "compliance_task_selection": sel,
+            "compliance_force_setpoint": fdes,
+        }
+
+        if force_xmax_lin is not None:
+            lin = float(force_xmax_lin)
+            if not math.isfinite(lin) or lin < 0.0:
+                raise ValueError(
+                    f"force_xmax_lin must be a finite float >= 0 (meters), got {force_xmax_lin!r}"
+                )
+            params["compliance_hybrid_force_xmax_lin"] = lin
+
+        if force_xmax_ang is not None:
+            ang = float(force_xmax_ang)
+            if not math.isfinite(ang) or ang < 0.0:
+                raise ValueError(
+                    f"force_xmax_ang must be a finite float >= 0 (radians), got {force_xmax_ang!r}"
+                )
+            params["compliance_hybrid_force_xmax_ang"] = ang
+
         ctrl = self.arm_controller
         if not ctrl:
             raise ROS2InterfaceError("Cannot resolve arm_controller node for set_parameters")
-        ok = self.set_node_parameters(
-            ctrl,
-            {
-                "compliance_task_selection": sel,
-                "compliance_force_setpoint": fdes,
-            },
-        )
+        ok = self.set_node_parameters(ctrl, params)
         if not ok:
             raise ROS2InterfaceError(f"Failed to set compliance force parameters on {ctrl}")
 

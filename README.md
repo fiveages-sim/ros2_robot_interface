@@ -133,7 +133,7 @@ config = ROS2RobotInterfaceConfig(
 - `get_filtered_wrench(side)` - 读取左右 FT 滤波 wrench 缓存（通常 COMPLIANCE 下有数据）
 - `call_compliance_zero_wrench()` - 请求零力校准（不等待 `zero_cal_done`）
 - `enter_compliance()` - 进入 COMPLIANCE FSM（自动 HOLD 中转）
-- `set_compliance_force(task_selection, force_setpoint)` - 写入 6 维任务选择与目标力
+- `set_compliance_force(task_selection, force_setpoint, force_xmax_lin=None, force_xmax_ang=None)` - 写入 6 维任务选择与目标力，可选平移/旋转最大位移软限 [m/rad]
 
 **运动下发**
 - `send_coordinated_joint_positions(...)` - 一次性协调下发臂/躯干/头关节（默认隐式 MOVEJ）
