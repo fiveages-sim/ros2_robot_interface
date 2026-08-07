@@ -960,6 +960,7 @@ wait_result = interface.wait_until_arrive(
   - `2`: HOLD 状态
   - `3`: OCS2 状态（笛卡尔空间控制）
   - `4`: MOVEJ 状态（关节空间控制）
+  - `5`: COMPLIANCE 状态（柔顺/力控；须从 HOLD 进入，接口会自动 HOLD 中转）
 
 **说明：**
 - 发布到 `/fsm_command` topic
@@ -976,7 +977,97 @@ interface.send_fsm_command(3)
 
 # 切换到 MOVEJ 状态（用于关节控制）
 interface.send_fsm_command(4)
+
+# 切换到 COMPLIANCE（力控）；也可直接用 enter_compliance()
+interface.send_fsm_command(5)
 ```
+
+---
+
+### 六维力与 COMPLIANCE 力控
+
+依赖真机 `robot.local.yaml` 中启用的 FT（如 `left_ft=kwr75_485`）以及 `ocs2_arm_controller`。`connect()` 会自动探测并订阅 `/left_ft_broadcaster/wrench`、`/right_ft_broadcaster/wrench`（也可在 config 中手动指定）；探测到 original 时默认同时订阅对应的 `/…/wrench_filtered`（connect 时 publisher 可能尚未出现，先挂订阅），并创建 `/compliance_zero_wrench` 服务客户端。
+
+轴序约定（与 COMPLIANCE.md 一致）：`[Fx, Fy, Fz, Mx, My, Mz]`（力 N，力矩 Nm）。
+
+**暂不封装** `wait_zero_force_calibration`：清零结束状态可通过 `/compliance_force_status.zero_cal_done` 自行确认。
+
+#### `get_original_wrench(side: str) -> dict`
+
+**功能：** 返回指定侧原始 `WrenchStamped`（`/…/wrench`）缓存的浅拷贝。
+
+**参数：**
+- `side`: `"left"` / `"right"`
+
+**返回值：**
+```python
+{
+    "force": [fx, fy, fz],
+    "torque": [mx, my, mz],
+    "frame_id": str,
+    "stamp": float,  # 秒
+}
+```
+
+**异常：** 未连接 → `ROS2NotConnectedError`；侧非法 → `ValueError`；话题未配置 / 尚无消息 → `ROS2InterfaceError`。
+
+#### `get_filtered_wrench(side: str) -> dict`
+
+**功能：** 返回指定侧滤波后 `WrenchStamped`（`/…/wrench_filtered`，通常仅在 COMPLIANCE 下有数据）缓存的浅拷贝。返回值结构与 `get_original_wrench` 相同。
+
+**异常：** 同 `get_original_wrench`。
+
+#### `call_compliance_zero_wrench(timeout_sec: float = 5.0) -> None`
+
+**功能：** 调用 `/compliance_zero_wrench`（`std_srvs/Trigger`）发起零力校准。**只请求，不等待校准完成**；结束请自行观察 `/compliance_force_status.zero_cal_done`。服务通常仅在进入 COMPLIANCE 后可用。
+
+**异常：** 未连接 → `ROS2NotConnectedError`；client 未初始化 / 服务不可用 / 超时 / `success=False` → `ROS2InterfaceError`。
+
+#### `enter_compliance() -> None`
+
+**功能：** 进入 COMPLIANCE FSM（内部 `send_fsm_command(FSM_COMPLIANCE)`，自动 HOLD 中转）。不等待零力校准。
+
+#### `set_compliance_force(task_selection, force_setpoint, force_xmax_lin=None, force_xmax_ang=None) -> None`
+
+**功能：** 向 `arm_controller`（通常 `/ocs2_arm_controller`）写入完整 6 维 `compliance_task_selection` 与 `compliance_force_setpoint`；可选写入 `compliance_hybrid_force_xmax_lin` / `compliance_hybrid_force_xmax_ang`。
+
+**参数：**
+- `task_selection`: 长度 6；`1.0` = 该轴力控，`0.0` = 位置控
+- `force_setpoint`: 长度 6；目标 wrench（仅 `task_selection==1` 的轴作为力目标生效）
+- `force_xmax_lin`: 可选，平移软限 [m]；`None` 表示不修改控制器现有值（控制器默认通常为 `0.2`）
+- `force_xmax_ang`: 可选，旋转软限 [rad]；`None` 表示不修改（控制器默认通常为 `0.3`）
+
+**示例：**
+```python
+from ros2_robot_interface import (
+    FSM_HOLD,
+    ROS2InterfaceError,
+    ROS2RobotInterface,
+    ROS2RobotInterfaceConfig,
+)
+
+interface = ROS2RobotInterface(ROS2RobotInterfaceConfig())
+interface.connect()
+original = interface.get_original_wrench("left")
+# COMPLIANCE 前 filtered 可能尚无数据
+try:
+    filtered = interface.get_filtered_wrench("left")
+except ROS2InterfaceError:
+    filtered = None
+interface.enter_compliance()
+interface.call_compliance_zero_wrench()  # 不等待 zero_cal_done
+# 必要时自行确认 /compliance_force_status.zero_cal_done 后再设力
+interface.set_compliance_force(
+    [1, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0],
+    force_xmax_lin=0.05,
+    force_xmax_ang=0.3,
+)
+interface.send_fsm_command(FSM_HOLD)
+interface.disconnect()
+```
+
+**示例脚本：** `examples/test/13_ft_and_compliance/check_ft_and_compliance.py`
 
 ---
 
@@ -1622,9 +1713,10 @@ print(f"参数设置结果: {ok}")
 - `FSM_HOLD = 2`
 - `FSM_OCS2 = 3`
 - `FSM_MOVEJ = 4`
+- `FSM_COMPLIANCE = 5`
 
 ```python
-from ros2_robot_interface import FSM_HOME, FSM_OCS2
+from ros2_robot_interface import FSM_HOME, FSM_OCS2, FSM_COMPLIANCE
 interface.send_fsm_command(FSM_OCS2)
 ```
 
