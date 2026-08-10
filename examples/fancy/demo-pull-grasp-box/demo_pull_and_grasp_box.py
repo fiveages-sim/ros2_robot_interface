@@ -2,11 +2,21 @@
 
 动作点位来自项目根目录的《拉并抓料箱.txt》。左夹爪先拉箱，
 右夹爪随后抓取并抬起料箱。
+
+启用 ENABLE_TRAJ_RECORD 时，笛卡尔步骤分段录制到
+examples/test/traj_compare/record_data/<会话时间戳>/step*/（pred↔real）。
+MoveJ 与夹爪动作不录制。
 """
 
+from __future__ import annotations
+
+import os
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager, nullcontext
+from datetime import datetime
+from typing import Optional
 
 from geometry_msgs.msg import Pose
 
@@ -21,6 +31,14 @@ MOVEL_DURATION = 5.0
 APPROACH_TRAJECTORY_DURATION = 6.0
 GRIPPER_OPEN_PERCENT = 1.0
 GRIPPER_CLOSED_PERCENT = 0.0
+
+ENABLE_TRAJ_RECORD = True
+CONTROLLER_NODE_OVERRIDE: Optional[str] = None
+RECORD_ROOT = os.path.abspath(
+    os.path.join(
+        os.path.dirname(__file__), "..", "..", "test", "traj_compare", "record_data"
+    )
+)
 
 LEFT_INITIAL_JOINTS = [
     -0.087266,
@@ -130,6 +148,30 @@ def require_arrival(result: dict, step_name: str, part: str) -> None:
         )
 
 
+@contextmanager
+def record_step(
+    interface: ROS2RobotInterface,
+    controller_node: str,
+    session_dir: str,
+    step_label: str,
+) -> Iterator[str]:
+    """开录 → 运动由调用方执行 → 退出时关录落盘。"""
+    out_dir = os.path.join(session_dir, step_label)
+    os.makedirs(out_dir, exist_ok=True)
+    if not interface.set_node_parameters(controller_node, {"traj_record_dir": out_dir}):
+        raise RuntimeError(f"无法设置 traj_record_dir={out_dir}")
+    if not interface.set_node_parameters(
+        controller_node, {"traj_record_enabled": True}
+    ):
+        raise RuntimeError(f"无法开启录制: {step_label}")
+    print(f"    开始录制: {out_dir}")
+    try:
+        yield out_dir
+    finally:
+        interface.set_node_parameters(controller_node, {"traj_record_enabled": False})
+        print(f"    已落盘: {out_dir}")
+
+
 def execute_dual_pose(
     interface: ROS2RobotInterface,
     step_name: str,
@@ -232,6 +274,30 @@ def run_task(interface: ROS2RobotInterface) -> None:
     """严格按《拉并抓料箱.txt》的顺序执行双臂、腰部和夹爪动作。"""
     validate_capabilities(interface)
 
+    session_dir: Optional[str] = None
+    controller_node: Optional[str] = None
+    if ENABLE_TRAJ_RECORD:
+        os.makedirs(RECORD_ROOT, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        session_dir = os.path.join(RECORD_ROOT, stamp)
+        suffix = 2
+        while os.path.exists(session_dir):
+            session_dir = os.path.join(RECORD_ROOT, f"{stamp}_{suffix}")
+            suffix += 1
+        os.makedirs(session_dir)
+        controller_node = (
+            CONTROLLER_NODE_OVERRIDE
+            or getattr(interface, "arm_controller", None)
+            or ("/ocs2_wbc_controller" if interface.is_wbc else "/ocs2_arm_controller")
+        )
+        print(f"轨迹录制会话目录: {session_dir}")
+        print(f"控制器节点: {controller_node}")
+
+    def step_ctx(step_label: str):
+        if session_dir is None or controller_node is None:
+            return nullcontext()
+        return record_step(interface, controller_node, session_dir, step_label)
+
     print(f"等待状态数据 {DATA_SETTLE_TIME:.1f}s...")
     time.sleep(DATA_SETTLE_TIME)
 
@@ -255,26 +321,29 @@ def run_task(interface: ROS2RobotInterface) -> None:
     if not initial_result.get("arrived", False):
         raise RuntimeError(f"[1/9] Initial joints did not arrive: {initial_result}")
 
-    execute_dual_pose(
-        interface,
-        "[2/9] 移动到视觉 first 点",
-        VISUAL_FIRST_LEFT,
-        VISUAL_FIRST_RIGHT,
-        MOVEL_DURATION,
-    )
-    execute_dual_pose(
-        interface,
-        "[3/9] 单独移动到视觉 second 点",
-        VISUAL_SECOND_LEFT,
-        VISUAL_SECOND_RIGHT,
-        MOVEL_DURATION,
-    )
-    execute_dual_path(
-        interface,
-        "[4/9] 执行拉箱四段逼近路径",
-        PULL_APPROACH_LEFT_PATH,
-        PULL_APPROACH_RIGHT_PATH,
-    )
+    with step_ctx("step2_visual_first"):
+        execute_dual_pose(
+            interface,
+            "[2/9] 移动到视觉 first 点",
+            VISUAL_FIRST_LEFT,
+            VISUAL_FIRST_RIGHT,
+            MOVEL_DURATION,
+        )
+    with step_ctx("step3_visual_second"):
+        execute_dual_pose(
+            interface,
+            "[3/9] 单独移动到视觉 second 点",
+            VISUAL_SECOND_LEFT,
+            VISUAL_SECOND_RIGHT,
+            MOVEL_DURATION,
+        )
+    with step_ctx("step4_pull_approach_path"):
+        execute_dual_path(
+            interface,
+            "[4/9] 执行拉箱四段逼近路径",
+            PULL_APPROACH_LEFT_PATH,
+            PULL_APPROACH_RIGHT_PATH,
+        )
 
     print("\n[5/9] 左夹爪抓取并轻提")
     command_gripper(
@@ -283,34 +352,38 @@ def run_task(interface: ROS2RobotInterface) -> None:
         "left",
         GRIPPER_CLOSED_PERCENT,
     )
-    execute_dual_pose(
-        interface,
-        "[5/9] 合爪后轻提",
-        PULL_LIFT_LEFT,
-        PULL_LIFT_RIGHT,
-        MOVEL_DURATION,
-    )
-    execute_dual_pose(
-        interface,
-        "[6/9] 横拉箱体",
-        PULL_END_LEFT,
-        PULL_END_RIGHT,
-        MOVEL_DURATION,
-    )
+    with step_ctx("step5_pull_lift"):
+        execute_dual_pose(
+            interface,
+            "[5/9] 合爪后轻提",
+            PULL_LIFT_LEFT,
+            PULL_LIFT_RIGHT,
+            MOVEL_DURATION,
+        )
+    with step_ctx("step6_pull_end"):
+        execute_dual_pose(
+            interface,
+            "[6/9] 横拉箱体",
+            PULL_END_LEFT,
+            PULL_END_RIGHT,
+            MOVEL_DURATION,
+        )
 
-    execute_dual_pose(
-        interface,
-        "[7/9] 单独移动到视觉 third 点",
-        VISUAL_THIRD_LEFT,
-        VISUAL_THIRD_RIGHT,
-        MOVEL_DURATION,
-    )
-    execute_dual_path(
-        interface,
-        "[8/9] 执行抓取四段逼近路径",
-        GRASP_APPROACH_LEFT_PATH,
-        GRASP_APPROACH_RIGHT_PATH,
-    )
+    with step_ctx("step7_visual_third"):
+        execute_dual_pose(
+            interface,
+            "[7/9] 单独移动到视觉 third 点",
+            VISUAL_THIRD_LEFT,
+            VISUAL_THIRD_RIGHT,
+            MOVEL_DURATION,
+        )
+    with step_ctx("step8_grasp_approach_path"):
+        execute_dual_path(
+            interface,
+            "[8/9] 执行抓取四段逼近路径",
+            GRASP_APPROACH_LEFT_PATH,
+            GRASP_APPROACH_RIGHT_PATH,
+        )
 
     print("\n[9/9] 右夹爪抓取并抬起")
     command_gripper(
@@ -319,13 +392,17 @@ def run_task(interface: ROS2RobotInterface) -> None:
         "right",
         GRIPPER_CLOSED_PERCENT,
     )
-    execute_dual_pose(
-        interface,
-        "[9/9] 抓取后抬起",
-        GRASP_LIFT_LEFT,
-        GRASP_LIFT_RIGHT,
-        MOVEL_DURATION,
-    )
+    with step_ctx("step9_grasp_lift"):
+        execute_dual_pose(
+            interface,
+            "[9/9] 抓取后抬起",
+            GRASP_LIFT_LEFT,
+            GRASP_LIFT_RIGHT,
+            MOVEL_DURATION,
+        )
+
+    if session_dir is not None:
+        print(f"\n轨迹录制完成，会话目录: {session_dir}")
 
 
 def main() -> int:

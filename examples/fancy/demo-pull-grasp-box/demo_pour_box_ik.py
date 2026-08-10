@@ -6,12 +6,21 @@
 第 7 步使用两段双臂 MoveL + AUTO IK 倾倒，再用 MoveL + DLS IK 回正。
 
 运行前需确保 /ocs2_arm_controller/execute_linear Action 可用。
+
+启用 ENABLE_TRAJ_RECORD 时，MoveL 步骤分段录制到
+examples/test/traj_compare/record_data/<会话时间戳>/step*/（cal↔real）。
 """
 
+from __future__ import annotations
+
 import math
+import os
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager, nullcontext
+from datetime import datetime
+from typing import Optional
 
 from geometry_msgs.msg import Pose
 
@@ -26,6 +35,14 @@ MOVEJ_DURATION = 5.0
 MOVEL_DURATION = 5.0
 POUR_MOVEL_SEGMENT_DURATION = 5.0
 RETURN_MOVEL_DURATION = 5.0
+
+ENABLE_TRAJ_RECORD = True
+CONTROLLER_NODE_OVERRIDE: Optional[str] = None
+RECORD_ROOT = os.path.abspath(
+    os.path.join(
+        os.path.dirname(__file__), "..", "..", "test", "traj_compare", "record_data"
+    )
+)
 
 LEFT_INITIAL_JOINTS = [
     2.72979,
@@ -113,6 +130,30 @@ def require_motion_success(result: object, step_name: str) -> None:
         raise RuntimeError(f"{step_name}: motion planning failed: {message}")
 
 
+@contextmanager
+def record_step(
+    interface: ROS2RobotInterface,
+    controller_node: str,
+    session_dir: str,
+    step_label: str,
+) -> Iterator[str]:
+    """开录 → 运动由调用方执行 → 退出时关录落盘。"""
+    out_dir = os.path.join(session_dir, step_label)
+    os.makedirs(out_dir, exist_ok=True)
+    if not interface.set_node_parameters(controller_node, {"traj_record_dir": out_dir}):
+        raise RuntimeError(f"无法设置 traj_record_dir={out_dir}")
+    if not interface.set_node_parameters(
+        controller_node, {"traj_record_enabled": True}
+    ):
+        raise RuntimeError(f"无法开启录制: {step_label}")
+    print(f"    开始录制: {out_dir}")
+    try:
+        yield out_dir
+    finally:
+        interface.set_node_parameters(controller_node, {"traj_record_enabled": False})
+        print(f"    已落盘: {out_dir}")
+
+
 def execute_dual_movel(
     interface: ROS2RobotInterface,
     step_name: str,
@@ -142,6 +183,30 @@ def run_task(interface: ROS2RobotInterface) -> None:
     if interface.config.right_end_effector_target_topic is None:
         raise RuntimeError("This demo requires dual-arm mode")
 
+    session_dir: Optional[str] = None
+    controller_node: Optional[str] = None
+    if ENABLE_TRAJ_RECORD:
+        os.makedirs(RECORD_ROOT, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        session_dir = os.path.join(RECORD_ROOT, stamp)
+        suffix = 2
+        while os.path.exists(session_dir):
+            session_dir = os.path.join(RECORD_ROOT, f"{stamp}_{suffix}")
+            suffix += 1
+        os.makedirs(session_dir)
+        controller_node = (
+            CONTROLLER_NODE_OVERRIDE
+            or getattr(interface, "arm_controller", None)
+            or ("/ocs2_wbc_controller" if interface.is_wbc else "/ocs2_arm_controller")
+        )
+        print(f"轨迹录制会话目录: {session_dir}")
+        print(f"控制器节点: {controller_node}")
+
+    def step_ctx(step_label: str):
+        if session_dir is None or controller_node is None:
+            return nullcontext()
+        return record_step(interface, controller_node, session_dir, step_label)
+
     print(f"等待状态数据 {DATA_SETTLE_TIME:.1f}s...")
     time.sleep(DATA_SETTLE_TIME)
 
@@ -165,34 +230,38 @@ def run_task(interface: ROS2RobotInterface) -> None:
     if not initial_result.get("arrived", False):
         raise RuntimeError(f"[1/7] Initial joints did not arrive: {initial_result}")
 
-    execute_dual_movel(
-        interface,
-        "[2/7] 移动到抓取点两侧（MoveL + DLS IK）",
-        APPROACH_LEFT,
-        APPROACH_RIGHT,
-        MOVEL_DURATION,
-    )
-    execute_dual_movel(
-        interface,
-        "[3/7] 移动到抓取点（MoveL + DLS IK）",
-        GRASP_LEFT,
-        GRASP_RIGHT,
-        MOVEL_DURATION,
-    )
-    execute_dual_movel(
-        interface,
-        "[4/7] 抬高箱体（MoveL + DLS IK）",
-        LIFT_LEFT,
-        LIFT_RIGHT,
-        MOVEL_DURATION,
-    )
-    execute_dual_movel(
-        interface,
-        "[5/7] 移动到准备倾倒点（MoveL + DLS IK）",
-        POUR_READY_LEFT,
-        POUR_READY_RIGHT,
-        MOVEL_DURATION,
-    )
+    with step_ctx("step2_approach"):
+        execute_dual_movel(
+            interface,
+            "[2/7] 移动到抓取点两侧（MoveL + DLS IK）",
+            APPROACH_LEFT,
+            APPROACH_RIGHT,
+            MOVEL_DURATION,
+        )
+    with step_ctx("step3_grasp"):
+        execute_dual_movel(
+            interface,
+            "[3/7] 移动到抓取点（MoveL + DLS IK）",
+            GRASP_LEFT,
+            GRASP_RIGHT,
+            MOVEL_DURATION,
+        )
+    with step_ctx("step4_lift"):
+        execute_dual_movel(
+            interface,
+            "[4/7] 抬高箱体（MoveL + DLS IK）",
+            LIFT_LEFT,
+            LIFT_RIGHT,
+            MOVEL_DURATION,
+        )
+    with step_ctx("step5_pour_ready"):
+        execute_dual_movel(
+            interface,
+            "[5/7] 移动到准备倾倒点（MoveL + DLS IK）",
+            POUR_READY_LEFT,
+            POUR_READY_RIGHT,
+            MOVEL_DURATION,
+        )
 
     print("\n[6/7] 移动腰部到倾倒起始角度（MoveJ）")
     interface.send_coordinated_joint_positions(body_positions=POUR_BODY_JOINTS)
@@ -204,30 +273,35 @@ def run_task(interface: ROS2RobotInterface) -> None:
     if not body_result.get("arrived", False):
         raise RuntimeError(f"[6/7] Body joints did not arrive: {body_result}")
 
-    execute_dual_movel(
-        interface,
-        "[7A-1] 准备点到 point1（MoveL + AUTO IK）",
-        POUR_LEFT_PATH[0],
-        POUR_RIGHT_PATH[0],
-        POUR_MOVEL_SEGMENT_DURATION,
-        ik_type="AUTO",
-    )
-    execute_dual_movel(
-        interface,
-        "[7A-2] point1 到 point2（MoveL + AUTO IK）",
-        POUR_LEFT_PATH[1],
-        POUR_RIGHT_PATH[1],
-        POUR_MOVEL_SEGMENT_DURATION,
-        ik_type="AUTO",
-    )
+    with step_ctx("step7a1_pour_point1"):
+        execute_dual_movel(
+            interface,
+            "[7A-1] 准备点到 point1（MoveL + AUTO IK）",
+            POUR_LEFT_PATH[0],
+            POUR_RIGHT_PATH[0],
+            POUR_MOVEL_SEGMENT_DURATION,
+            ik_type="AUTO",
+        )
+    with step_ctx("step7a2_pour_point2"):
+        execute_dual_movel(
+            interface,
+            "[7A-2] point1 到 point2（MoveL + AUTO IK）",
+            POUR_LEFT_PATH[1],
+            POUR_RIGHT_PATH[1],
+            POUR_MOVEL_SEGMENT_DURATION,
+            ik_type="AUTO",
+        )
+    with step_ctx("step7b_return_ready"):
+        execute_dual_movel(
+            interface,
+            "[7B] point2 回到准备点（MoveL + DLS IK）",
+            POUR_READY_LEFT,
+            POUR_READY_RIGHT,
+            RETURN_MOVEL_DURATION,
+        )
 
-    execute_dual_movel(
-        interface,
-        "[7B] point2 回到准备点（MoveL + DLS IK）",
-        POUR_READY_LEFT,
-        POUR_READY_RIGHT,
-        RETURN_MOVEL_DURATION,
-    )
+    if session_dir is not None:
+        print(f"\n轨迹录制完成，会话目录: {session_dir}")
 
 
 def main() -> int:
