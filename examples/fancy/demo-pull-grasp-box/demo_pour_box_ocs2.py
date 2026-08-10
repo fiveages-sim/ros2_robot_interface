@@ -3,12 +3,22 @@
 动作点位来自项目根目录的《倾倒任务.txt》。本示例只控制双臂和腰部，
 不控制夹爪，也不会在结束时自动回 HOME。
 第 1、6 步使用 MoveJ；第 2～5、7 步使用 OCS2 笛卡尔参考规划。
+
+启用 ENABLE_TRAJ_RECORD 时，MPC 步骤（2～5、7）分段录制到
+examples/test/traj_compare/record_data/<会话时间戳>/step*/，
+可由 compare_pose_traj.py 按会话→step 选择对比（pred↔real）。
 """
 
+from __future__ import annotations
+
 import math
+import os
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager, nullcontext
+from datetime import datetime
+from typing import Optional
 
 from geometry_msgs.msg import Pose
 
@@ -22,6 +32,14 @@ MOVEJ_DURATION = 5.0
 MOVEL_DURATION = 5.0
 POUR_TRAJECTORY_DURATION = 10.0
 
+# 分段轨迹录制：产物落在 traj_compare/record_data，便于对比脚本直接选取
+ENABLE_TRAJ_RECORD = True
+CONTROLLER_NODE_OVERRIDE: Optional[str] = None
+RECORD_ROOT = os.path.abspath(
+    os.path.join(
+        os.path.dirname(__file__), "..", "..", "test", "traj_compare", "record_data"
+    )
+)
 LEFT_INITIAL_JOINTS = [
     2.72979,
     -1.1976,
@@ -105,6 +123,30 @@ def require_arrival(result: dict, step_name: str, part: str) -> None:
         )
 
 
+@contextmanager
+def record_step(
+    interface: ROS2RobotInterface,
+    controller_node: str,
+    session_dir: str,
+    step_label: str,
+) -> Iterator[str]:
+    """开录 → 运动由调用方执行 → 退出时关录落盘。"""
+    out_dir = os.path.join(session_dir, step_label)
+    os.makedirs(out_dir, exist_ok=True)
+    if not interface.set_node_parameters(controller_node, {"traj_record_dir": out_dir}):
+        raise RuntimeError(f"无法设置 traj_record_dir={out_dir}")
+    if not interface.set_node_parameters(
+        controller_node, {"traj_record_enabled": True}
+    ):
+        raise RuntimeError(f"无法开启录制: {step_label}")
+    print(f"    开始录制: {out_dir}")
+    try:
+        yield out_dir
+    finally:
+        interface.set_node_parameters(controller_node, {"traj_record_enabled": False})
+        print(f"    已落盘: {out_dir}")
+
+
 def execute_dual_pose(
     interface: ROS2RobotInterface,
     step_name: str,
@@ -138,12 +180,35 @@ def run_task(interface: ROS2RobotInterface) -> None:
     if interface.config.right_end_effector_target_topic is None:
         raise RuntimeError("This demo requires dual-arm mode")
 
+    session_dir: Optional[str] = None
+    controller_node: Optional[str] = None
+    if ENABLE_TRAJ_RECORD:
+        os.makedirs(RECORD_ROOT, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        session_dir = os.path.join(RECORD_ROOT, stamp)
+        suffix = 2
+        while os.path.exists(session_dir):
+            session_dir = os.path.join(RECORD_ROOT, f"{stamp}_{suffix}")
+            suffix += 1
+        os.makedirs(session_dir)
+        controller_node = (
+            CONTROLLER_NODE_OVERRIDE
+            or getattr(interface, "arm_controller", None)
+            or ("/ocs2_wbc_controller" if interface.is_wbc else "/ocs2_arm_controller")
+        )
+        print(f"轨迹录制会话目录: {session_dir}")
+        print(f"控制器节点: {controller_node}")
+
+    def step_ctx(step_label: str):
+        if session_dir is None or controller_node is None:
+            return nullcontext()
+        return record_step(interface, controller_node, session_dir, step_label)
+
     # 固定等待：DATA_SETTLE_TIME=2.0s，仅用于等待状态数据，不是机器人运动时长。
     print(f"等待状态数据 {DATA_SETTLE_TIME:.1f}s...")
     time.sleep(DATA_SETTLE_TIME)
 
-    # [1/7] MoveJ 控制器时长保持不变；发送后固定等待 MOVEJ_DURATION=5.0s。
-    # 等待结束后再检测到位，实际完成时间仍可能受控制周期和到位阈值影响。
+    # [1/7] MoveJ：不录制
     print("\n[1/7] 移动到初始关节位置")
     interface.send_coordinated_joint_positions(
         body_positions=INITIAL_BODY_JOINTS,
@@ -160,48 +225,28 @@ def run_task(interface: ROS2RobotInterface) -> None:
     if not initial_result.get("arrived", False):
         raise RuntimeError(f"[1/7] Initial joints did not arrive: {initial_result}")
 
-    # [2/7] 显式传入 movel_duration=MOVEL_DURATION=5.0s，并在检测前等待该时长。
-    # movel_auto_extend_duration=true 时，可能按速度、加速度和 jerk 限制自动延长。
-    execute_dual_pose(
-        interface,
-        "[2/7] 移动到抓取点两侧",
-        APPROACH_LEFT,
-        APPROACH_RIGHT,
-        MOVEL_DURATION,
-    )
+    with step_ctx("step2_approach"):
+        execute_dual_pose(
+            interface, "[2/7] 移动到抓取点两侧",
+            APPROACH_LEFT, APPROACH_RIGHT, MOVEL_DURATION,
+        )
+    with step_ctx("step3_grasp"):
+        execute_dual_pose(
+            interface, "[3/7] 移动到抓取点",
+            GRASP_LEFT, GRASP_RIGHT, MOVEL_DURATION,
+        )
+    with step_ctx("step4_lift"):
+        execute_dual_pose(
+            interface, "[4/7] 抬高箱体",
+            LIFT_LEFT, LIFT_RIGHT, MOVEL_DURATION,
+        )
+    with step_ctx("step5_pour_ready"):
+        execute_dual_pose(
+            interface, "[5/7] 移动到准备倾倒点",
+            POUR_READY_LEFT, POUR_READY_RIGHT, MOVEL_DURATION,
+        )
 
-    # [3/7] 显式传入 movel_duration=MOVEL_DURATION=5.0s，并在检测前等待该时长。
-    # movel_auto_extend_duration=true 时，可能按速度、加速度和 jerk 限制自动延长。
-    execute_dual_pose(
-        interface,
-        "[3/7] 移动到抓取点",
-        GRASP_LEFT,
-        GRASP_RIGHT,
-        MOVEL_DURATION,
-    )
-
-    # [4/7] 显式传入 movel_duration=MOVEL_DURATION=5.0s，并在检测前等待该时长。
-    # movel_auto_extend_duration=true 时，可能按速度、加速度和 jerk 限制自动延长。
-    execute_dual_pose(
-        interface,
-        "[4/7] 抬高箱体",
-        LIFT_LEFT,
-        LIFT_RIGHT,
-        MOVEL_DURATION,
-    )
-
-    # [5/7] 显式传入 movel_duration=MOVEL_DURATION=5.0s，并在检测前等待该时长。
-    # movel_auto_extend_duration=true 时，可能按速度、加速度和 jerk 限制自动延长。
-    execute_dual_pose(
-        interface,
-        "[5/7] 移动到准备倾倒点",
-        POUR_READY_LEFT,
-        POUR_READY_RIGHT,
-        MOVEL_DURATION,
-    )
-
-    # [6/7] MoveJ 控制器时长保持不变；发送后固定等待 MOVEJ_DURATION=5.0s。
-    # 等待结束后再检测到位，实际完成时间仍可能受控制周期和到位阈值影响。
+    # [6/7] MoveJ 腰：不录制
     print("\n[6/7] 移动腰部到倾倒起始角度")
     interface.send_coordinated_joint_positions(body_positions=POUR_BODY_JOINTS)
     time.sleep(MOVEJ_DURATION)
@@ -212,29 +257,30 @@ def run_task(interface: ROS2RobotInterface) -> None:
     if not body_result.get("arrived", False):
         raise RuntimeError(f"[6/7] Body joints did not arrive: {body_result}")
 
-    # [7/7] 显式传入 trajectory_duration=POUR_TRAJECTORY_DURATION=10.0s，
-    # 接受路径后先等待该时长再检测到位；启用自动延长时，检测会继续等待实际完成。
-    print("\n[7/7] 执行三点连续倾倒路径")
-    path_accepted = interface.execute_path(
-        left_poses=[vector_to_pose(vector) for vector in POUR_LEFT_PATH],
-        right_poses=[vector_to_pose(vector) for vector in POUR_RIGHT_PATH],
-        trajectory_duration=POUR_TRAJECTORY_DURATION,
-        frame_id=FRAME_ID,
-    )
-    if not path_accepted:
-        raise RuntimeError("[7/7] ExecutePath service returned success=False")
+    with step_ctx("step7_pour_path"):
+        print("\n[7/7] 执行三点连续倾倒路径")
+        path_accepted = interface.execute_path(
+            left_poses=[vector_to_pose(vector) for vector in POUR_LEFT_PATH],
+            right_poses=[vector_to_pose(vector) for vector in POUR_RIGHT_PATH],
+            trajectory_duration=POUR_TRAJECTORY_DURATION,
+            frame_id=FRAME_ID,
+        )
+        if not path_accepted:
+            raise RuntimeError("[7/7] ExecutePath service returned success=False")
+        time.sleep(POUR_TRAJECTORY_DURATION)
+        require_arrival(
+            interface.wait_until_arrive(part="left_arm", timeout=ARRIVAL_TIMEOUT),
+            "[7/7] 连续倾倒路径",
+            "left_arm",
+        )
+        require_arrival(
+            interface.wait_until_arrive(part="right_arm", timeout=ARRIVAL_TIMEOUT),
+            "[7/7] 连续倾倒路径",
+            "right_arm",
+        )
 
-    time.sleep(POUR_TRAJECTORY_DURATION)
-    require_arrival(
-        interface.wait_until_arrive(part="left_arm", timeout=ARRIVAL_TIMEOUT),
-        "[7/7] 连续倾倒路径",
-        "left_arm",
-    )
-    require_arrival(
-        interface.wait_until_arrive(part="right_arm", timeout=ARRIVAL_TIMEOUT),
-        "[7/7] 连续倾倒路径",
-        "right_arm",
-    )
+    if session_dir is not None:
+        print(f"\n轨迹录制完成，会话目录: {session_dir}")
 
 
 def main() -> int:

@@ -74,14 +74,19 @@ align_motion_start=True 启用“运动起点检测归零”：detect_motion_sta
 
 使用方式
 --------
-直接运行，优先从 record_data/ 选目录与手臂；若同目录同时有 pred 与 cal，再选对比模式：
+直接运行，优先走两级目录选择：先选 record_data/ 下的会话，再选该会话下的 step 子目录
+（可选「全部 step」依次对比）。若会话目录本身已含 pred_/cal_/real_ CSV（旧扁平结构），
+则跳过 step 选择，直接对该目录对比：
     python3 compare_pose_traj.py
+选手臂后，若同目录同时有 pred 与 cal，再选对比模式。倾倒 demo 分段录制产物通常只有
+pred_* + real_*，会自动走 pred↔real。
 也可回退为手动输入两个 CSV 路径（先参考轨迹后 real）。
 运行后在所选目录生成三张图片（文件名带手臂后缀）：
     - trajectory_combined_3d_{arm}.png
     - position_comparison_aligned_{arm}.png
     - quaternion_comparison_aligned_{arm}.png
-并弹出窗口显示（关闭窗口结束）。终端另会打印点数、时间范围、位置范围与总路径长度。
+图标题与图例会标注 Left/Right。并弹出窗口显示（关闭窗口结束）。
+终端另会打印点数、时间范围、位置范围与总路径长度。
 """
 
 import os
@@ -308,30 +313,31 @@ def interpolate_quaternions_to_common_time(cal_timestamps, cal_quaternions,
 
 def plot_combined_3d_trajectory(cal_positions, cal_quaternions, cal_timestamps,
                                real_positions, real_quaternions, real_timestamps,
-                               ref_label='Calculated'):
+                               ref_label='Calculated', arm_label=''):
     """将两个轨迹绘制在同一个3D坐标系中对比。ref_label 为参考轨迹图例名（Calculated/Predicted）。"""
-    
+    arm_tag = f' [{arm_label}]' if arm_label else ''
+
     fig = plt.figure(figsize=(14, 10))
     ax = fig.add_subplot(111, projection='3d')
     
     # 绘制计算/预测轨迹（蓝色实线）
     ax.plot(cal_positions[:, 0], cal_positions[:, 1], cal_positions[:, 2], 
-            'b-', linewidth=2, label=ref_label, alpha=0.8)
+            'b-', linewidth=2, label=f'{ref_label}{arm_tag}', alpha=0.8)
     
     # 绘制实际轨迹（红色虚线）
     ax.plot(real_positions[:, 0], real_positions[:, 1], real_positions[:, 2], 
-            'r--', linewidth=2, label='Actual', alpha=0.8)
+            'r--', linewidth=2, label=f'Actual{arm_tag}', alpha=0.8)
     
     # 标记起点和终点
     ax.scatter(*cal_positions[0], color='blue', s=150, marker='o', 
-               label=f'Start ({ref_label})', edgecolors='black', linewidth=2)
+               label=f'Start ({ref_label}){arm_tag}', edgecolors='black', linewidth=2)
     ax.scatter(*cal_positions[-1], color='blue', s=150, marker='s', 
-               label=f'End ({ref_label})', edgecolors='black', linewidth=2)
+               label=f'End ({ref_label}){arm_tag}', edgecolors='black', linewidth=2)
     
     ax.scatter(*real_positions[0], color='red', s=150, marker='o', 
-               label='Start (Actual)', edgecolors='black', linewidth=2)
+               label=f'Start (Actual){arm_tag}', edgecolors='black', linewidth=2)
     ax.scatter(*real_positions[-1], color='red', s=150, marker='s', 
-               label='End (Actual)', edgecolors='black', linewidth=2)
+               label=f'End (Actual){arm_tag}', edgecolors='black', linewidth=2)
     
     # 每隔N个点绘制姿态坐标系
     step_cal = max(1, len(cal_positions) // 20)  # 大约显示20个姿态
@@ -376,12 +382,16 @@ def plot_combined_3d_trajectory(cal_positions, cal_quaternions, cal_timestamps,
     # 添加图例说明
     from matplotlib.lines import Line2D
     legend_elements = [
-        Line2D([0], [0], color='blue', lw=2, label=f'{ref_label} Trajectory'),
-        Line2D([0], [0], color='red', lw=2, linestyle='--', label='Actual Trajectory'),
-        Line2D([0], [0], color='blue', marker='o', lw=0, markersize=8, label=f'Start ({ref_label})'),
-        Line2D([0], [0], color='blue', marker='s', lw=0, markersize=8, label=f'End ({ref_label})'),
-        Line2D([0], [0], color='red', marker='o', lw=0, markersize=8, label='Start (Actual)'),
-        Line2D([0], [0], color='red', marker='s', lw=0, markersize=8, label='End (Actual)'),
+        Line2D([0], [0], color='blue', lw=2, label=f'{ref_label} Trajectory{arm_tag}'),
+        Line2D([0], [0], color='red', lw=2, linestyle='--', label=f'Actual Trajectory{arm_tag}'),
+        Line2D([0], [0], color='blue', marker='o', lw=0, markersize=8,
+               label=f'Start ({ref_label}){arm_tag}'),
+        Line2D([0], [0], color='blue', marker='s', lw=0, markersize=8,
+               label=f'End ({ref_label}){arm_tag}'),
+        Line2D([0], [0], color='red', marker='o', lw=0, markersize=8,
+               label=f'Start (Actual){arm_tag}'),
+        Line2D([0], [0], color='red', marker='s', lw=0, markersize=8,
+               label=f'End (Actual){arm_tag}'),
     ]
     ax.legend(handles=legend_elements, loc='upper left', fontsize=9)
     
@@ -389,7 +399,11 @@ def plot_combined_3d_trajectory(cal_positions, cal_quaternions, cal_timestamps,
     ax.set_xlabel('X (m)', fontsize=12)
     ax.set_ylabel('Y (m)', fontsize=12)
     ax.set_zlabel('Z (m)', fontsize=12)
-    ax.set_title(f'3D Trajectory Comparison: {ref_label} vs Actual', fontsize=14)
+    if arm_label:
+        ax.set_title(f'[{arm_label}] 3D Trajectory Comparison: {ref_label} vs Actual',
+                     fontsize=14)
+    else:
+        ax.set_title(f'3D Trajectory Comparison: {ref_label} vs Actual', fontsize=14)
     
     # 设置相同的视角
     ax.view_init(elev=20, azim=45)
@@ -409,9 +423,10 @@ def plot_combined_3d_trajectory(cal_positions, cal_quaternions, cal_timestamps,
     return fig
 
 def plot_comparison_position(cal_timestamps, cal_positions, real_timestamps, real_positions,
-                             ref_label='Calculated'):
+                             ref_label='Calculated', arm_label=''):
     """绘制位置对比图（时间轴对齐）"""
-    
+    arm_tag = f' [{arm_label}]' if arm_label else ''
+
     # 插值到共同时间轴
     common_time, cal_interp, real_interp = interpolate_to_common_time(
         cal_timestamps, cal_positions, real_timestamps, real_positions)
@@ -423,15 +438,19 @@ def plot_comparison_position(cal_timestamps, cal_positions, real_timestamps, rea
     
     for i, (ax, label, color) in enumerate(zip(axes, labels, colors)):
         ax.plot(common_time, cal_interp[:, i], 
-               color=color, linestyle='-', linewidth=1.5, label=f'{ref_label} {label}')
+               color=color, linestyle='-', linewidth=1.5,
+               label=f'{ref_label} {label}{arm_tag}')
         ax.plot(common_time, real_interp[:, i], 
-               color=color, linestyle='--', linewidth=1.5, label=f'Actual {label}')
+               color=color, linestyle='--', linewidth=1.5,
+               label=f'Actual {label}{arm_tag}')
         ax.set_ylabel(f'{label} Position (m)')
         ax.grid(True, alpha=0.3)
         ax.legend(loc='upper right')
         
         if i == 0:
-            ax.set_title('Position vs Time (Time-aligned)', fontsize=14)
+            title = (f'[{arm_label}] Position vs Time (Time-aligned)'
+                     if arm_label else 'Position vs Time (Time-aligned)')
+            ax.set_title(title, fontsize=14)
         if i == 2:
             ax.set_xlabel('Time (s)')
     
@@ -481,9 +500,10 @@ def plot_comparison_orientation(cal_timestamps, cal_quaternions, real_timestamps
     return fig
 
 def plot_comparison_quaternion(cal_timestamps, cal_quaternions, real_timestamps, real_quaternions,
-                               ref_label='Calculated'):
+                               ref_label='Calculated', arm_label=''):
     """绘制四元数对比图（时间轴对齐）"""
-    
+    arm_tag = f' [{arm_label}]' if arm_label else ''
+
     # 使用 Slerp 将四元数插值到共同时间轴
     common_time, cal_interp, real_interp = interpolate_quaternions_to_common_time(
         cal_timestamps, cal_quaternions, real_timestamps, real_quaternions)
@@ -495,15 +515,19 @@ def plot_comparison_quaternion(cal_timestamps, cal_quaternions, real_timestamps,
     
     for i, (ax, name, color) in enumerate(zip(axes, quat_names, colors)):
         ax.plot(common_time, cal_interp[:, i], 
-               color=color, linestyle='-', linewidth=1.5, label=f'{ref_label} {name}')
+               color=color, linestyle='-', linewidth=1.5,
+               label=f'{ref_label} {name}{arm_tag}')
         ax.plot(common_time, real_interp[:, i], 
-               color=color, linestyle='--', linewidth=1.5, label=f'Actual {name}')
+               color=color, linestyle='--', linewidth=1.5,
+               label=f'Actual {name}{arm_tag}')
         ax.set_ylabel(f'{name}')
         ax.grid(True, alpha=0.3)
         ax.legend(loc='upper right')
         
         if i == 0:
-            ax.set_title('Quaternion vs Time (Time-aligned)', fontsize=14)
+            title = (f'[{arm_label}] Quaternion vs Time (Time-aligned)'
+                     if arm_label else 'Quaternion vs Time (Time-aligned)')
+            ax.set_title(title, fontsize=14)
         if i == 3:
             ax.set_xlabel('Time (s)')
     
@@ -642,32 +666,84 @@ def print_comparison_statistics(cal_positions, cal_quaternions, cal_timestamps,
         ref_label=ref_label,
     )
 
-def select_run_directory():
-    """列出 record_data/ 下的子目录供选择，返回所选子目录的绝对路径。
+def _dir_has_traj_csv(path: str) -> bool:
+    """目录内是否直接含 pred_/cal_/real_ CSV（旧扁平录制结构）。"""
+    names = os.listdir(path) if os.path.isdir(path) else []
+    return any(
+        n.endswith(".csv") and (
+            n.startswith("pred_") or n.startswith("cal_") or n.startswith("real_")
+        )
+        for n in names
+    )
 
-    找不到 record_data 或其中无子目录时，返回 None，调用方回退到手动输入路径。
+
+def select_session_and_steps():
+    """返回待对比的 run 目录列表（每个元素是含 CSV 的目录绝对路径）。
+
+    流程：先选 record_data 下会话；若会话根已有 CSV 则直接返回该目录（兼容旧扁平）；
+    否则再选 step 子目录，或选「全部 step」依次对比。找不到数据时返回 None。
     """
     record_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "record_data")
     if not os.path.isdir(record_root):
         print(f"未找到 record_data 目录: {record_root}")
         return None
-    subdirs = sorted(
+    sessions = sorted(
         (d for d in os.listdir(record_root)
          if os.path.isdir(os.path.join(record_root, d))),
-        reverse=True,  # 最新的时间戳目录排在最前
+        reverse=True,
     )
-    if not subdirs:
+    if not sessions:
         print(f"record_data 下没有子目录: {record_root}")
         return None
 
-    print("\n可用的录制目录（record_data 下）:")
-    for idx, name in enumerate(subdirs, start=1):
+    print("\n可用的录制会话（record_data 下）:")
+    for idx, name in enumerate(sessions, start=1):
         print(f"  {idx}. {name}")
     while True:
-        choice = input(f"请选择目录 (1-{len(subdirs)}): ").strip()
-        if choice.isdigit() and 1 <= int(choice) <= len(subdirs):
-            return os.path.join(record_root, subdirs[int(choice) - 1])
+        choice = input(f"请选择会话 (1-{len(sessions)}): ").strip()
+        if choice.isdigit() and 1 <= int(choice) <= len(sessions):
+            session_dir = os.path.join(record_root, sessions[int(choice) - 1])
+            break
         print("无效选择，请重新输入。")
+
+    if _dir_has_traj_csv(session_dir):
+        return [session_dir]
+
+    steps = sorted(
+        d for d in os.listdir(session_dir)
+        if os.path.isdir(os.path.join(session_dir, d))
+    )
+    if not steps:
+        print(f"会话下无 step 子目录且无 CSV: {session_dir}")
+        return None
+
+    print("\n该会话下的 step 目录:")
+    print("  0. 全部 step（依次对比）")
+    for idx, name in enumerate(steps, start=1):
+        print(f"  {idx}. {name}")
+    while True:
+        choice = input(f"请选择 step (0-{len(steps)}): ").strip()
+        if choice == "0":
+            return [os.path.join(session_dir, s) for s in steps]
+        if choice.isdigit() and 1 <= int(choice) <= len(steps):
+            return [os.path.join(session_dir, steps[int(choice) - 1])]
+        print("无效选择，请重新输入。")
+
+
+def _arm_label_from_suffix_or_files(out_suffix: str, cal_file: str, real_file: str) -> str:
+    """返回 'Left' / 'Right' / ''。优先 out_suffix，其次 CSV 文件名。"""
+    token = (out_suffix or "").lstrip("_").lower()
+    if token == "left":
+        return "Left"
+    if token == "right":
+        return "Right"
+    for path in (cal_file, real_file):
+        base = os.path.basename(path).lower()
+        if "_left" in base:
+            return "Left"
+        if "_right" in base:
+            return "Right"
+    return ""
 
 
 def select_arm():
@@ -757,11 +833,13 @@ def run_comparison(cal_file, real_file, ref_channel, out_dir, out_suffix):
         fig2_path = os.path.join(out_dir, f'position_comparison_aligned{out_suffix}.png')
         fig3_path = os.path.join(out_dir, f'quaternion_comparison_aligned{out_suffix}.png')
 
+        arm_label = _arm_label_from_suffix_or_files(out_suffix, cal_file, real_file)
+
         # 1. 合并3D轨迹对比图（两个轨迹在同一个坐标系）：总览，叠加全部指标
         print("  Generating combined 3D trajectory comparison...")
         fig1 = plot_combined_3d_trajectory(cal_positions, cal_quaternions, cal_timestamps,
                                             real_positions, real_quaternions, real_timestamps,
-                                            ref_label=ref_label)
+                                            ref_label=ref_label, arm_label=arm_label)
         _annotate_metrics(fig1, [cross_track_line, dtw_line, endpoint_line])
         fig1.savefig(fig1_path, dpi=150, bbox_inches='tight')
         print(f"  Saved: {fig1_path}")
@@ -770,7 +848,7 @@ def run_comparison(cal_file, real_file, ref_channel, out_dir, out_suffix):
         print("  Generating position comparison (time-aligned)...")
         fig2 = plot_comparison_position(cal_timestamps, cal_positions,
                                         real_timestamps, real_positions,
-                                        ref_label=ref_label)
+                                        ref_label=ref_label, arm_label=arm_label)
         _annotate_metrics(fig2, [cross_track_line, dtw_line, endpoint_line])
         fig2.savefig(fig2_path, dpi=150, bbox_inches='tight')
         print(f"  Saved: {fig2_path}")
@@ -779,7 +857,7 @@ def run_comparison(cal_file, real_file, ref_channel, out_dir, out_suffix):
         print("  Generating quaternion comparison (time-aligned with Slerp)...")
         fig3 = plot_comparison_quaternion(cal_timestamps, cal_quaternions,
                                           real_timestamps, real_quaternions,
-                                          ref_label=ref_label)
+                                          ref_label=ref_label, arm_label=arm_label)
         _annotate_metrics(fig3, [dtw_line, endpoint_line])
         fig3.savefig(fig3_path, dpi=150, bbox_inches='tight')
         print(f"  Saved: {fig3_path}")
@@ -820,33 +898,42 @@ def _resolve_arm_job(run_dir, arm):
 
 def main():
     """主函数"""
-    # 优先走“选目录 + 选手臂 + 选通道”的交互；找不到 record_data 时回退到手动输入路径
-    run_dir = select_run_directory()
+    # 优先走「选会话 → 选 step → 选手臂 → 选通道」；找不到 record_data 时回退手动输入路径
+    run_dirs = select_session_and_steps()
 
-    if run_dir is not None:
+    if run_dirs is not None:
         arm = select_arm()
-        out_dir = run_dir
-        print(f"\n对比目录: {run_dir}")
-        print(f"对比手臂: {arm}")
-
         arms = ["left", "right"] if arm == "both" else [arm]
-        jobs = []
-        for a in arms:
-            job = _resolve_arm_job(run_dir, a)
-            if job is not None:
-                jobs.append(job)
+        any_ok = False
+        for run_dir in run_dirs:
+            out_dir = run_dir
+            step_name = os.path.basename(run_dir)
+            print(f"\n对比目录: {run_dir}")
+            print(f"step: {step_name}")
+            print(f"对比手臂: {arm}")
 
-        if not jobs:
+            jobs = []
+            for a in arms:
+                job = _resolve_arm_job(run_dir, a)
+                if job is not None:
+                    jobs.append(job)
+
+            if not jobs:
+                print(f"\n⚠ 跳过（无可对比数据）: {run_dir}")
+                continue
+
+            for cal_file, real_file, ref_channel, out_suffix in jobs:
+                any_ok = (
+                    run_comparison(cal_file, real_file, ref_channel, out_dir, out_suffix)
+                    or any_ok
+                )
+
+        if not any_ok:
             print("\n❌ 没有可对比的数据。")
             return
 
-        any_ok = False
-        for cal_file, real_file, ref_channel, out_suffix in jobs:
-            any_ok = run_comparison(cal_file, real_file, ref_channel, out_dir, out_suffix) or any_ok
-
-        if any_ok:
-            print("\nDisplaying plots (close the windows to exit)...")
-            plt.show()
+        print("\nDisplaying plots (close the windows to exit)...")
+        plt.show()
     else:
         # 手动输入路径的回退分支：仅单条对比
         cal_file = prompt_file_path(
