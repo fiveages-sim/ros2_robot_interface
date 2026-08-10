@@ -339,10 +339,13 @@ def plot_combined_3d_trajectory(cal_positions, cal_quaternions, cal_timestamps,
     ax.scatter(*real_positions[-1], color='red', s=150, marker='s', 
                label=f'End (Actual){arm_tag}', edgecolors='black', linewidth=2)
     
-    # 每隔N个点绘制姿态坐标系
+    # 每隔N个点绘制姿态坐标系；轴长按轨迹包围盒最大边长自适应
     step_cal = max(1, len(cal_positions) // 20)  # 大约显示20个姿态
     step_real = max(1, len(real_positions) // 20)
-    arrow_length = 0.02
+    all_positions = np.vstack([cal_positions, real_positions])
+    extent = float(np.ptp(all_positions, axis=0).max())
+    # 约为轨迹跨度的 8%；过短路径不低于 2mm，过长不超过 5cm
+    arrow_length = float(np.clip(0.08 * max(extent, 1e-6), 0.002, 0.05))
     
     # 计算轨迹的姿态箭头（蓝色实线）
     for i in range(0, len(cal_positions), step_cal):
@@ -409,8 +412,7 @@ def plot_combined_3d_trajectory(cal_positions, cal_quaternions, cal_timestamps,
     ax.view_init(elev=20, azim=45)
     
     # 使坐标轴等比例
-    all_positions = np.vstack([cal_positions, real_positions])
-    max_range = np.ptp(all_positions, axis=0).max() / 2
+    max_range = extent / 2
     mid = np.mean(all_positions, axis=0)
     ax.set_xlim(mid[0] - max_range, mid[0] + max_range)
     ax.set_ylim(mid[1] - max_range, mid[1] + max_range)
