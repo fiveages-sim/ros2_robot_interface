@@ -6,7 +6,15 @@ This package is independent of LeRobot and can be used in any ROS 2 environment.
 """
 
 from .config import ControlType, ROS2RobotInterfaceConfig
-from .constants import FSM_HOME, FSM_HOLD, FSM_OCS2, FSM_MOVEJ, FSM_COMPLIANCE
+from .constants import (
+    FSM_COMPLIANCE,
+    FSM_HOLD,
+    FSM_HOME,
+    FSM_MOVEJ,
+    FSM_OCS2,
+    is_body_joint_name,
+    is_head_joint_name,
+)
 from .utils.exceptions import (
     ROS2InterfaceError,
     ROS2NotConnectedError,
@@ -25,6 +33,8 @@ __all__ = [
     "FSM_OCS2",
     "FSM_MOVEJ",
     "FSM_COMPLIANCE",
+    "is_body_joint_name",
+    "is_head_joint_name",
     "ROS2InterfaceError",
     "ROS2NotConnectedError",
     "ROS2AlreadyConnectedError",

@@ -39,7 +39,15 @@ from arms_ros2_control_msgs.msg import WbcCurrentState
 from arms_ros2_control_msgs.srv import ExecutePath
 
 from .config import ControlType, ROS2RobotInterfaceConfig
-from .constants import FSM_COMPLIANCE, FSM_HOLD, FSM_HOME, FSM_MOVEJ, FSM_OCS2
+from .constants import (
+    FSM_COMPLIANCE,
+    FSM_HOLD,
+    FSM_HOME,
+    FSM_MOVEJ,
+    FSM_OCS2,
+    is_body_joint_name,
+    is_head_joint_name,
+)
 from .utils.exceptions import ROS2AlreadyConnectedError, ROS2InterfaceError, ROS2NotConnectedError
 from .utils.quat_pose import check_pose_arrival, quat_multiply, rotate_vector_by_quat
 from .handler import ArmHandler, ArmType, GripperHandler, GripperType
@@ -379,6 +387,9 @@ class ROS2RobotInterface:
 
         if "/body_joint_controller/waist_lifting" in topic_names:
             self.config.waist_lifting_topic = "/body_joint_controller/waist_lifting"
+        elif "/ocs2_wbc_controller/waist_lifting" in topic_names:
+            self.config.waist_lifting_topic = "/ocs2_wbc_controller/waist_lifting"
+            logger.info("Detected WBC waist lifting topic")
 
         if "/body_joint_controller/waist_lifting_pose_relative" in topic_names:
             self.config.waist_lifting_pose_relative_topic = "/body_joint_controller/waist_lifting_pose_relative"
@@ -410,9 +421,15 @@ class ROS2RobotInterface:
 
         if "/body_joint_controller/waist_lifting_command" in topic_names:
             self.config.waist_lifting_command_topic = "/body_joint_controller/waist_lifting_command"
+        elif "/ocs2_wbc_controller/waist_lifting_command" in topic_names:
+            self.config.waist_lifting_command_topic = "/ocs2_wbc_controller/waist_lifting_command"
+            logger.info("Detected WBC waist lifting command topic")
 
         if "/body_joint_controller/waist_turning_command" in topic_names:
             self.config.waist_turning_command_topic = "/body_joint_controller/waist_turning_command"
+        elif "/ocs2_wbc_controller/waist_turning_command" in topic_names:
+            self.config.waist_turning_command_topic = "/ocs2_wbc_controller/waist_turning_command"
+            logger.info("Detected WBC waist turning command topic")
         
         # 检测灵巧手关节控制器 topic
         if "/left_hand_controller/target_joint_position" in topic_names:
@@ -1081,10 +1098,10 @@ class ROS2RobotInterface:
                 elif name_lower.startswith('right_'):
                     category = 'right_arm'
                 else:
-                    # 与 WBC ``joint_names`` 分类一致：Galbot 等用 leg_joint* 表示底盘/腰链，归入 body
-                    if "head" in name_lower:
+                    # 与 WBC StateMoveJ body 前缀一致：body* / lift_joint / leg_*
+                    if is_head_joint_name(name):
                         category = "head"
-                    elif "body" in name_lower or name_lower.startswith("leg_"):
+                    elif is_body_joint_name(name):
                         category = "body"
                     else:
                         category = "other"
@@ -1094,9 +1111,9 @@ class ROS2RobotInterface:
 
                 if is_gripper_or_hand:
                     category = 'gripper'
-                elif 'head' in name_lower:
+                elif is_head_joint_name(name):
                     category = 'head'
-                elif 'body' in name_lower or name_lower.startswith("leg_"):
+                elif is_body_joint_name(name):
                     category = 'body'
                 else:
                     category = 'arm' if 'joint' in name_lower else 'other'
@@ -2776,10 +2793,10 @@ class ROS2RobotInterface:
                         left_arm_joint_names.append(joint_name)
                     elif name_lower.startswith("right_"):
                         right_arm_joint_names.append(joint_name)
-                    elif "body" in name_lower or name_lower.startswith("leg_"):
-                        # Galbot 等底盘/下肢链常用 leg_joint*，在 WBC 合成里与 body 段同序位
+                    elif is_body_joint_name(joint_name):
+                        # body* / lift_joint / leg_*：与 StateMoveJ body 前缀及 _categorize_joints 一致
                         body_joint_names.append(joint_name)
-                    elif "head" in name_lower:
+                    elif is_head_joint_name(joint_name):
                         head_joint_names.append(joint_name)
                     else:
                         ignored_joint_names.append(joint_name)
