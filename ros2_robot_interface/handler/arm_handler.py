@@ -9,7 +9,7 @@ import logging
 from enum import Enum
 from typing import Optional, Dict, Any, List, Callable
 
-from geometry_msgs.msg import Pose, PoseStamped
+from geometry_msgs.msg import Pose, PoseStamped, TwistStamped
 from rclpy.node import Node
 from rclpy.publisher import Publisher
 from rclpy.subscription import Subscription
@@ -89,6 +89,7 @@ class ArmHandler:
         self.target_sub: Optional[Subscription] = None  # 目标位置订阅器
         self.target_pub: Optional[Publisher] = None
         self.target_stamped_pub: Optional[Publisher] = None
+        self.relative_pub: Optional[Publisher] = None
         self.joint_controller_pub: Optional[Publisher] = None
     
     def initialize(self) -> None:
@@ -124,6 +125,9 @@ class ArmHandler:
             )
             self.target_stamped_pub = self.node.create_publisher(
                 PoseStamped, f"{self.target_topic}/stamped", 10
+            )
+            self.relative_pub = self.node.create_publisher(
+                TwistStamped, f"{self.target_topic}/relative", 10
             )
             logger.debug(f"{self.label}: Created target publishers for {self.target_topic}")
         else:
@@ -241,6 +245,56 @@ class ArmHandler:
         self.target_stamped_pub.publish(pose_stamped)
         logger.debug(
             f"Published {self.label.lower()} target (stamped) in frame '{resolved_frame_id}': {pose}"
+        )
+
+    def send_relative(
+        self,
+        dx: float,
+        dy: float,
+        dz: float,
+        droll: float = 0.0,
+        dpitch: float = 0.0,
+        dyaw: float = 0.0,
+        frame_id: str = "",
+    ) -> None:
+        """发送一次笛卡尔相对位移（米 / 弧度 RPY）并走 MoveL。
+
+        Args:
+            dx: 平移增量 X（米），表达在 ``frame_id`` 下。
+            dy: 平移增量 Y（米）。
+            dz: 平移增量 Z（米）。
+            droll: 滚转增量（弧度）。
+            dpitch: 俯仰增量（弧度）。
+            dyaw: 偏航增量（弧度）。
+            frame_id: 增量坐标系；空字符串表示控制器内部 base_frame。
+        """
+        if self.relative_pub is None:
+            raise ROS2NotConnectedError(f"{self.label} relative publisher not initialized")
+
+        if self.config.auto_switch_fsm_before_control and self.fsm_command_callback is not None:
+            try:
+                current = self.query_fsm_command()
+                if current != FSM_OCS2:
+                    self.fsm_command_callback(FSM_OCS2)
+                    logger.debug(f"{self.label}: auto-switched FSM to OCS2 for arm pose control")
+            except Exception as e:
+                logger.warning(f"{self.label}: failed to auto-switch FSM to OCS2: {e}")
+
+        self.latest_target_pose = None
+
+        msg = TwistStamped()
+        msg.header.frame_id = frame_id
+        msg.header.stamp = self.node.get_clock().now().to_msg()
+        msg.twist.linear.x = float(dx)
+        msg.twist.linear.y = float(dy)
+        msg.twist.linear.z = float(dz)
+        msg.twist.angular.x = float(droll)
+        msg.twist.angular.y = float(dpitch)
+        msg.twist.angular.z = float(dyaw)
+        self.relative_pub.publish(msg)
+        logger.debug(
+            f"Published {self.label.lower()} relative in frame '{frame_id}': "
+            f"linear=({dx}, {dy}, {dz}) angular=({droll}, {dpitch}, {dyaw})"
         )
     
     def get_target_pose(self) -> Optional[Pose]:
@@ -362,6 +416,10 @@ class ArmHandler:
         if self.target_stamped_pub:
             self.target_stamped_pub.destroy()
             self.target_stamped_pub = None
+
+        if self.relative_pub:
+            self.relative_pub.destroy()
+            self.relative_pub = None
         
         if self.joint_controller_pub:
             self.joint_controller_pub.destroy()

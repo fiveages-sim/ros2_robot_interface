@@ -2,6 +2,8 @@
 
 本文档详细说明每个机器人部分（part）可用的函数及其功能。文档按部分分类，每个部分内按功能（发送命令、获取状态、检查到达）组织。
 
+每个公开方法都有 **原理** 字段，说明底层用的是 Topic、Action、Service、参数服务、TF，还是本地计算（以及它依赖哪条订阅缓存）。名称带 WBC / split 两种写法时，以 `connect()` 自动检测或 `ROS2RobotInterfaceConfig` 里显式配置的为准。
+
 ## 目录
 
 - [手臂控制 (Arm Handler)](#手臂控制-arm-handler)
@@ -9,6 +11,8 @@
   - [获取状态](#获取状态-1)
   - [检查到达](#检查到达-1)
   - [双臂协调控制](#双臂协调控制-1)
+  - [笛卡尔 Action（MoveL / MoveC）](#笛卡尔-actionmovel--movec)
+  - [关节轨迹 Action（MoveJ）](#关节轨迹-actionmovej)
 - [夹爪控制 (Gripper Handler)](#夹爪控制-gripper-handler)
   - [发送命令](#发送命令-2)
   - [获取状态](#获取状态-2)
@@ -19,10 +23,12 @@
   - [检查到达](#检查到达-3)
 - [身体控制](#身体控制)
   - [发送命令](#发送命令-4)
+  - [腰部位姿 Action](#腰部位姿-action)
   - [获取状态](#获取状态-4)
   - [检查到达](#检查到达-4)
 - [统一接口方法](#统一接口方法)
   - [FSM状态切换](#fsm状态切换)
+  - [六维力与 COMPLIANCE 力控](#六维力与-compliance-力控)
   - [FSM状态查询](#fsm状态查询)
   - [模式命令与 WBC 状态确认](#模式命令与-wbc-状态确认)
   - [协调关节下发](#协调关节下发)
@@ -33,6 +39,9 @@
   - [统一到达检查](#统一到达检查)
   - [等待到达](#等待到达)
   - [坐标转换](#坐标转换)
+  - [系统信息查询](#系统信息查询)
+  - [控制器节点名](#控制器节点名)
+  - [笛卡尔速度](#笛卡尔速度)
   - [机器人描述与参数查询](#机器人描述与参数查询)
 - [常量 (Constants)](#常量-constants)
 - [几何与四元数 (utils.quat_pose)](#几何与四元数-utilsquat_pose)
@@ -67,15 +76,21 @@ https://github.com/user-attachments/assets/f7fef847-4e6d-4905-93cb-176b4fc81c34
 
 **功能：** 发送带坐标系信息的目标位姿。
 
+**原理：**
+- 类型：Topic 发布
+- 名称：`/left_target/stamped` 或 `/right_target/stamped`（即 `{end_effector_target_topic}/stamped`）
+- 消息：`geometry_msgs/msg/PoseStamped`
+- 配置：`config.end_effector_target_topic` / `config.right_end_effector_target_topic`
+- 到位依赖：控制器回写 `/left_current_target` 或 `/right_current_target`（Topic 订阅，`PoseStamped`）
+- 隐式 FSM：切到 OCS2（经 `/fsm_command`）
+
 **参数：**
 - `frame_id` (`Optional[str]`): 目标位姿所在坐标系，如 `arm_base`、`base_link`、`head_link2`、`left_eef`；可省略，省略时回退到最近订阅到的 `self.frame_id`
 - `pose` (`Optional[Pose]`): 目标位姿
 
 **特点：**
-- 发布到 `/left_target/stamped` 或 `/right_target/stamped`
 - 会自动做 TF 变换，统一转换到 `base_frame`
 - 适合跨坐标系目标和相对位姿控制
-- 目标位姿后续会通过 `/left_current_target` 或 `/right_current_target` 订阅回来，用于到位判断
 - 兼容两种调用方式：`send_target_stamped("frame_id", pose)` 和 `send_target_stamped(pose)`
 - 如果省略 `frame_id` 且当前还没有可用的默认 `self.frame_id`，会抛出 `ValueError`
 
@@ -106,6 +121,40 @@ interface.left_arm_handler.send_target_stamped(relative_pose)
 ---
 
 
+#### `send_relative(dx, dy, dz, droll=0.0, dpitch=0.0, dyaw=0.0, frame_id="") -> None`
+
+**功能：** 发送一次笛卡尔相对位移，叠到当前指令目标上并走 MoveL。
+
+**原理：**
+- 类型：Topic 发布
+- 名称：`{end_effector_target_topic}/relative`，即 `/left_target/relative` 或 `/right_target/relative`
+- 消息：`geometry_msgs/msg/TwistStamped`
+- 到位依赖：控制器回写 `/left_current_target` 或 `/right_current_target`
+- 隐式 FSM：切到 OCS2（经 `/fsm_command`）
+
+**参数：**
+- `dx` / `dy` / `dz` (`float`): 平移增量，单位米，表达在 `frame_id` 下
+- `droll` / `dpitch` / `dyaw` (`float`): 姿态增量，单位弧度，对应 roll / pitch / yaw
+- `frame_id` (`str`): 增量坐标系；默认空字符串，控制器按内部 `base_frame` 处理
+
+**说明：**
+- **不是**该坐标系下的绝对位姿。`dx=0.05` 表示沿该轴再偏 5 cm，不会把末端送到 `(0.05, 0, 0)`
+- `header.stamp` 由接口填写，控制器不用于 TF 查询
+- 发布前会清空 `latest_target_pose`，避免到位误判
+- 未创建 publisher 时抛 `ROS2NotConnectedError`
+
+**示例：**
+```python
+# 沿控制器 base_frame 的 X 正向偏移 3 cm
+interface.left_arm_handler.send_relative(0.03, 0.0, 0.0)
+
+# 沿末端 X 伸出 3 cm
+interface.left_arm_handler.send_relative(0.03, 0.0, 0.0, frame_id="left_eef")
+```
+
+---
+
+
 https://github.com/user-attachments/assets/b80e994e-e374-4580-b947-769c8c169ba2
 
 
@@ -113,11 +162,17 @@ https://github.com/user-attachments/assets/b80e994e-e374-4580-b947-769c8c169ba2
 
 **功能：** 发送不带坐标系信息的目标位姿。
 
+**原理：**
+- 类型：Topic 发布
+- 名称：`/left_target` 或 `/right_target`
+- 消息：`geometry_msgs/msg/Pose`
+- 配置：`config.end_effector_target_topic` / `config.right_end_effector_target_topic`
+- 隐式 FSM：切到 OCS2（经 `/fsm_command`）
+
 **参数：**
 - `pose` (`Pose`): 已经位于 `base_frame` 坐标系下的目标位姿
 
 **特点：**
-- 直接发布到 `/left_target` 或 `/right_target`
 - 不做 TF 变换
 - 只适合你已经明确知道目标位姿就在 `base_frame` 下的场景
 
@@ -147,12 +202,19 @@ https://github.com/user-attachments/assets/eed9c1d2-6d9d-4c84-9152-1a9a472440a6
 
 **功能：** 发送关节位置命令（MoveJ）。
 
+**原理：**
+- 类型：Topic 发布
+- 名称（自动检测，WBC 优先）：
+  - 左臂：`/ocs2_wbc_controller/target_joint_position/left` 或 `/ocs2_arm_controller/target_joint_position/left`；单臂也可为 `/ocs2_arm_controller/target_joint_position`
+  - 右臂：`/ocs2_wbc_controller/target_joint_position/right` 或 `/ocs2_arm_controller/target_joint_position/right`
+- 消息：`std_msgs/msg/Float64MultiArray`
+- 配置：`config.left_arm_joint_controller_topic` / `config.right_arm_joint_controller_topic`
+- 隐式 FSM：切到 MOVEJ（经 `/fsm_command`）；已是 MOVEJ 则跳过
+
 **参数：**
 - `positions` (`List[float]`): 目标关节角列表，单位为弧度
 
 **特点：**
-- 会自动切换到 MOVEJ 状态（FSM 命令 4）
-- 发布到对应关节控制器话题，如 `/ocs2_wbc_controller/target_joint_position/left`
 - 关节数量必须与当前配置一致
 
 **异常：**
@@ -172,6 +234,12 @@ interface.left_arm_handler.send_joint_positions(joint_positions)
 #### `get_pose() -> Optional[Pose]` ⭐ 最常用
 
 **功能：** 获取当前末端执行器实际位姿。
+
+**原理：**
+- 类型：Topic 订阅（读缓存）
+- 名称：`/left_current_pose` 或 `/right_current_pose`
+- 消息：`geometry_msgs/msg/PoseStamped`（返回其中的 `.pose`）
+- 配置：`config.end_effector_pose_topic` / `config.right_end_effector_pose_topic`
 
 **返回值：**
 - `Pose`：当前位置和姿态，位于 `base_frame` 坐标系下
@@ -199,12 +267,17 @@ if current_pose:
 
 **功能：** 获取当前目标位姿。
 
+**原理：**
+- 类型：Topic 订阅（读缓存）
+- 名称：`/left_current_target` 或 `/right_current_target`
+- 消息：`geometry_msgs/msg/PoseStamped`（返回其中的 `.pose`）
+- 配置：`config.end_effector_current_target_topic` / `config.right_end_effector_current_target_topic`（`connect()` 可自动检测）
+
 **返回值：**
 - `Pose`：当前目标位姿，位于 `base_frame` 坐标系下
 - `None`：尚未设置目标，或未配置目标位姿订阅话题
 
 **说明：**
-- 目标位姿来自 `/left_current_target` 或 `/right_current_target`
 - 常用于调试目标是否已正确下发
 - `check_arrival()` 内部也会使用这个目标位姿进行比较
 
@@ -221,15 +294,20 @@ else:
 
 #### `get_frame_id() -> Optional[str]`
 
-**功能：** 获取当前目标位姿对应的 `frame_id`。
+**功能：** 获取当前末端位姿订阅消息里缓存的 `frame_id`。
+
+**原理：**
+- 类型：Topic 订阅（读缓存）
+- 名称：与 `get_pose()` 相同（`/left_current_pose` 或 `/right_current_pose`）
+- 来源：第一次收到的 `PoseStamped.header.frame_id`
+- 注意：若未配置 `current_target` 话题，此方法直接返回 `None`（实现上与 `get_target_pose()` 共用可用性守卫）
 
 **返回值：**
-- `str`：当前目标位姿的坐标系 ID
-- `None`：未配置目标位姿订阅话题
+- `str`：当前位姿的坐标系 ID
+- `None`：未配置目标位姿订阅话题，或尚未收到 pose
 
 **说明：**
-- 该值与 `get_target_pose()` 配套使用
-- 常用于确认目标位姿最终使用的是哪个参考坐标系
+- 常用于 `send_target_stamped()` 省略 `frame_id` 时的默认坐标系
 - 记录数据时也可以一起保存
 
 **示例：**
@@ -248,6 +326,12 @@ else:
 #### `check_arrival(pose_threshold: float | None = None, orient_threshold: float | None = None) -> Dict[str, Any]` ⭐ 最常用
 
 **功能：** 检查手臂是否到达目标位姿。
+
+**原理：**
+- 类型：本地计算（比较缓存位姿）
+- 当前位姿：Topic 订阅 `/left_current_pose` 或 `/right_current_pose`
+- 目标位姿：Topic 订阅 `/left_current_target` 或 `/right_current_target`
+- 未配置目标话题时无法判定到达
 
 **参数：**
 - `pose_threshold` (float | None): 位置距离阈值，单位米；为 `None` 时使用 `config.pose_position_threshold`
@@ -312,6 +396,15 @@ while True:
 
 **功能：** 发送双臂目标 pose（仅双臂模式）；WBC 模式下可附带腰部/身体目标。
 
+**原理：**
+- 类型：Topic 发布（主通道）+ 可选参数服务
+- 名称：`/dual_target/stamped`
+- 消息：`nav_msgs/msg/Path`（双臂 2 个 `PoseStamped`；WBC + `body_pose` 时为 `[left, right, body]`）
+- 可选 `movel_duration`：对 `arm_controller` 节点调用 **参数服务** `SetParameters`，写 `movel_duration`
+- 可选 `body_mode`：Topic 发布 `/mode_command`（`std_msgs/String`）
+- 到位依赖：订阅 `/left_current_target`、`/right_current_target`
+- 隐式 FSM：切到 OCS2
+
 **参数：**
 - `left_pose` (Pose): 左臂目标 pose（在 `frame_id` 指定的坐标系下）
 - `right_pose` (Pose): 右臂目标 pose（在 `frame_id` 指定的坐标系下）
@@ -323,13 +416,10 @@ while True:
 
 **说明：**
 - **坐标系默认值**：不传 `frame_id` 时默认使用 `"arm_base"`。若你的机器人 TF 或末端位姿话题中**没有**名为 `arm_base` 的坐标系，必须显式传入与实际一致的 `frame_id`（例如与 `left_arm_handler.get_frame_id()` 或当前 pose 消息的 `header.frame_id` 一致）。
-- 发布到 `/dual_target/stamped` topic（使用 `nav_msgs/Path` 消息类型；双臂为 2 个 `PoseStamped`，WBC + body 时为 `[left, right, body]`）
-- **内部实现**：直接发布到 `/dual_target/stamped` topic，不调用 handler 的方法
-- 目标位姿会通过话题订阅获取（`/left_current_target` 和 `/right_current_target`），用于到达判断
+- **内部实现**：直接发布到 `/dual_target/stamped`，不调用 handler 的 `send_target_stamped()`
 - 可以使用 `left_arm_handler.check_arrival()` 和 `right_arm_handler.check_arrival()` 分别检查到达状态
 - 只有 WBC 模式支持通过该接口发送 `body_pose`。分体模式如果传入 `body_pose` 会直接报错，避免“看起来发送了腰部目标但实际不生效”的误用。
 - 腰部目标要参与控制时必须使用 `BODY_TRACKING`。因此传入 `body_pose` 时，`body_mode` 只能省略或显式传 `"BODY_TRACKING"`。
-- 当传入 `body_pose` 并进入 `BODY_TRACKING` 时，接口会输出日志说明 body mode 已切换/使用 `BODY_TRACKING`。
 - `movel_duration` 不是消息字段，而是控制器节点参数。接口会在发布目标前修改参数，并输出日志说明修改后的值。
 
 **示例：**
@@ -373,24 +463,33 @@ if left_result['arrived'] and right_result['arrived']:
 
 ---
 
-#### `send_dual_arm_joint_positions(left_arm_positions: List[float], right_arm_positions: List[float]) -> None` ⭐ **新增**
+#### `send_dual_arm_joint_positions(left_arm_positions: List[float], right_arm_positions: List[float], body_positions: Optional[List[float]] = None, head_positions: Optional[List[float]] = None) -> None`
 
 **功能：** 发送双臂关节位置命令（MoveJ 模式，统一 topic 控制）
+
+**原理：**
+- 类型：Topic 发布
+- 名称：`config.unified_arm_joint_controller_topic`
+  - WBC：`/ocs2_wbc_controller/target_joint_position`
+  - ARM：`/ocs2_arm_controller/target_joint_position`
+- 消息：`std_msgs/msg/Float64MultiArray`
+- 缺某一臂 / 躯干 / 头部时从 `/joint_states` hold 当前角
+- 隐式 FSM：切到 MOVEJ
 
 **参数：**
 - `left_arm_positions` (List[float]): 左臂关节位置列表（弧度）
 - `right_arm_positions` (List[float]): 右臂关节位置列表（弧度）
+- `body_positions` (Optional[List[float]]): 躯干目标；仅 WBC 生效。省略时从 `/joint_states` 读当前角
+- `head_positions` (Optional[List[float]]): 头部目标；仅 WBC 生效。省略时从 `/joint_states` 读当前角
 
 **说明：**
 - 同时控制左臂和右臂的所有关节，发布到统一的 topic
 - **自动检测控制器类型**：
-  - **WBC 控制器** (`/ocs2_wbc_controller/target_joint_position`)：需要 `body_joints + left_arm_joints + right_arm_joints`（18个关节）
-    - 自动从当前关节状态获取身体关节位置
-    - 如果没有身体关节数据，使用默认值（4个零值）
-  - **ARM 控制器** (`/ocs2_arm_controller/target_joint_position`)：只需要 `left_arm_joints + right_arm_joints`（14个关节）
-- 自动切换到 MOVEJ 状态（FSM 命令 4）
+  - **WBC 控制器** (`/ocs2_wbc_controller/target_joint_position`)：`body_joints + left_arm_joints + right_arm_joints + head_joints`，顺序优先遵循 `config.joint_names`
+    - 未传入 `body_positions` / `head_positions` 时从当前关节状态补齐
+    - 如果没有身体关节数据，使用默认值（4 个零值）
+  - **ARM 控制器** (`/ocs2_arm_controller/target_joint_position`)：只需要 `left_arm_joints + right_arm_joints`（14 个关节）；传入 body/head 会被忽略并告警
 - 左臂和右臂的关节数量必须相同
-- 关节顺序：WBC 控制器为 `[body_joint1-4] + [left_joint1-7] + [right_joint1-7]`，ARM 控制器为 `[left_joint1-7] + [right_joint1-7]`
 
 **Raises:**
 - `ROS2NotConnectedError`: 如果接口未连接或发布器未初始化
@@ -414,6 +513,119 @@ interface.send_dual_arm_joint_positions(left_positions, right_positions)
 **注意事项：**
 - ⚠️ WBC 控制器会自动添加身体关节，确保身体关节数据可用（从 `/joint_states` 获取）
 - ⚠️ 如果使用 WBC 控制器且没有身体关节数据，会使用默认值（4个零值），可能导致意外运动
+
+---
+
+### 笛卡尔 Action（MoveL / MoveC）
+
+这组接口走 **Action**，会阻塞等待结果（或超时）。默认 action 名指向 `ocs2_arm_controller`；若控制器带命名空间，在 config 里覆盖。
+
+#### `wait_for_movel_action_server(timeout: float = 5.0) -> bool`
+
+**功能：** 等待 MoveL action server 就绪。
+
+**原理：**
+- 类型：Action（探测 server）
+- 名称：`config.movel_action_name`（默认 `/ocs2_arm_controller/execute_linear`）
+- 类型：`arms_ros2_control_msgs/action/ExecuteLinear`
+- client 未创建时返回 `False`
+
+#### `wait_for_movec_action_server(timeout: float = 5.0) -> bool`
+
+**功能：** 等待 MoveC action server 就绪。
+
+**原理：**
+- 类型：Action（探测 server）
+- 名称：`config.movec_action_name`（默认 `/ocs2_arm_controller/execute_circle_use_ik`）
+- 类型：`arms_ros2_control_msgs/action/MovecUseIK`
+
+#### `execute_movel_action(arm_name, endpoint_pose, *, duration=3.0, time_mode=True, frame_id=None, ik_type=None, right_endpoint_pose=None, max_linear_velocity=None, max_linear_acceleration=None, max_linear_jerk=None, max_angular_velocity=None, max_angular_acceleration=None, max_angular_jerk=None, auto_switch_fsm=True, feedback_callback=None, timeout=30.0, wait_for_server_timeout=5.0) -> Any`
+
+**功能：** 参数化直线笛卡尔运动（MoveL），发送 goal 并等待 result。
+
+**原理：**
+- 类型：Action
+- 名称：`config.movel_action_name`（默认 `/ocs2_arm_controller/execute_linear`）
+- 类型：`arms_ros2_control_msgs/action/ExecuteLinear`（goal 内嵌 `LinearMessage`）
+- 隐式 FSM：`auto_switch_fsm=True` 时切到 MOVEJ（经 `/fsm_command`）
+
+**参数（节选）：**
+- `arm_name` (`str`): `"left"` / `"right"` / `"both"`
+- `endpoint_pose`: 终点位姿（`Pose` 或 `PoseStamped`）
+- `right_endpoint_pose`: 双臂时右臂终点
+- `feedback_callback`: 收到的是 action feedback 对象
+- 返回：action result；被拒绝或超时返回 `None`
+
+**示例：**
+```python
+from geometry_msgs.msg import Pose
+
+goal = Pose()
+goal.position.x = 0.45
+goal.position.y = 0.20
+goal.position.z = 0.30
+goal.orientation.w = 1.0
+result = interface.execute_movel_action("left", goal, duration=3.0, frame_id="arm_base")
+```
+
+#### `execute_movec_action_three_point(arm_name, midpoint_pose, endpoint_pose, rotate_angle=0.0, *, duration=6.0, ...) -> Any`
+
+**功能：** 三点法圆弧笛卡尔运动（MoveC）。
+
+**原理：**
+- 类型：Action
+- 名称：`config.movec_action_name`（默认 `/ocs2_arm_controller/execute_circle_use_ik`）
+- 类型：`arms_ros2_control_msgs/action/MovecUseIK`（`use_three_point_method=True`）
+- 隐式 FSM：默认切到 MOVEJ
+
+#### `execute_movec_action_parametric(arm_name, center, axis, rotate_angle, *, endpoint_pose=None, duration=6.0, ...) -> Any`
+
+**功能：** 圆心 / 轴 / 转角参数化圆弧（MoveC）。
+
+**原理：**
+- 类型：Action
+- 名称：同上 `config.movec_action_name`
+- 类型：`arms_ros2_control_msgs/action/MovecUseIK`（`use_three_point_method=False`）
+- 隐式 FSM：默认切到 MOVEJ
+
+---
+
+### 关节轨迹 Action（MoveJ）
+
+#### `wait_for_joint_trajectory_action_server(timeout: float = 5.0) -> bool`
+
+**功能：** 等待参数化 MoveJ action server 就绪。
+
+**原理：**
+- 类型：Action（探测 server）
+- 名称：`config.joint_trajectory_action_name`（默认 `/ocs2_arm_controller/joint_trajectory_with_para`）
+- 类型：`arms_ros2_control_msgs/action/JointTrajectory`
+
+#### `execute_joint_trajectory_action(joint_names, waypoints, *, time_mode=True, total_time=None, max_velocity=None, max_acceleration=None, max_jerk=None, auto_switch_fsm=True, feedback_callback=None, timeout=30.0, wait_for_server_timeout=5.0) -> Any`
+
+**功能：** 带速度/加速度/jerk 约束的参数化关节轨迹（MoveJ action）。
+
+**原理：**
+- 类型：Action
+- 名称：`config.joint_trajectory_action_name`（默认 `/ocs2_arm_controller/joint_trajectory_with_para`）
+- 类型：`arms_ros2_control_msgs/action/JointTrajectory`（waypoint 为 `JointWaypoint`）
+- 隐式 FSM：默认切到 MOVEJ
+- 与 `send_joint_trajectory()` 不同：后者是 **Topic 发布** `/{controller}/target_joint_trajectory`，本方法走 Action 并等待结果
+
+**示例：**
+```python
+result = interface.execute_joint_trajectory_action(
+    ["left_joint1", "left_joint2", "left_joint3", "left_joint4", "left_joint5", "left_joint6", "left_joint7"],
+    [[0.0, 0.3, -0.2, 0.0, 1.2, 0.0, 0.0]],
+    total_time=4.0,
+)
+```
+
+#### `execute_dual_arm_movej_action(left_arm_positions, right_arm_positions, *, duration=None, ...) -> Any`
+
+**功能：** 双臂参数化 MoveJ 的便捷封装（把左右臂关节拼成一条 `execute_joint_trajectory_action`）。
+
+**原理：** 同 `execute_joint_trajectory_action`（同一个 Action）。
 
 ---
 
@@ -460,20 +672,23 @@ https://github.com/user-attachments/assets/16c98f20-b795-4ef3-9872-06cc6ece01f1
 
 **功能：** 发送夹爪开关控制命令，使用 `target_command` 话题。
 
+**原理：**
+- 类型：Topic 发布 + 同名 Topic 订阅（同步 `is_open`）
+- 名称：`/{controller_name}/target_command`
+  - 双臂灵巧手：`/left_hand_controller/target_command`、`/right_hand_controller/target_command`
+  - 双臂夹爪：`/left_gripper_controller/target_command`、`/right_gripper_controller/target_command`
+  - 单臂灵巧手：`/hand_controller/target_command`
+  - 单臂夹爪：`/gripper_controller/target_command`
+- 消息：`std_msgs/msg/Int32`（`0` 关闭，`1` 打开）
+- 配置：由 `connect()` 检测 `left_gripper_controller_name` / `right_gripper_controller_name`
+
 **参数：**
 - `target_value` (int): `0` 表示关闭，`1` 表示打开
 
 **特点：**
 - 单臂模式统一使用 `interface.left_gripper_handler.send_target_command(...)`
-- 使用 `std_msgs/Int32` 消息类型
 - 会自动订阅相同话题并同步 `is_open` 状态
 - 如果参数不是 `0` 或 `1`，会抛出 `ValueError`
-
-**自动检测到的话题：**
-- 双臂灵巧手：`/left_hand_controller/target_command`、`/right_hand_controller/target_command`
-- 双臂夹爪：`/left_gripper_controller/target_command`、`/right_gripper_controller/target_command`
-- 单臂灵巧手：`/hand_controller/target_command`
-- 单臂夹爪：`/gripper_controller/target_command`
 
 **示例：**
 ```python
@@ -499,6 +714,13 @@ https://github.com/user-attachments/assets/17ff1a2b-1496-4f19-aa37-cbce55c11c04
 
 **功能：** 发送夹爪实际行程位置命令，使用位置控制话题。
 
+**原理：**
+- 类型：Topic 发布
+- 名称：`config.gripper_command_topic` / `config.right_gripper_command_topic`
+  - 常见：`/left_gripper_joint/position_command`、`/right_gripper_joint/position_command`
+- 消息：`std_msgs/msg/Float64`
+- 无对应 ROS 订阅：目标值缓存在 handler 内部，供 `check_arrival()` 使用
+
 **参数：**
 - `position` (float): 目标行程位置值
 
@@ -523,20 +745,22 @@ https://github.com/user-attachments/assets/5e9842b9-376f-4167-8072-0ac6dab29ca0
 
 **功能：** 发送夹爪百分比位置控制命令，使用 `target_percent` 话题。
 
+**原理：**
+- 类型：Topic 发布
+- 名称：`config.left_gripper_target_percent_topic` / `config.right_gripper_target_percent_topic`
+  - 双臂：`/left_gripper_controller/target_percent`、`/right_gripper_controller/target_percent`
+  - 单臂：`/gripper_controller/target_percent` 或 `/left_gripper_controller/target_percent`
+- 消息：`std_msgs/msg/Float64`（0.0~1.0）
+- 话题未检测到时抛 `ROS2NotConnectedError`
+
 **参数：**
 - `percent` (float): 百分比目标值，范围 `0.0` 到 `1.0`
 
 **特点：**
 - 单臂模式统一使用 `interface.left_gripper_handler.send_position_percent(...)`
-- 使用 `std_msgs/Float64` 消息类型
 - 传入 `int` 会自动转换为 `float`
 - 超出 `[0.0, 1.0]` 会抛出 `ValueError`
-- 如果 `target_percent` 话题未检测到，会抛出 `ROS2NotConnectedError`
 - 会按 `gripper_min_position ~ gripper_max_position` 线性换算并更新内部 `target_position`
-
-**自动检测到的话题：**
-- 双臂模式：`/left_gripper_controller/target_percent`、`/right_gripper_controller/target_percent`
-- 单臂模式：`/left_gripper_controller/target_percent`
 
 **可用性判断：**
 ```python
@@ -566,6 +790,12 @@ interface.right_gripper_handler.send_position_percent(0.75)
 #### 获取夹爪当前位置
 
 夹爪当前位置从 `get_joint_state(categorized=True)` 返回的分类字典中读取。
+
+**原理：**
+- 类型：Topic 订阅（读缓存）
+- 名称：`config.joint_states_topic`（默认 `/joint_states`）
+- 消息：`sensor_msgs/msg/JointState`
+- handler 本身不单独订阅夹爪状态话题（`config.gripper_state_topic` 目前未使用）
 
 **单个夹爪分类数据结构：**
 ```python
@@ -612,6 +842,10 @@ if joint_state:
 
 **功能：** 获取当前内部维护的夹爪目标位置。
 
+**原理：**
+- 类型：本地缓存（不是独立 ROS 订阅）
+- 由 `send_joint_positions` / `send_position_percent` 写入；`send_target_command` 经同名话题回调更新为 min/max 行程
+
 **返回值：**
 - `float`: 当前目标位置
 - `None`: 尚未设置目标
@@ -638,6 +872,11 @@ if target_position is not None:
 #### `check_arrival(current_position: Optional[float], threshold: float | None = None) -> Dict[str, Any]`
 
 **功能：** 检查夹爪是否到达目标位置。
+
+**原理：**
+- 类型：本地计算
+- 目标：handler 内部 `target_position`
+- 当前值：调用方从 `/joint_states`（经 `get_joint_state(categorized=True)`）传入
 
 **参数：**
 - `current_position` (Optional[float]): 当前夹爪位置，需要从 `get_joint_state(categorized=True)` 中提取
@@ -688,13 +927,22 @@ result = interface.left_gripper_handler.check_arrival(
 
 **功能：** 发送头部关节位置命令
 
+**原理：**
+- 类型：Topic 发布
+- 名称：`config.head_joint_controller_topic`
+  - WBC：`/ocs2_wbc_controller/target_joint_position/head`
+  - split：`/head_joint_controller/target_joint_position`
+- 消息：`std_msgs/msg/Float64MultiArray`
+- 隐式 FSM：切到 MOVEJ
+- 目标缓存在接口内部，供 `check_arrive(part='head')` 使用
+
 **参数：**
 - `positions` (List[float]): 目标关节位置列表（弧度）
 
 **说明：**
-- 发布到头部关节控制器 topic（如 `/head_joint_controller/target_joint_position`）
 - 会自动保存目标位置（用于 `check_arrive()`）
 - 关节数量必须与配置一致
+- 未检测到 topic 时 `logger.warning` 后返回，不抛异常
 
 **示例：**
 ```python
@@ -710,6 +958,12 @@ interface.send_head_joint_positions(head_positions)
 #### `get_joint_state(categorized: bool = False) -> Dict[str, Any] | None`
 
 **功能：** 获取关节状态（包括头部关节）
+
+**原理：**
+- 类型：Topic 订阅（读缓存）
+- 名称：`config.joint_states_topic`（默认 `/joint_states`）
+- 消息：`sensor_msgs/msg/JointState`
+- `categorized=True` 时按名称规则拆成 arm / gripper / head / body 等（`is_head_joint_name` / `is_body_joint_name`）
 
 **参数：**
 - `categorized` (bool): 是否返回分类后的状态，默认 False
@@ -760,6 +1014,11 @@ if categorized_state:
 
 **功能：** 检查头部是否到达目标位置
 
+**原理：**
+- 类型：本地计算
+- 当前值：Topic 订阅 `/joint_states` 中的 head 关节
+- 目标值：最近一次 `send_head_joint_positions()` 缓存（或 WBC 统一下发时写入的 head 缓存）
+
 **参数：**
 - `part` (str): 设置为 `'head'`
 - `position_threshold` (Optional[float]): 关节位置阈值，如果为 None 则使用默认值
@@ -797,13 +1056,22 @@ result = interface.check_arrive('head', position_threshold=0.01)
 
 **功能：** 发送身体关节位置命令
 
+**原理：**
+- 类型：Topic 发布
+- 名称：`config.body_joint_controller_topic`
+  - WBC：`/ocs2_wbc_controller/target_joint_position/body`
+  - split：`/body_joint_controller/target_joint_position`
+- 消息：`std_msgs/msg/Float64MultiArray`
+- 隐式 FSM：切到 MOVEJ
+- 目标缓存在接口内部，供 `check_arrive(part='body')` 使用
+
 **参数：**
 - `positions` (List[float]): 目标关节位置列表（弧度）
 
 **说明：**
-- 发布到身体关节控制器 topic（如 `/body_joint_controller/target_joint_position`）
 - 会自动保存目标位置（用于 `check_arrive()`）
 - 关节数量必须与配置一致
+- 未检测到 topic 时 `logger.warning` 后返回，不抛异常
 
 **示例：**
 ```python
@@ -812,9 +1080,57 @@ body_positions = [0.0, 0.0, 0.0, 0.0]  # 弧度
 interface.send_body_joint_positions(body_positions)
 ```
 
+#### `send_body_relative(dx, dy, dz, droll=0.0, dpitch=0.0, dyaw=0.0, frame_id="") -> None`
+
+**功能：** 发送身体一次笛卡尔相对位移，叠到当前身体指令目标上并走 MoveL。
+
+**原理：**
+- 类型：Topic 发布
+- 名称：`config.body_target_relative_topic`（自动检测 `/body_target/relative`）
+- 消息：`geometry_msgs/msg/TwistStamped`
+- 隐式 FSM：切到 OCS2；再经 `/mode_command` 切到 `BODY_TRACKING`（已是该模式则不重复发）
+- 到位依赖：`/body_current_target`
+
+**参数：** 与 `ArmHandler.send_relative` 相同（米 / 弧度 RPY；`frame_id` 默认空）
+
+**说明：**
+- 同样是一次增量，不是绝对位姿
+- 仅 WBC 图上通常才有该 topic；未检测到时 `logger.warning` 后返回，不抛异常
+- 发布前清空 `body_current_target_pose`
+
+**示例：**
+```python
+interface.send_body_relative(0.03, 0.0, 0.0)
+```
+
+#### `send_waist_lifting_relative_position(position: float) -> None`
+
+**功能：** 发送腰部升降相对位置命令（单标量）。
+
+**原理：**
+- 类型：Topic 发布
+- 名称：`config.waist_lifting_topic`
+  - split：`/body_joint_controller/waist_lifting`
+  - WBC：`/ocs2_wbc_controller/waist_lifting`
+- 消息：`std_msgs/msg/Float64`
+- 隐式 FSM：切到 MOVEJ
+
+**示例：**
+```python
+interface.send_waist_lifting_relative_position(0.05)
+```
+
 #### `send_waist_lifting_pose_relative(dx: float, dz: float, dphi: float) -> None`
 
 **功能：** 发送腰部局部 x/z/phi 相对移动命令
+
+**原理：**
+- 类型：Topic 发布
+- 名称：`config.waist_lifting_pose_relative_topic`
+  - split：`/body_joint_controller/waist_lifting_pose_relative`
+  - WBC：`/ocs2_wbc_controller/waist_lifting_pose_relative`
+- 消息：`std_msgs/msg/Float64MultiArray`，数据 `[dx, dz, dphi]`
+- 隐式 FSM：切到 MOVEJ
 
 **参数：**
 - `dx` (`float`): 局部 x 方向相对位移
@@ -822,9 +1138,6 @@ interface.send_body_joint_positions(body_positions)
 - `dphi` (`float`): 局部平面角相对变化，单位 rad
 
 **说明：**
-- 发布到 `/body_joint_controller/waist_lifting_pose_relative`
-- 消息类型为 `std_msgs/msg/Float64MultiArray`
-- 实际数据为 `[dx, dz, dphi]`
 - 控制器侧要求当前状态为 MOVEJ
 
 **示例：**
@@ -836,15 +1149,20 @@ interface.send_waist_lifting_pose_relative(0.02, 0.05, 0.10)
 
 **功能：** 发送腰部 x/z/phi 绝对目标命令
 
+**原理：**
+- 类型：Topic 发布
+- 名称：`config.waist_lifting_pose_absolute_topic`
+  - split：`/body_joint_controller/waist_lifting_pose_absolute`
+  - WBC：`/ocs2_wbc_controller/waist_lifting_pose_absolute`
+- 消息：`std_msgs/msg/Float64MultiArray`，数据 `[x, z, phi]`
+- 隐式 FSM：切到 MOVEJ
+
 **参数：**
 - `x` (`float`): `base_footprint` 坐标系下目标 x
 - `z` (`float`): `base_footprint` 坐标系下目标 z
 - `phi` (`float`): `body_base` 平面角目标，单位 rad
 
 **说明：**
-- 发布到 `/body_joint_controller/waist_lifting_pose_absolute`
-- 消息类型为 `std_msgs/msg/Float64MultiArray`
-- 实际数据为 `[x, z, phi]`
 - 控制器侧会将 `(x, z)` 从 `base_footprint` 转到 `body_base` 后执行
 - 控制器侧要求当前状态为 MOVEJ
 
@@ -852,6 +1170,79 @@ interface.send_waist_lifting_pose_relative(0.02, 0.05, 0.10)
 ```python
 interface.send_waist_lifting_pose_absolute(0.12, 0.45, 0.20)
 ```
+
+#### `send_waist_lifting_velocity_scale(velocity_scale: float) -> None`
+
+**功能：** 发送腰部升降速度比例（[-1, 1]）。
+
+**原理：**
+- 类型：Topic 发布
+- 名称：`config.waist_lifting_command_topic`
+  - split：`/body_joint_controller/waist_lifting_command`
+  - WBC：`/ocs2_wbc_controller/waist_lifting_command`
+- 消息：`std_msgs/msg/Float64`
+- 隐式 FSM：切到 MOVEJ
+
+**示例：**
+```python
+interface.send_waist_lifting_velocity_scale(0.3)
+```
+
+#### `send_waist_turning_velocity_scale(velocity_scale: float) -> None`
+
+**功能：** 发送腰部旋转速度比例（[-1, 1]）。
+
+**原理：**
+- 类型：Topic 发布
+- 名称：`config.waist_turning_command_topic`
+  - split：`/body_joint_controller/waist_turning_command`
+  - WBC：`/ocs2_wbc_controller/waist_turning_command`
+- 消息：`std_msgs/msg/Float64`
+- 隐式 FSM：切到 MOVEJ
+
+**示例：**
+```python
+interface.send_waist_turning_velocity_scale(-0.2)
+```
+
+---
+
+### 腰部位姿 Action
+
+相对/绝对 topic 是“发了就走”；这组 Action 会等待规划/到位结果。
+
+#### `wait_for_waist_lifting_pose_action_server(timeout: float = 5.0) -> bool`
+
+**功能：** 等待腰部位姿 action server 就绪。
+
+**原理：**
+- 类型：Action（探测 server）
+- 名称：`config.waist_lifting_pose_action_name`（可自动检测 `/ocs2_wbc_controller/waist_lifting_pose` 或 `/body_joint_controller/waist_lifting_pose`）
+- 类型：`arms_ros2_control_msgs/action/WaistLiftingPose`
+
+#### `execute_waist_lifting_pose_action(mode, x, z, phi, *, auto_switch_fsm=True, feedback_callback=None, timeout=30.0, wait_for_server_timeout=5.0) -> Any`
+
+**功能：** 发送腰部位姿 Action goal 并等待 result。
+
+**原理：**
+- 类型：Action
+- 名称：`config.waist_lifting_pose_action_name`
+- 类型：`arms_ros2_control_msgs/action/WaistLiftingPose`
+- `mode`：`WaistLiftingPose.Goal.MODE_ABSOLUTE` 或 `MODE_RELATIVE`
+- 隐式 FSM：默认切到 MOVEJ
+- 返回 result（含 `reachable` / `success` / `planned_x/z/phi` 等）；拒绝或超时返回 `None`
+
+#### `execute_waist_lifting_pose_absolute_action(x, z, phi, ...) -> Any`
+
+**功能：** 腰部绝对位姿运动（`MODE_ABSOLUTE` 包装）。x/z/phi 为 `body_base` 下绝对目标。
+
+**原理：** 同 `execute_waist_lifting_pose_action`。
+
+#### `execute_waist_lifting_pose_relative_action(dx, dz, dphi, ...) -> Any`
+
+**功能：** 腰部相对位姿运动（`MODE_RELATIVE` 包装）。
+
+**原理：** 同 `execute_waist_lifting_pose_action`。
 
 ---
 
@@ -861,7 +1252,9 @@ interface.send_waist_lifting_pose_absolute(0.12, 0.45, 0.20)
 
 **功能：** 获取关节状态（包括身体关节）
 
-详见 [头部控制 - 获取状态](#获取状态-3) 部分，使用 `categorized_state.get('body', {})` 获取身体关节数据。
+**原理：** 同头部一节，Topic 订阅 `/joint_states`。使用 `categorized_state.get('body', {})` 取身体关节。
+
+详见 [头部控制 - 获取状态](#获取状态-3)。
 
 ---
 
@@ -870,6 +1263,11 @@ interface.send_waist_lifting_pose_absolute(0.12, 0.45, 0.20)
 #### `check_arrive(part='body', position_threshold: Optional[float] = None) -> Dict[str, Any]`
 
 **功能：** 检查身体是否到达目标位置
+
+**原理：**
+- 类型：本地计算
+- 当前值：Topic 订阅 `/joint_states` 中的 body 关节
+- 目标值：最近一次 `send_body_joint_positions()` / 协调下发缓存
 
 **参数：**
 - `part` (str): 设置为 `'body'`
@@ -891,21 +1289,47 @@ if result['arrived']:
     print("身体已到达目标位置")
 ```
 
+#### `get_body_current_target() -> Optional[List[float]]`
+
+**功能：** 获取躯干关节控制器当前目标（关节空间）。
+
+**原理：**
+- 类型：Topic 订阅（读缓存）
+- 名称：`config.body_joint_current_target_topic`（自动检测 `/body_joint_controller/current_target_joint`）
+- 消息：`std_msgs/msg/Float64MultiArray`
+
+**返回值：** `List[float]` 或 `None`（尚未收到消息时）
+
 #### `get_body_current_pose() -> Optional[Pose]`
 
-**功能：** 获取最新的 body 当前笛卡尔位姿（来自 `/body_current_pose` 等 `PoseStamped` 话题的 `.pose`）
+**功能：** 获取最新的 body 当前笛卡尔位姿。
+
+**原理：**
+- 类型：Topic 订阅（读缓存）
+- 名称：`config.body_current_pose_topic`（自动检测 `/body_current_pose`）
+- 消息：`geometry_msgs/msg/PoseStamped`（返回 `.pose`）
 
 **返回值：** `geometry_msgs.msg.Pose` 或 `None`（尚未收到消息时）
 
 #### `get_body_current_target_pose() -> Optional[Pose]`
 
-**功能：** 获取最新的 body 目标笛卡尔位姿（来自 `/body_current_target` 等 `PoseStamped` 话题的 `.pose`）
+**功能：** 获取最新的 body 目标笛卡尔位姿。
+
+**原理：**
+- 类型：Topic 订阅（读缓存）
+- 名称：`config.body_current_target_pose_topic`（自动检测 `/body_current_target`）
+- 消息：`geometry_msgs/msg/PoseStamped`（返回 `.pose`）
 
 **返回值：** `geometry_msgs.msg.Pose` 或 `None`（尚未收到消息时）
 
 #### `check_arrive(part='body_pose', arm_pose_threshold=None, arm_orient_threshold=None) -> Dict[str, Any]`
 
 **功能：** 检查 body 笛卡尔位姿是否到达目标（位置欧氏距离 + 姿态角度双阈值，与手臂一致）
+
+**原理：**
+- 类型：本地计算
+- 当前：`/body_current_pose`
+- 目标：`/body_current_target`
 
 **参数：**
 - `part` (str): 设置为 `'body_pose'`
@@ -954,6 +1378,13 @@ wait_result = interface.wait_until_arrive(
 
 **功能：** 发送 FSM（有限状态机）状态切换命令
 
+**原理：**
+- 类型：Topic 发布
+- 名称：`/fsm_command`
+- 消息：`std_msgs/msg/Int32`
+- 实际状态回读：Topic 订阅 `/fsm_state`（latched `Int32`，见 `get_fsm_state()`）
+- HOME / OCS2 / MOVEJ / COMPLIANCE 若当前不是 HOLD，会先发 HOLD 再发目标（各等 `fsm_state_switch_settle_time`）
+
 **参数：**
 - `command` (int): FSM 命令值
   - `1`: HOME 状态
@@ -963,7 +1394,6 @@ wait_result = interface.wait_until_arrive(
   - `5`: COMPLIANCE 状态（柔顺/力控；须从 HOLD 进入，接口会自动 HOLD 中转）
 
 **说明：**
-- 发布到 `/fsm_command` topic
 - 用于切换机器人的控制模式
 - 多数控制 API（笛卡尔 / 关节下发）在 `config.auto_switch_fsm_before_control=True`（默认）时会**隐式**切 FSM：位姿类 → OCS2，关节类（臂/躯干/头）→ MOVEJ；一般无需手写 `send_fsm_command`
 
@@ -982,6 +1412,25 @@ interface.send_fsm_command(4)
 interface.send_fsm_command(5)
 ```
 
+#### `auto_switch_fsm_state(target_state: int) -> bool`
+
+**功能：** 仅在当前 FSM 不是目标态时发送切换命令。
+
+**原理：**
+- 类型：本地判断 + Topic 发布 `/fsm_command`
+- 当前态来自 `/fsm_state` 缓存
+- 合法目标：`1=HOME, 2=HOLD, 3=OCS2, 4=MOVEJ`（不含 COMPLIANCE）
+- 返回：确实发了切换命令为 `True`，已在目标态为 `False`
+
+#### `auto_switch_fsm_for_control(control_type: str) -> bool`
+
+**功能：** 按控制类别自动切 FSM。多数发送 API 内部会调用。
+
+**原理：**
+- 类型：本地路由 + `/fsm_command`
+- `arm_pose` → OCS2；`arm_joint` / `body_joint` / `head_joint` → MOVEJ；`other` 不切
+- `config.auto_switch_fsm_before_control=False` 时直接返回 `False`
+
 ---
 
 ### 六维力与 COMPLIANCE 力控
@@ -994,7 +1443,13 @@ interface.send_fsm_command(5)
 
 #### `get_original_wrench(side: str) -> dict`
 
-**功能：** 返回指定侧原始 `WrenchStamped`（`/…/wrench`）缓存的浅拷贝。
+**功能：** 返回指定侧原始 `WrenchStamped` 缓存的浅拷贝。
+
+**原理：**
+- 类型：Topic 订阅（读缓存）
+- 名称：`config.left_ft_wrench_topic` / `config.right_ft_wrench_topic`
+  - 默认探测 `/left_ft_broadcaster/wrench`、`/right_ft_broadcaster/wrench`
+- 消息：`geometry_msgs/msg/WrenchStamped`（QoS：SensorData / BEST_EFFORT）
 
 **参数：**
 - `side`: `"left"` / `"right"`
@@ -1013,23 +1468,45 @@ interface.send_fsm_command(5)
 
 #### `get_filtered_wrench(side: str) -> dict`
 
-**功能：** 返回指定侧滤波后 `WrenchStamped`（`/…/wrench_filtered`，通常仅在 COMPLIANCE 下有数据）缓存的浅拷贝。返回值结构与 `get_original_wrench` 相同。
+**功能：** 返回指定侧滤波后 wrench 缓存的浅拷贝。返回值结构与 `get_original_wrench` 相同。
+
+**原理：**
+- 类型：Topic 订阅（读缓存）
+- 名称：`config.left_ft_wrench_filtered_topic` / `config.right_ft_wrench_filtered_topic`
+  - 通常为 `/left_ft_broadcaster/wrench_filtered`、`/right_ft_broadcaster/wrench_filtered`
+- 消息：`geometry_msgs/msg/WrenchStamped`；通常仅 COMPLIANCE 期间有数据
 
 **异常：** 同 `get_original_wrench`。
 
 #### `call_compliance_zero_wrench(timeout_sec: float = 5.0) -> None`
 
-**功能：** 调用 `/compliance_zero_wrench`（`std_srvs/Trigger`）发起零力校准。**只请求，不等待校准完成**；结束请自行观察 `/compliance_force_status.zero_cal_done`。服务通常仅在进入 COMPLIANCE 后可用。
+**功能：** 发起零力校准。**只请求，不等待校准完成**；结束请自行观察 `/compliance_force_status.zero_cal_done`。
+
+**原理：**
+- 类型：Service
+- 名称：`/compliance_zero_wrench`
+- 类型：`std_srvs/srv/Trigger`
+- 服务通常仅在进入 COMPLIANCE 后可用
 
 **异常：** 未连接 → `ROS2NotConnectedError`；client 未初始化 / 服务不可用 / 超时 / `success=False` → `ROS2InterfaceError`。
 
 #### `enter_compliance() -> None`
 
-**功能：** 进入 COMPLIANCE FSM（内部 `send_fsm_command(FSM_COMPLIANCE)`，自动 HOLD 中转）。不等待零力校准。
+**功能：** 进入 COMPLIANCE FSM。不等待零力校准。
+
+**原理：**
+- 类型：Topic 发布（内部 `send_fsm_command(FSM_COMPLIANCE)`）
+- 名称：`/fsm_command`（会先 HOLD 中转）
 
 #### `set_compliance_force(task_selection, force_setpoint, force_xmax_lin=None, force_xmax_ang=None) -> None`
 
-**功能：** 向 `arm_controller`（通常 `/ocs2_arm_controller`）写入完整 6 维 `compliance_task_selection` 与 `compliance_force_setpoint`；可选写入 `compliance_hybrid_force_xmax_lin` / `compliance_hybrid_force_xmax_ang`。
+**功能：** 向臂控制器写入完整 6 维力控选择与力目标。
+
+**原理：**
+- 类型：参数服务（不是 topic）
+- 节点：`interface.arm_controller`（通常 `/ocs2_arm_controller`）
+- 服务：`{node}/set_parameters`（`rcl_interfaces/srv/SetParameters`）
+- 参数名：`compliance_task_selection`、`compliance_force_setpoint`；可选 `compliance_hybrid_force_xmax_lin` / `compliance_hybrid_force_xmax_ang`
 
 **参数：**
 - `task_selection`: 长度 6；`1.0` = 该轴力控，`0.0` = 位置控
@@ -1073,28 +1550,29 @@ interface.disconnect()
 
 ### FSM状态查询
 
-#### `get_fsm_command() -> int`
+没有名为 `get_fsm_command()` 的公开方法。当前命令/状态都以 `/fsm_state` 为准。
 
-**功能：** 获取当前 FSM 命令值。
+#### `get_fsm_state() -> int`
+
+**功能：** 获取当前 FSM 状态码。
+
+**原理：**
+- 类型：Topic 订阅（读缓存）
+- 名称：`/fsm_state`（latched / TRANSIENT_LOCAL）
+- 消息：`std_msgs/msg/Int32`
 
 **返回值：**
 - `1`: HOME
 - `2`: HOLD
 - `3`: OCS2
 - `4`: MOVEJ
-
-#### `get_fsm_state() -> str`
-
-**功能：** 获取当前 FSM 状态名。
-
-**返回值：**
-- `"HOME"` / `"HOLD"` / `"OCS2"` / `"MOVEJ"`
+- `5`: COMPLIANCE
+- 尚未收到消息时为内部默认值（实现里初始化为 `FSM_HOLD`）
 
 **示例：**
 ```python
-cmd = interface.get_fsm_command()
 state = interface.get_fsm_state()
-print(f"FSM command={cmd}, state={state}")
+print(f"FSM state={state}")
 ```
 
 ---
@@ -1115,16 +1593,28 @@ print(f"FSM command={cmd}, state={state}")
 
 **功能：** 向 `/mode_command` 发布模式字符串。
 
+**原理：**
+- 类型：Topic 发布
+- 名称：`/mode_command`
+- 消息：`std_msgs/msg/String`
+- publish 后盲等 `MODE_SWITCH_SETTLE_TIME_SEC`（默认 `0.1s`），**不**轮询 `current_state`
+
 **说明：**
-- publish 后盲等 `MODE_SWITCH_SETTLE_TIME_SEC`（默认 `0.1s`），**不**轮询 `current_state`。
 - 需要确认生效时，请在发完命令后调用下方 `wait_until_mode_commands_applied`。
 - 常见前提：FSM 已在 OCS2，否则控制器可能忽略 mode。
 
 #### `mode_command_matches_wbc_state(command: str) -> bool | None`
 
+**原理：** 包装 `mode_commands_match_wbc_state([command])`。见下条。
+
 #### `mode_commands_match_wbc_state(commands: list[str] \| tuple[str, ...]) -> bool | None`
 
 **功能：** 对照最新 `wbc_state` 判断一条 / 一组 mode 是否已生效。
+
+**原理：**
+- 类型：本地比较（读 Topic 订阅缓存）
+- 名称：`/ocs2_wbc_controller/current_state`
+- 消息：`arms_ros2_control_msgs/msg/WbcCurrentState`
 
 **返回值：**
 - `True` / `False`：可判定且全部匹配 / 未匹配
@@ -1134,9 +1624,15 @@ print(f"FSM command={cmd}, state={state}")
 
 #### `wait_until_mode_command_applied(command, *, timeout=5.0, ...) -> bool`
 
+**原理：** 包装 `wait_until_mode_commands_applied([command], ...)`。见下条。
+
 #### `wait_until_mode_commands_applied(commands, *, timeout=5.0, poll_period=0.05, time_now_fn=None, sleep_fn=None) -> bool`
 
 **功能：** 轮询 `current_state`，直到一组 mode 的期望字段**同时**满足（或超时）。
+
+**原理：**
+- 类型：本地轮询
+- 依赖订阅：`/ocs2_wbc_controller/current_state`
 
 **返回值：** 成功 `True`；超时 `False`；全部无映射则跳过等待返回 `True`。
 
@@ -1157,6 +1653,13 @@ ok = interface.wait_until_mode_commands_applied(
 #### `send_coordinated_joint_positions(body_positions=None, left_arm_positions=None, right_arm_positions=None, head_positions=None, *, auto_switch_fsm=True) -> None`
 
 **功能：** 一次性下发关节空间目标（MoveJ 语义），在 WBC 合成与分体栈之间自动选路。
+
+**原理：**
+- 类型：本地路由到已有 Topic 发布（本身不是单独一条 ROS 接口）
+- WBC：发布 `unified_arm_joint_controller_topic`（经 `send_dual_arm_joint_positions`）；缺某一臂时从 `/joint_states` hold
+- 非 WBC 但有统一臂 topic：双臂走统一 topic；躯干可再走 split body topic
+- 其它：回退到左右臂 handler 的分臂 topic / `send_body_joint_positions` / `send_head_joint_positions`
+- 隐式 FSM：默认切到 MOVEJ
 
 **参数：**
 - `body_positions` / `left_arm_positions` / `right_arm_positions` / `head_positions`：至少一组非空
@@ -1183,6 +1686,11 @@ interface.send_coordinated_joint_positions(
 #### `get_joint_state(categorized: bool = False) -> Dict[str, Any] | None`
 
 **功能：** 获取所有关节状态
+
+**原理：**
+- 类型：Topic 订阅（读缓存）
+- 名称：`config.joint_states_topic`（默认 `/joint_states`）
+- 消息：`sensor_msgs/msg/JointState`
 
 **参数：**
 - `categorized` (bool): 是否返回分类后的状态，默认 False
@@ -1245,13 +1753,22 @@ if categorized_state:
 
 **功能：** 发送左手（灵巧手）关节位置命令。
 
+**原理：**
+- 类型：Topic 发布
+- 名称：`config.left_hand_joint_controller_topic`（自动检测 `/left_hand_controller/target_joint_position`）
+- 消息：`std_msgs/msg/Float64MultiArray`
+
 **说明：**
-- 发布到 `left_hand_joint_controller_topic`（自动检测或手动配置）
 - 适用于需要独立控制灵巧手每个关节的位置场景
 
 #### `send_right_hand_joint_positions(positions: List[float]) -> None`
 
 **功能：** 发送右手（灵巧手）关节位置命令（双臂模式）。
+
+**原理：**
+- 类型：Topic 发布
+- 名称：`config.right_hand_joint_controller_topic`（自动检测 `/right_hand_controller/target_joint_position`）
+- 消息：`std_msgs/msg/Float64MultiArray`
 
 **示例：**
 ```python
@@ -1267,6 +1784,8 @@ interface.send_right_hand_joint_positions([0.0, 0.3, 0.5, 0.2, 0.1, 0.0])
 #### `interface.left_arm_handler.get_pose() -> Optional[Pose]`
 
 **功能：** 获取左臂末端执行器的当前位姿。
+
+**原理：** 见手臂一节 `get_pose()`：Topic 订阅 `/left_current_pose`，`geometry_msgs/PoseStamped`。
 
 **返回值：**
 - `Pose` 对象：左臂末端执行器的当前位置和姿态（在 `base_frame` 坐标系下）
@@ -1292,6 +1811,8 @@ else:
 
 **功能：** 获取右臂末端执行器的当前位姿（双臂模式）。
 
+**原理：** Topic 订阅 `/right_current_pose`，`geometry_msgs/PoseStamped`。
+
 **返回值：**
 - `Pose` 对象：右臂末端执行器的当前位置和姿态（在 `base_frame` 坐标系下）
 - `None`：如果位姿不可用
@@ -1315,6 +1836,10 @@ else:
 #### `get_last_joint_state_time() -> Optional[float]`
 
 **功能：** 获取最后一次接收到关节状态消息的时间戳
+
+**原理：**
+- 类型：本地时间戳（收到 `/joint_states` 回调时记录 `time.time()`）
+- 不是消息 `header.stamp`
 
 **返回值：**
 - `float`：时间戳（秒，系统时间）
@@ -1344,7 +1869,13 @@ else:
 
 #### `send_target_path(left_poses, right_poses, frame_id: Optional[str] = None) -> None`
 
-**功能：** 通过 topic 发送双臂路径（`nav_msgs/Path`）。
+**功能：** 通过 topic 发送双臂路径。**已弃用**，新代码请用 `execute_path` / `execute_left_path` / `execute_right_path`。
+
+**原理：**
+- 类型：Topic 发布
+- 名称：`/target_path`
+- 消息：`nav_msgs/msg/Path`
+- 隐式 FSM：切到 OCS2
 
 **说明：**
 - 要求双臂模式
@@ -1352,12 +1883,20 @@ else:
 - 可传入 `Pose` 或 `PoseStamped`
 - 会清空旧 target 缓存，避免到达判断误判
 
-#### `execute_path(left_poses, right_poses, trajectory_duration: float = 0.0, frame_id: Optional[str] = None) -> bool`
+#### `execute_path(left_poses, right_poses, trajectory_duration: float = 0.0, frame_id: Optional[str] = "arm_base") -> bool`
 
-**功能：** 通过 `ExecutePath` service 执行双臂路径并等待服务响应。
+**功能：** 通过 ExecutePath service 执行双臂路径并等待服务响应。
+
+**原理：**
+- 类型：Service
+- 名称：`execute_path`
+- 类型：`arms_ros2_control_msgs/srv/ExecutePath`
+- 空列表表示该臂不更新（控制器保持原参考轨迹）
+- 隐式 FSM：切到 OCS2
 
 **说明：**
 - 不要求左右轨迹点数量一致（支持不等长路径）
+- 仅双臂模式可用（需要右臂 target topic 与 client）
 
 **返回值：**
 - `bool`: 服务返回的执行成功标志
@@ -1394,9 +1933,29 @@ ok = interface.execute_path(
 print(f"execute_path success: {ok}")
 ```
 
+#### `execute_left_path(left_poses, trajectory_duration: float = 0.0, frame_id: Optional[str] = "arm_base") -> bool`
+
+**功能：** 只更新左臂笛卡尔路径，右臂保持当前参考。
+
+**原理：** 包装 `execute_path(..., right_poses=[])`，同一 Service `execute_path`。
+
+#### `execute_right_path(right_poses, trajectory_duration: float = 0.0, frame_id: Optional[str] = "arm_base") -> bool`
+
+**功能：** 只更新右臂笛卡尔路径，左臂保持当前参考。
+
+**原理：** 包装 `execute_path(..., left_poses=[])`，同一 Service `execute_path`。
+
 #### `send_joint_trajectory(joint_names: List[str], waypoints: List[List[float]], trajectory_duration: float | None = None) -> None`
 
-**功能：** 发送多路点关节轨迹（`JointTrajectory`），支持单臂/双臂统一接口。
+**功能：** 发送多路点关节轨迹，支持单臂/双臂统一接口。
+
+**原理：**
+- 类型：Topic 发布；可选参数服务
+- 名称：`/{controller_name}/target_joint_trajectory`（`controller_name` 从左/右臂关节 topic 第一段解析，如 `/ocs2_wbc_controller/target_joint_trajectory`）
+- 消息：`trajectory_msgs/msg/JointTrajectory`
+- `trajectory_duration` 若给定：对 `arm_controller` 调用 `SetParameters` 写 `movej_trajectory_duration`
+- 隐式 FSM：切到 MOVEJ
+- 需要等待结果时请用 `execute_joint_trajectory_action`
 
 **参数：**
 - `trajectory_duration`：可选，整条轨迹总时长（秒）。若指定，会在发布前将臂控制器节点参数 `movej_trajectory_duration` 设为该值（与 ros2-viser 控制器配置一致）；`None` 则沿用控制器当前参数。
@@ -1419,6 +1978,13 @@ interface.send_joint_trajectory(joint_names, waypoints, trajectory_duration=5.0)
 #### `check_arrive(part: Optional[str] = None, position_threshold: Optional[float] = None) -> Optional[Dict[str, Any]]`
 
 **功能：** 统一检查多个部分的到达状态
+
+**原理：**
+- 类型：本地计算（按 `part` 读不同缓存）
+- `left_arm` / `right_arm`：`/left_current_pose` vs `/left_current_target`（及右臂对应话题）
+- `left_gripper` / `right_gripper`：`/joint_states` + handler 内部目标
+- `head` / `body`：`/joint_states` + 最近一次关节下发缓存
+- `body_pose`：`/body_current_pose` vs `/body_current_target`
 
 **参数：**
 - `part` (Optional[str]): 要检查的部分，可选值：
@@ -1514,6 +2080,10 @@ gripper_result = interface.left_gripper_handler.check_arrival(current_position, 
 
 **功能：** 轮询 `check_arrive()` 并在超时前等待指定部分到达目标，替代固定 `sleep`。
 
+**原理：**
+- 类型：本地轮询（不额外发 ROS 命令）
+- 底层数据源与 `check_arrive(part=...)` 相同
+
 **返回值：**
 ```python
 {
@@ -1537,6 +2107,11 @@ if not wait_result["arrived"]:
 #### `wait_until_joint_arrive(*, left_target_positions=None, right_target_positions=None, body_target_positions=None, left_check_indices=None, right_check_indices=None, body_check_indices=None, timeout=3.0, poll_period=0.05, joint_tolerance=0.03, angular_wrap=True, ...) -> Dict[str, Any]`
 
 **功能：** 按关节角目标等待到达（适合 MoveJ / `send_coordinated_joint_positions` 后）。
+
+**原理：**
+- 类型：本地轮询
+- 当前值：Topic 订阅 `/joint_states`
+- 目标值：调用方传入的列表，不读控制器 current_target 话题
 
 **参数：**
 - `*_target_positions`：各组目标角；至少一组非空
@@ -1577,6 +2152,10 @@ result = interface.wait_until_joint_arrive(
 
 **功能：** 查询两个坐标系之间的变换关系
 
+**原理：**
+- 类型：TF2（`tf2_ros.Buffer` / `TransformListener`）
+- 底层话题：`/tf`、`/tf_static`（不是自定义控制 topic）
+
 **参数：**
 - `target_frame` (str): 参考坐标系（在这个坐标系下观察）
 - `source_frame` (str): 被查询的坐标系（要查询它的位置）
@@ -1603,6 +2182,9 @@ if transform:
 #### `transform_pose(pose: Pose, source_frame: str, target_frame: str, timeout: Optional[float] = None) -> Optional[Pose]`
 
 **功能：** 将坐标从一个坐标系转换到另一个坐标系
+
+**原理：**
+- 类型：TF2（`lookup_transform` + `tf2_geometry_msgs.do_transform_pose`）
 
 **参数：**
 - `pose` (Pose): 要转换的 Pose（在 `source_frame` 坐标系下）
@@ -1642,6 +2224,9 @@ if pose_in_base:
 
 **功能：** 查询当前运行的 ROS 2 节点列表
 
+**原理：**
+- 类型：ROS 图查询（`rclpy` `get_node_names_and_namespaces`），不是 topic / action / service
+
 **说明：**
 - 此方法可以在连接或未连接状态下使用
 - 如果接口已连接，会使用现有节点进行查询
@@ -1672,23 +2257,73 @@ if matching_nodes:
 
 ---
 
+### 控制器节点名
+
+#### `body_controller` (`property`) -> `str`
+
+**功能：** 躯干/腰关节控制器节点全名，供 `set_node_parameters` 等使用。
+
+**原理：**
+- 类型：从 topic 名解析节点名（不发 ROS 消息）
+- split：由 `body_joint_controller_topic` 推断，如 `/body_joint_controller`
+- WBC 无独立 body topic 时回退到 `arm_controller`
+
+#### `arm_controller` (`property`) -> `str`
+
+**功能：** 双臂/统一臂控制器节点全名。
+
+**原理：**
+- 类型：从 `unified_arm_joint_controller_topic` 或 `left_arm_joint_controller_topic` 解析
+- 典型值：`/ocs2_wbc_controller` 或 `/ocs2_arm_controller`
+
+---
+
+### 笛卡尔速度
+
+#### `send_cartesian_velocity(linear, angular) -> None`
+
+**功能：** 预留的笛卡尔速度接口。
+
+**原理：**
+- **未实现**。调用只打 `logger.warning("Cartesian velocity control not implemented yet")`，不发布任何 topic。
+- `config.max_linear_velocity` / `max_angular_velocity` 目前也未使用。
+
+---
+
 ### 机器人描述与参数查询
 
 #### `get_robot_description() -> Optional[str]`
 
 **功能：** 获取最近一次接收到的 `robot_description`（URDF XML 字符串）。
 
+**原理：**
+- 类型：Topic 订阅（读缓存）
+- 名称：`/robot_description`（latched / TRANSIENT_LOCAL）
+- 消息：`std_msgs/msg/String`
+
 #### `has_robot_description() -> bool`
 
 **功能：** 判断是否已接收到 `robot_description`。
+
+**原理：** 本地标志，依赖上述 `/robot_description` 订阅。
 
 #### `list_node_parameters(full_node_name: str) -> List[Dict[str, Any]]`
 
 **功能：** 查询指定节点的可动态参数及其信息。
 
+**原理：**
+- 类型：参数服务
+- 名称：`{full_node_name}/list_parameters`、`describe_parameters`、`get_parameters`
+- 类型：`rcl_interfaces/srv/ListParameters` 等
+
 #### `set_node_parameters(full_node_name: str, parameters: Dict[str, Any]) -> bool`
 
 **功能：** 批量设置指定节点参数。
+
+**原理：**
+- 类型：参数服务
+- 名称：`{full_node_name}/set_parameters`
+- 类型：`rcl_interfaces/srv/SetParameters`
 
 **示例：**
 ```python
@@ -1715,6 +2350,11 @@ print(f"参数设置结果: {ok}")
 - `FSM_MOVEJ = 4`
 - `FSM_COMPLIANCE = 5`
 
+关节分组判断（用于 `get_joint_state(categorized=True)`）：
+
+- `is_body_joint_name(name)`：名称含 `body`、`leg_` 前缀、`lift_joint` / `*_lift_joint`
+- `is_head_joint_name(name)`：名称含 `head`
+
 ```python
 from ros2_robot_interface import FSM_HOME, FSM_OCS2, FSM_COMPLIANCE
 interface.send_fsm_command(FSM_OCS2)
@@ -1726,12 +2366,13 @@ interface.send_fsm_command(FSM_OCS2)
 
 | 部分 | Handler 访问 | 发送命令 | 获取状态 | 检查到达 |
 |------|-------------|---------|---------|---------|
-| **左臂** | `left_arm_handler` | `send_target_stamped()` ⭐<br>`send_target()`<br>`send_joint_positions()` | `get_pose()` ⭐<br>`get_target_pose()` | `check_arrival()` ⭐ |
-| **右臂** | `right_arm_handler` | `send_target_stamped()` ⭐<br>`send_target()`<br>`send_joint_positions()` | `get_pose()` ⭐<br>`get_target_pose()` | `check_arrival()` ⭐ |
+| **左臂** | `left_arm_handler` | `send_target_stamped()` ⭐<br>`send_relative()`<br>`send_target()`<br>`send_joint_positions()`<br>`execute_movel_action()` | `get_pose()` ⭐<br>`get_target_pose()` | `check_arrival()` ⭐ |
+| **右臂** | `right_arm_handler` | 同上 | 同上 | 同上 |
+| **双臂** | 直接方法 | `send_dual_arm_target_stamped()`<br>`send_dual_arm_joint_positions()`<br>`execute_path()` | — | `check_arrive()` |
 | **左夹爪** | `left_gripper_handler` | `send_target_command()` ⭐<br>`send_joint_positions()` | `get_target_position()` | `check_arrival()` |
 | **右夹爪** | `right_gripper_handler` | `send_target_command()` ⭐<br>`send_joint_positions()` | `get_target_position()` | `check_arrival()` |
 | **头部** | 直接方法 | `send_head_joint_positions()` | `get_joint_state()` | `check_arrive('head')` |
-| **身体** | 直接方法 | `send_body_joint_positions()` | `get_joint_state()` | `check_arrive('body')` |
+| **身体** | 直接方法 | `send_body_joint_positions()`<br>`send_body_relative()`<br>`send_waist_lifting_pose_*()`<br>`execute_waist_lifting_pose_*_action()` | `get_joint_state()`<br>`get_body_current_pose()` | `check_arrive('body')`<br>`check_arrive('body_pose')` |
 
 ---
 
@@ -1790,10 +2431,14 @@ interface.send_fsm_command(FSM_OCS2)
 
 | 函数 | 说明 |
 |------|------|
+| `euler_rpy_to_quat_wxyz(roll, pitch, yaw)` | ZYX 欧拉角 → `(w, x, y, z)` |
+| `euler_rpy_to_quat_xyzw(roll, pitch, yaw)` | 同上，输出 `(x, y, z, w)` |
 | `quat_multiply(q1, q2)` | 四元数乘积 |
 | `quat_conjugate(q)` | 共轭 |
 | `quat_normalize(q)` | 单位化（近零时回退为 `(0,0,0,1)`） |
+| `rotate_vector_by_quat(vec, quat_xyzw)` | 用 `quat` 旋转三维向量 |
 | `rotate_vector_by_quat_inverse(vec, quat_xyzw)` | 用 `quat` 的逆旋转三维向量 |
 | `pose_from_tuple(position, orientation_xyzw)` | 元组 → `geometry_msgs.msg.Pose` |
+| `check_pose_arrival(...)` | 笛卡尔到位判定（手臂 / body_pose 共用） |
 
 与 LeRobot 扁平 action/观测键相关的 `action_from_pose` / `obs_to_pose` 仍见 **`lerobot_robot_ros2.utils.pose_utils`**。
