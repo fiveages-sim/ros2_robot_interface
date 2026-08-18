@@ -121,6 +121,40 @@ interface.left_arm_handler.send_target_stamped(relative_pose)
 ---
 
 
+#### `send_relative(dx, dy, dz, droll=0.0, dpitch=0.0, dyaw=0.0, frame_id="") -> None`
+
+**功能：** 发送一次笛卡尔相对位移，叠到当前指令目标上并走 MoveL。
+
+**原理：**
+- 类型：Topic 发布
+- 名称：`{end_effector_target_topic}/relative`，即 `/left_target/relative` 或 `/right_target/relative`
+- 消息：`geometry_msgs/msg/TwistStamped`
+- 到位依赖：控制器回写 `/left_current_target` 或 `/right_current_target`
+- 隐式 FSM：切到 OCS2（经 `/fsm_command`）
+
+**参数：**
+- `dx` / `dy` / `dz` (`float`): 平移增量，单位米，表达在 `frame_id` 下
+- `droll` / `dpitch` / `dyaw` (`float`): 姿态增量，单位弧度，对应 roll / pitch / yaw
+- `frame_id` (`str`): 增量坐标系；默认空字符串，控制器按内部 `base_frame` 处理
+
+**说明：**
+- **不是**该坐标系下的绝对位姿。`dx=0.05` 表示沿该轴再偏 5 cm，不会把末端送到 `(0.05, 0, 0)`
+- `header.stamp` 由接口填写，控制器不用于 TF 查询
+- 发布前会清空 `latest_target_pose`，避免到位误判
+- 未创建 publisher 时抛 `ROS2NotConnectedError`
+
+**示例：**
+```python
+# 沿控制器 base_frame 的 X 正向偏移 3 cm
+interface.left_arm_handler.send_relative(0.03, 0.0, 0.0)
+
+# 沿末端 X 伸出 3 cm
+interface.left_arm_handler.send_relative(0.03, 0.0, 0.0, frame_id="left_eef")
+```
+
+---
+
+
 https://github.com/user-attachments/assets/b80e994e-e374-4580-b947-769c8c169ba2
 
 
@@ -1044,6 +1078,29 @@ result = interface.check_arrive('head', position_threshold=0.01)
 # 发送身体关节位置（例如：4个关节）
 body_positions = [0.0, 0.0, 0.0, 0.0]  # 弧度
 interface.send_body_joint_positions(body_positions)
+```
+
+#### `send_body_relative(dx, dy, dz, droll=0.0, dpitch=0.0, dyaw=0.0, frame_id="") -> None`
+
+**功能：** 发送身体一次笛卡尔相对位移，叠到当前身体指令目标上并走 MoveL。
+
+**原理：**
+- 类型：Topic 发布
+- 名称：`config.body_target_relative_topic`（自动检测 `/body_target/relative`）
+- 消息：`geometry_msgs/msg/TwistStamped`
+- 隐式 FSM：切到 OCS2；再经 `/mode_command` 切到 `BODY_TRACKING`（已是该模式则不重复发）
+- 到位依赖：`/body_current_target`
+
+**参数：** 与 `ArmHandler.send_relative` 相同（米 / 弧度 RPY；`frame_id` 默认空）
+
+**说明：**
+- 同样是一次增量，不是绝对位姿
+- 仅 WBC 图上通常才有该 topic；未检测到时 `logger.warning` 后返回，不抛异常
+- 发布前清空 `body_current_target_pose`
+
+**示例：**
+```python
+interface.send_body_relative(0.03, 0.0, 0.0)
 ```
 
 #### `send_waist_lifting_relative_position(position: float) -> None`
@@ -2309,13 +2366,13 @@ interface.send_fsm_command(FSM_OCS2)
 
 | 部分 | Handler 访问 | 发送命令 | 获取状态 | 检查到达 |
 |------|-------------|---------|---------|---------|
-| **左臂** | `left_arm_handler` | `send_target_stamped()` ⭐<br>`send_target()`<br>`send_joint_positions()`<br>`execute_movel_action()` | `get_pose()` ⭐<br>`get_target_pose()` | `check_arrival()` ⭐ |
+| **左臂** | `left_arm_handler` | `send_target_stamped()` ⭐<br>`send_relative()`<br>`send_target()`<br>`send_joint_positions()`<br>`execute_movel_action()` | `get_pose()` ⭐<br>`get_target_pose()` | `check_arrival()` ⭐ |
 | **右臂** | `right_arm_handler` | 同上 | 同上 | 同上 |
 | **双臂** | 直接方法 | `send_dual_arm_target_stamped()`<br>`send_dual_arm_joint_positions()`<br>`execute_path()` | — | `check_arrive()` |
 | **左夹爪** | `left_gripper_handler` | `send_target_command()` ⭐<br>`send_joint_positions()` | `get_target_position()` | `check_arrival()` |
 | **右夹爪** | `right_gripper_handler` | `send_target_command()` ⭐<br>`send_joint_positions()` | `get_target_position()` | `check_arrival()` |
 | **头部** | 直接方法 | `send_head_joint_positions()` | `get_joint_state()` | `check_arrive('head')` |
-| **身体** | 直接方法 | `send_body_joint_positions()`<br>`send_waist_lifting_pose_*()`<br>`execute_waist_lifting_pose_*_action()` | `get_joint_state()`<br>`get_body_current_pose()` | `check_arrive('body')`<br>`check_arrive('body_pose')` |
+| **身体** | 直接方法 | `send_body_joint_positions()`<br>`send_body_relative()`<br>`send_waist_lifting_pose_*()`<br>`execute_waist_lifting_pose_*_action()` | `get_joint_state()`<br>`get_body_current_pose()` | `check_arrive('body')`<br>`check_arrive('body_pose')` |
 
 ---
 

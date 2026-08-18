@@ -15,7 +15,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import rclpy
 from action_msgs.msg import GoalStatus
-from geometry_msgs.msg import Point, Pose, PoseStamped, Quaternion, TransformStamped, Twist, Vector3, WrenchStamped
+from geometry_msgs.msg import Point, Pose, PoseStamped, Quaternion, TransformStamped, Twist, TwistStamped, Vector3, WrenchStamped
 from nav_msgs.msg import Path
 from rclpy.action import ActionClient
 from rclpy.duration import Duration
@@ -122,6 +122,7 @@ class ROS2RobotInterface:
         self.movec_action_client: ActionClient | None = None
         self.waist_lifting_pose_action_client: ActionClient | None = None
         self.dual_target_stamped_pub: Publisher | None = None
+        self.body_target_relative_pub: Publisher | None = None
         self.fsm_command_pub: Publisher | None = None
         self.mode_command_pub: Publisher | None = None
         self.head_joint_controller_pub: Publisher | None = None
@@ -385,6 +386,10 @@ class ROS2RobotInterface:
             self.config.body_current_target_pose_topic = "/body_current_target"
             logger.info("Detected body current target pose topic: /body_current_target")
 
+        if self.config.body_target_relative_topic is None and "/body_target/relative" in topic_names:
+            self.config.body_target_relative_topic = "/body_target/relative"
+            logger.info("Detected body target relative topic: /body_target/relative")
+
         if "/body_joint_controller/waist_lifting" in topic_names:
             self.config.waist_lifting_topic = "/body_joint_controller/waist_lifting"
         elif "/ocs2_wbc_controller/waist_lifting" in topic_names:
@@ -615,6 +620,12 @@ class ROS2RobotInterface:
                     10
                 )
                 logger.info("✅ Subscribed to {} for body target pose tracking".format(self.config.body_current_target_pose_topic))
+
+            if self.config.body_target_relative_topic:
+                self.body_target_relative_pub = self.robot_node.create_publisher(
+                    TwistStamped, self.config.body_target_relative_topic, 10
+                )
+                logger.info(f"Created body target relative publisher: {self.config.body_target_relative_topic}")
 
             if self.config.joint_trajectory_action_name:
                 self.joint_trajectory_action_client = ActionClient(
@@ -2443,6 +2454,57 @@ class ROS2RobotInterface:
         
         self.body_target_positions = positions.copy() if positions else None
 
+    def send_body_relative(
+        self,
+        dx: float,
+        dy: float,
+        dz: float,
+        droll: float = 0.0,
+        dpitch: float = 0.0,
+        dyaw: float = 0.0,
+        frame_id: str = "",
+    ) -> None:
+        """发送身体一次笛卡尔相对位移（米 / 弧度 RPY）并走 MoveL。
+
+        Args:
+            dx: 平移增量 X（米），表达在 ``frame_id`` 下。
+            dy: 平移增量 Y（米）。
+            dz: 平移增量 Z（米）。
+            droll: 滚转增量（弧度）。
+            dpitch: 俯仰增量（弧度）。
+            dyaw: 偏航增量（弧度）。
+            frame_id: 增量坐标系；空字符串表示控制器内部 base_frame。
+        """
+        if not self.is_connected:
+            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+
+        if self.body_target_relative_pub is None:
+            logger.warning(
+                "Body target relative publisher not initialized. "
+                "Set body_target_relative_topic in config."
+            )
+            return
+
+        self.auto_switch_fsm_for_control("arm_pose")
+        self._switch_body_mode_if_needed("BODY_TRACKING")
+
+        self.body_current_target_pose = None
+
+        msg = TwistStamped()
+        msg.header.frame_id = frame_id
+        msg.header.stamp = self.robot_node.get_clock().now().to_msg()
+        msg.twist.linear.x = float(dx)
+        msg.twist.linear.y = float(dy)
+        msg.twist.linear.z = float(dz)
+        msg.twist.angular.x = float(droll)
+        msg.twist.angular.y = float(dpitch)
+        msg.twist.angular.z = float(dyaw)
+        self.body_target_relative_pub.publish(msg)
+        logger.debug(
+            f"Published body relative in frame '{frame_id}': "
+            f"linear=({dx}, {dy}, {dz}) angular=({droll}, {dpitch}, {dyaw})"
+        )
+
     def send_waist_lifting_relative_position(self, position: float) -> None:
         """Send target relative position for waist lifting."""
         if not self.is_connected:
@@ -4080,6 +4142,10 @@ class ROS2RobotInterface:
         if self.body_current_target_pose_sub:
             self.body_current_target_pose_sub.destroy()
             self.body_current_target_pose_sub = None
+
+        if self.body_target_relative_pub:
+            self.body_target_relative_pub.destroy()
+            self.body_target_relative_pub = None
 
         self.body_current_pose = None
         self.body_current_target_pose = None
