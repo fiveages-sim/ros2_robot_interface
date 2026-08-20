@@ -30,6 +30,15 @@ get_hand_tactile() 行为:
     因此能看出频率的长期趋势和周期性掉帧，这是反复重跑单次模式做不到的。
     频率为 0.00 时标 STALE：距最后一帧已超过 handler 的 RATE_STALE_SEC。
 
+--dump SIDE:FINGER 数据核对:
+    额外打印该手指的完整消息内容：layout 的 size / stride、扁平的 data、
+    以及按行优先还原的矩阵。裸写 --dump 等价于 --dump left:thumb。
+    配合 --watch 则每个 tick 打印一次；不配合就只打印一次。
+    用途是确认 get_hand_tactile() 返回的内容与话题上的完全一致 ——
+    把 data 那一行与下面命令的 data 字段对照即可：
+        ros2 topic echo /<model>_hand/<side>/tactile/<finger> --once
+    两者应逐值相同（同一时刻的同一帧；若期间有新帧到达则各自是各自的最新帧）。
+
 成功判据:
     - finger="all" 与逐指读取至少一条路径拿到数据。
     - 每根手指的 rows * cols 等于 len(data)。
@@ -55,8 +64,15 @@ get_hand_tactile() 行为:
     # 持续监视频率，Ctrl-C 结束
     .venv/bin/python examples/test/14_hand_tactile/check_get_hand_tactile.py --watch
 
+    # 每秒打印左手大拇指的完整数据（用于和话题内容逐值核对）
+    .venv/bin/python examples/test/14_hand_tactile/check_get_hand_tactile.py --watch --dump
+
+    # 换成右手食指
+    .venv/bin/python examples/test/14_hand_tactile/check_get_hand_tactile.py --watch --dump right:index
+
     # 对照（另开终端）
     ros2 topic hz /o7_hand/left/tactile/thumb
+    ros2 topic echo /o7_hand/left/tactile/thumb --once
 
 安全说明:
     只读，不发送任何运动指令。
@@ -77,6 +93,7 @@ WAIT_SEC = 5.0             # 等待首帧的最长秒数
 POLL_SEC = 0.1             # 轮询间隔（秒）
 SETTLE_SEC = 2.5           # 首帧后静置多久再读频率（20 Hz 下约攒 50 个间隔样本）
 WATCH_INTERVAL_SEC = 1.0   # --watch 的打印间隔；与 ros2 topic hz 的 1 秒闸一致
+DEFAULT_DUMP_TARGET = "left:thumb"   # 裸写 --dump 时的默认目标
 
 
 def cleanup(interface: ROS2RobotInterface) -> None:
@@ -159,17 +176,58 @@ def report_side(interface: ROS2RobotInterface, side: str) -> int:
     return failures
 
 
-def watch_loop(interface: ROS2RobotInterface, sides: list[str], interval: float) -> int:
+def dump_finger(interface: ROS2RobotInterface, side: str, finger: str, elapsed: float | None = None) -> None:
+    """打印一根手指的完整消息内容，格式对齐 ros2 topic echo 便于逐字节比对。
+
+    先打 layout（size / stride），再打扁平的 data，最后按行优先还原成矩阵。
+    扁平的那一行可以和 `ros2 topic echo <topic> --once` 的 data 字段直接对照。
+    """
+    stamp = "" if elapsed is None else f" @ {elapsed:.1f}s"
+    prefix = getattr(interface.config, f"{side}_hand_tactile_topic_prefix")
+    print(f"  ---- {side}/{finger}{stamp}  ({prefix}/{finger}) ----")
+
+    try:
+        msg = interface.get_hand_tactile(side, finger)
+    except ROS2InterfaceError as exc:
+        print(f"    no data: {exc}")
+        return
+
+    dims = msg.layout.dim
+    layout = " | ".join(f"{d.label}={d.size} stride={d.stride}" for d in dims)
+    print(f"    layout.dim: {layout}")
+
+    data = list(msg.data)
+    print(f"    data({len(data)}): {data}")
+
+    if len(dims) >= 2 and dims[0].size and dims[1].size:
+        rows, cols = dims[0].size, dims[1].size
+        if rows * cols == len(data):
+            print(f"    matrix {rows}x{cols} (row-major):")
+            for r in range(rows):
+                cells = " ".join(f"{v:3d}" for v in data[r * cols:(r + 1) * cols])
+                print(f"      r{r:02d}: {cells}")
+    print(f"    max={max(data) if data else 0}")
+
+
+def watch_loop(
+    interface: ROS2RobotInterface,
+    sides: list[str],
+    interval: float,
+    dump_target: tuple[str, str] | None = None,
+) -> int:
     """每 interval 秒打印一行各指频率，直到 Ctrl-C。
 
     连接与统计窗口全程连续，因此能看出频率的长期趋势和周期性掉帧。
-    get_rate() 无数据返回 0.0 而不抛异常，所以循环体里不需要 try。
+    get_rate() 无数据返回 0.0 而不抛异常，所以频率那部分不需要 try；
+    dump_target 指定时额外打印该手指的完整数据，异常由 dump_finger 内部处理。
     """
     print("-" * 70)
     print(
         f"watching every {interval:.1f}s (same cadence as ros2 topic hz); "
         "Ctrl-C to stop"
     )
+    if dump_target is not None:
+        print(f"dumping full data of {dump_target[0]}/{dump_target[1]} each tick")
     header = "  ".join(f"{finger:>6}" for finger in FINGERS)
     print(f"{'elapsed':>9}  {'side':<5}  {header}")
 
@@ -184,7 +242,30 @@ def watch_loop(interface: ROS2RobotInterface, sides: list[str], interval: float)
             cells = "  ".join(f"{rates[finger]:6.2f}" for finger in FINGERS)
             stale = " STALE" if all(rates[f] == 0.0 for f in FINGERS) else ""
             print(f"{elapsed:8.1f}s  {side:<5}  {cells}{stale}")
+        if dump_target is not None:
+            dump_finger(interface, dump_target[0], dump_target[1], elapsed)
         time.sleep(interval)
+
+
+def parse_dump_target(raw: str | None, detected: list[str]) -> tuple[str, str] | None:
+    """把 --dump 的 "side:finger" 解析成元组；无效时打印原因并返回 None。"""
+    if raw is None:
+        return None
+
+    text = raw.strip().lower()
+    side, _, finger = text.partition(":")
+    finger = finger or "thumb"
+
+    if side not in SIDES:
+        print(f"warn: --dump side must be one of {SIDES}, got {side!r}; dump disabled")
+        return None
+    if finger not in FINGERS:
+        print(f"warn: --dump finger must be one of {FINGERS}, got {finger!r}; dump disabled")
+        return None
+    if side not in detected:
+        print(f"warn: {side} hand tactile not detected; dump disabled")
+        return None
+    return side, finger
 
 
 def parse_args() -> argparse.Namespace:
@@ -199,6 +280,13 @@ def parse_args() -> argparse.Namespace:
         "--interval", type=float, default=WATCH_INTERVAL_SEC,
         help=f"--watch 的打印间隔，单位秒（默认 {WATCH_INTERVAL_SEC}，"
              "与 ros2 topic hz 一致）",
+    )
+    parser.add_argument(
+        "--dump", nargs="?", const=DEFAULT_DUMP_TARGET, default=None,
+        metavar="SIDE:FINGER",
+        help="额外打印该手指的完整消息内容（layout + 扁平 data + 矩阵），"
+             f"格式为 side:finger，裸写 --dump 等价于 {DEFAULT_DUMP_TARGET}。"
+             "配合 --watch 则每个 tick 打印一次，便于与 ros2 topic echo 对照",
     )
     return parser.parse_args()
 
@@ -226,6 +314,8 @@ def main() -> int:
             )
             return 0
 
+        dump_target = parse_dump_target(args.dump, detected)
+
         failures = 0
         for side in detected:
             failures += report_side(interface, side)
@@ -237,10 +327,16 @@ def main() -> int:
 
         # 单次检查通过后，--watch 才进入持续监视；由 Ctrl-C 结束
         if args.watch:
-            return watch_loop(interface, detected, args.interval)
+            return watch_loop(interface, detected, args.interval, dump_target)
+
+        # 非 watch 模式下 --dump 也有效，只打印一次
+        if dump_target is not None:
+            dump_finger(interface, dump_target[0], dump_target[1])
 
         print("done")
         print("tip: add --watch to keep printing rates every second")
+        print("     add --dump to print one finger's full data "
+              "(e.g. --dump left:thumb)")
         return 0
     finally:
         cleanup(interface)
