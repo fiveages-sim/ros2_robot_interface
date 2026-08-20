@@ -34,6 +34,7 @@
   - [协调关节下发](#协调关节下发)
   - [关节状态获取](#关节状态获取)
   - [手部关节控制](#手部关节控制)
+  - [灵巧手触觉读取](#灵巧手触觉读取)
   - [末端执行器位姿获取](#末端执行器位姿获取)
   - [双臂路径与轨迹执行](#双臂路径与轨迹执行)
   - [统一到达检查](#统一到达检查)
@@ -1779,6 +1780,71 @@ interface.send_right_hand_joint_positions([0.0, 0.3, 0.5, 0.2, 0.1, 0.0])
 
 ---
 
+### 灵巧手触觉读取
+
+依赖 `can-ros2-control` 的 LinkerHand 硬件插件（O6 / L6 / O7）**以 `read_tactile:=true` 启动**，否则驱动不会创建触觉发布器，话题根本不存在。`connect()` 会用正则扫描 ROS 图匹配 `/<o6|l6|o7>_hand/<left|right>/tactile/<finger>`，反推出型号前缀写入 `config.left_hand_tactile_topic_prefix` / `config.right_hand_tactile_topic_prefix`，随后为该侧五根手指各挂一个订阅。也可在 `connect()` 前手动指定前缀跳过探测。
+
+手指名固定为 `thumb` / `index` / `middle` / `ring` / `pinky`，与驱动侧 `finger_name()` 一一对应；另有 `all` 表示一次取回五根手指。**读取只有 `get_hand_tactile()` 一个方法**，取单指还是取全部由第二个参数决定。
+
+> 排查订阅链路时，`interface.left_hand_tactile_handler` / `right_hand_tactile_handler` 上另有一个 `get_rate(finger)`，返回缓存更新频率（Hz，口径与 `ros2 topic hz` 一致：10000 个帧间隔的计数窗、`1 / 间隔均值`；停发超 1 秒返回 `0.0`）。它是诊断用的 handler 内部方法，不属于稳定公开 API。
+
+#### `get_hand_tactile(side: str, finger: str) -> UInt8MultiArray | Dict[str, UInt8MultiArray]`
+
+**功能：** 返回指定灵巧手的触觉阵列消息，**就是话题上的原始消息对象**，不 reshape、不拷贝、不包装。`finger` 传具体手指名时返回一条消息；传 `"all"` 时返回五根手指的字典。
+
+**原理：**
+- 类型：Topic 订阅（读缓存）
+- 名称：`<config.{side}_hand_tactile_topic_prefix>/<finger>`，例如 `/o7_hand/left/tactile/index`
+- 消息：`std_msgs/msg/UInt8MultiArray`（QoS：depth 10）
+- `finger="all"` 不额外订阅任何话题，只是把五根手指各自的缓存一次取出
+
+**参数：**
+- `side`: `"left"` / `"right"`（大小写不敏感）
+- `finger`: `"thumb"` / `"index"` / `"middle"` / `"ring"` / `"pinky"`，或 `"all"`（大小写不敏感）
+
+**返回值（单指）：**
+```python
+msg = interface.get_hand_tactile("left", "index")
+
+msg.layout.dim[0].label   # "row"
+msg.layout.dim[0].size    # 行数：O6 = 10，L6 / O7 = 12
+msg.layout.dim[1].label   # "column"
+msg.layout.dim[1].size    # 列数：O6 = 4，L6 / O7 = 6
+msg.data                  # 行优先的 uint8 序列：O6 长度 40，L6 / O7 长度 72
+```
+
+行列数由消息自带的 `layout` 决定，**调用方无需事先知道是哪个型号**。需要二维形态时自行 reshape：
+
+```python
+rows, cols = msg.layout.dim[0].size, msg.layout.dim[1].size
+matrix = [list(msg.data[r * cols:(r + 1) * cols]) for r in range(rows)]
+```
+
+**返回值（`finger="all"`）：**
+```python
+{"thumb": msg, "index": msg, "middle": msg, "ring": msg, "pinky": msg}
+```
+
+**说明：**
+- `UInt8MultiArray` 不带 header，因此**没有硬件时间戳**；需要时间信息请在调用侧自行记录接收时刻。
+- 回调每帧整体替换消息对象而非原地改写，已返回的消息不会被后续帧改动。
+- ⚠️ `finger="all"` 时，驱动侧是逐指轮询 CAN（`0xB1`～`0xB5`）、五个话题独立发布，因此这五条消息**不保证属于同一个采样批次**，彼此可能有数十毫秒级错位。需要严格同批次时请自行做时间窗口聚合。
+
+**异常：** 未连接 → `ROS2NotConnectedError`；`side` / `finger` 非法 → `ValueError`；该侧未检测到触觉话题 / 对应手指尚无消息 → `ROS2InterfaceError`（`finger="all"` 时任一手指无数据即抛出，不做部分返回）。
+
+**示例：**
+```python
+# 单指
+msg = interface.get_hand_tactile("left", "index")
+print(f"{msg.layout.dim[0].size}x{msg.layout.dim[1].size}, max={max(msg.data)}")
+
+# 五指
+for finger, msg in interface.get_hand_tactile("right", "all").items():
+    print(f"{finger}: max={max(msg.data)}")
+```
+
+---
+
 ### 末端执行器位姿获取
 
 #### `interface.left_arm_handler.get_pose() -> Optional[Pose]`
@@ -2371,6 +2437,7 @@ interface.send_fsm_command(FSM_OCS2)
 | **双臂** | 直接方法 | `send_dual_arm_target_stamped()`<br>`send_dual_arm_joint_positions()`<br>`execute_path()` | — | `check_arrive()` |
 | **左夹爪** | `left_gripper_handler` | `send_target_command()` ⭐<br>`send_joint_positions()` | `get_target_position()` | `check_arrival()` |
 | **右夹爪** | `right_gripper_handler` | `send_target_command()` ⭐<br>`send_joint_positions()` | `get_target_position()` | `check_arrival()` |
+| **灵巧手触觉** | 直接方法 | — | `get_hand_tactile(side, finger)` ⭐<br>`finger="all"` 取五指 | — |
 | **头部** | 直接方法 | `send_head_joint_positions()` | `get_joint_state()` | `check_arrive('head')` |
 | **身体** | 直接方法 | `send_body_joint_positions()`<br>`send_body_relative()`<br>`send_waist_lifting_pose_*()`<br>`execute_waist_lifting_pose_*_action()` | `get_joint_state()`<br>`get_body_current_pose()` | `check_arrive('body')`<br>`check_arrive('body_pose')` |
 

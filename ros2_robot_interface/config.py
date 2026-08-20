@@ -86,7 +86,15 @@ class ROS2RobotInterfaceConfig:
     # filtered：仅在 COMPLIANCE 期间由控制器发布；connect 时未必已出现在 graph 中
     left_ft_wrench_filtered_topic: str | None = None   # 【可随 original 默认】/left_ft_broadcaster/wrench_filtered
     right_ft_wrench_filtered_topic: str | None = None  # 【可随 original 默认】/right_ft_broadcaster/wrench_filtered
-    
+
+    # ============================================================================
+    # 灵巧手五指触觉话题前缀（可自动检测；仅当 can-ros2-control 以 read_tactile:=true 启动时存在）
+    # ============================================================================
+    # 完整话题为 <prefix>/<finger>，finger 取 thumb / index / middle / ring / pinky
+    # 前缀中的型号段由 connect() 从 ROS 图反推（o6 / l6 / o7），无需手动区分型号
+    left_hand_tactile_topic_prefix: str | None = None   # 【可自动检测】例如 "/o7_hand/left/tactile"
+    right_hand_tactile_topic_prefix: str | None = None  # 【可自动检测】例如 "/o7_hand/right/tactile"
+
     # ============================================================================
     # 手臂关节控制器话题（自动检测，无需手动配置）
     # ============================================================================

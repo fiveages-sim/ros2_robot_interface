@@ -7,6 +7,7 @@ This is a standalone implementation independent of LeRobot.
 
 import logging
 import math
+import re
 import sys
 import threading
 import time
@@ -26,7 +27,7 @@ from rclpy.publisher import Publisher
 from rclpy.subscription import Subscription
 from rclpy.time import Time
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Float64, Float64MultiArray, Int32, String
+from std_msgs.msg import Float64, Float64MultiArray, Int32, String, UInt8MultiArray
 from std_srvs.srv import Trigger
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 import tf2_ros
@@ -50,7 +51,7 @@ from .constants import (
 )
 from .utils.exceptions import ROS2AlreadyConnectedError, ROS2InterfaceError, ROS2NotConnectedError
 from .utils.quat_pose import check_pose_arrival, quat_multiply, rotate_vector_by_quat
-from .handler import ArmHandler, ArmType, GripperHandler, GripperType
+from .handler import ArmHandler, ArmType, GripperHandler, GripperType, HandTactileHandler, HandType
 from .utils.discovery import (
     discover_topics as _discover_topics,
     discover_actions as _discover_actions,
@@ -178,6 +179,10 @@ class ROS2RobotInterface:
         # Gripper handlers
         self.left_gripper_handler: Optional[GripperHandler] = None
         self.right_gripper_handler: Optional[GripperHandler] = None
+
+        # Hand tactile handlers（灵巧手五指触觉，仅当检测到触觉话题时创建）
+        self.left_hand_tactile_handler: Optional[HandTactileHandler] = None
+        self.right_hand_tactile_handler: Optional[HandTactileHandler] = None
 
         # Nav2 navigation state（软依赖，connect() 时自动检测）
         self._nav_enabled: bool = False
@@ -516,6 +521,38 @@ class ROS2RobotInterface:
                 "/right_ft_broadcaster/wrench_filtered",
             )
 
+        # 灵巧手五指触觉（can-ros2-control 以 read_tactile:=true 启动时才发布）
+        # 话题形如 /<o6|l6|o7>_hand/<left|right>/tactile/<finger>，型号段从图中反推
+        tactile_pattern = re.compile(
+            r"^/([a-z0-9]+(?:[_-][a-z0-9]+)*)_hand/(left|right)/tactile/"
+            r"(thumb|index|middle|ring|pinky)$"
+        )
+        detected_tactile_prefix: Dict[str, str] = {}
+        for topic_name in topic_names:
+            tactile_match = tactile_pattern.match(topic_name)
+            if tactile_match:
+                model, side = tactile_match.group(1), tactile_match.group(2)
+                detected_tactile_prefix[side] = f"/{model}_hand/{side}/tactile"
+
+        if (
+            self.config.left_hand_tactile_topic_prefix is None
+            and "left" in detected_tactile_prefix
+        ):
+            self.config.left_hand_tactile_topic_prefix = detected_tactile_prefix["left"]
+            logger.info(
+                f"Detected left hand tactile topic prefix: "
+                f"{detected_tactile_prefix['left']}"
+            )
+        if (
+            self.config.right_hand_tactile_topic_prefix is None
+            and "right" in detected_tactile_prefix
+        ):
+            self.config.right_hand_tactile_topic_prefix = detected_tactile_prefix["right"]
+            logger.info(
+                f"Detected right hand tactile topic prefix: "
+                f"{detected_tactile_prefix['right']}"
+            )
+
         return is_dual_arm
     
     def connect(self) -> None:
@@ -785,6 +822,36 @@ class ROS2RobotInterface:
                 logger.debug("Right gripper handler not created: no controller detected")
             else:
                 logger.debug("Right gripper handler not created: gripper_enabled=False")
+
+            # Create left hand tactile handler（仅当检测到触觉话题前缀）
+            if self.config.left_hand_tactile_topic_prefix:
+                self.left_hand_tactile_handler = HandTactileHandler(
+                    self.robot_node,
+                    HandType.LEFT,
+                    self.config
+                )
+                self.left_hand_tactile_handler.initialize()
+                logger.info(
+                    f"✅ Subscribed to {self.config.left_hand_tactile_topic_prefix}"
+                    f"/<finger> for left hand tactile"
+                )
+            else:
+                logger.debug("Left hand tactile handler not created: no tactile topic detected")
+
+            # Create right hand tactile handler（仅当检测到触觉话题前缀）
+            if self.config.right_hand_tactile_topic_prefix:
+                self.right_hand_tactile_handler = HandTactileHandler(
+                    self.robot_node,
+                    HandType.RIGHT,
+                    self.config
+                )
+                self.right_hand_tactile_handler.initialize()
+                logger.info(
+                    f"✅ Subscribed to {self.config.right_hand_tactile_topic_prefix}"
+                    f"/<finger> for right hand tactile"
+                )
+            else:
+                logger.debug("Right hand tactile handler not created: no tactile topic detected")
             
             self.fsm_command_pub = self.robot_node.create_publisher(Int32, "/fsm_command", 10)
             self.mode_command_pub = self.robot_node.create_publisher(String, "/mode_command", 10)
@@ -2104,6 +2171,65 @@ class ROS2RobotInterface:
             else self._latest_wrench_filtered_right
         )
         return self._get_cached_wrench(side, topic=topic, cache=cache, kind="filtered")
+
+    def _get_hand_tactile_handler(self, side: str) -> HandTactileHandler:
+        """Resolve the tactile handler for one side, with unified guards."""
+        if not self.is_connected:
+            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+        side_key = str(side).strip().lower()
+        if side_key not in ("left", "right"):
+            raise ValueError(f"side must be 'left' or 'right', got: {side!r}")
+        handler = (
+            self.left_hand_tactile_handler
+            if side_key == "left"
+            else self.right_hand_tactile_handler
+        )
+        if handler is None:
+            raise ROS2InterfaceError(
+                f"No hand tactile handler for side={side_key!r}; start "
+                f"can-ros2-control with read_tactile:=true, or set config."
+                f"{side_key}_hand_tactile_topic_prefix before connect()"
+            )
+        return handler
+
+    def get_hand_tactile(
+        self, side: str, finger: str
+    ) -> "UInt8MultiArray | Dict[str, UInt8MultiArray]":
+        """获取指定灵巧手的触觉阵列消息。
+
+        ``finger`` 传具体手指名时返回该手指最新的一条消息；传 ``"all"`` 时一次
+        返回五根手指，键为手指名。
+
+        返回的就是话题上的原始 ``std_msgs/msg/UInt8MultiArray``，不做 reshape、
+        不做拷贝：``msg.layout.dim[0].size`` 为行数，``msg.layout.dim[1].size``
+        为列数，``msg.data`` 按行优先排列。O6 为 10×4（40 值），
+        L6 / O7 为 12×6（72 值），由消息自带的 layout 决定，无需事先知道型号。
+
+        ``finger="all"`` 时每根手指各取自己缓存中的最新值。驱动侧是逐指轮询
+        CAN（``0xB1``～``0xB5``）、五个话题独立发布，因此这五条消息
+        **不保证属于同一个采样批次**，彼此可能有数十毫秒级的时间错位。
+        需要严格同批次时请自行做时间窗口聚合。
+
+        Args:
+            side: ``"left"`` 或 ``"right"``（大小写不敏感）
+            finger: ``"thumb"`` / ``"index"`` / ``"middle"`` / ``"ring"`` /
+                ``"pinky"``，或 ``"all"``（大小写不敏感）
+
+        Returns:
+            单指时为该手指最新的 UInt8MultiArray 消息对象；``finger="all"`` 时为
+            ``{"thumb": msg, "index": msg, "middle": msg, "ring": msg, "pinky": msg}``
+
+        Raises:
+            ROS2NotConnectedError: 接口未连接
+            ValueError: side 或 finger 非法
+            ROS2InterfaceError: 该侧未检测到触觉话题，或对应手指尚未收到消息
+                （``finger="all"`` 时任一手指无数据即抛出，不做部分返回）
+
+        Example:
+            >>> msg = interface.get_hand_tactile("left", "index")
+            >>> all_msgs = interface.get_hand_tactile("left", "all")
+        """
+        return self._get_hand_tactile_handler(side).get(finger)
 
     def enter_compliance(self) -> None:
         """Enter COMPLIANCE FSM (auto HOLD transit via send_fsm_command)."""
@@ -4221,6 +4347,15 @@ class ROS2RobotInterface:
         if self.right_gripper_handler:
             self.right_gripper_handler.cleanup()
             self.right_gripper_handler = None
+
+        # Cleanup hand tactile handlers
+        if self.left_hand_tactile_handler:
+            self.left_hand_tactile_handler.cleanup()
+            self.left_hand_tactile_handler = None
+
+        if self.right_hand_tactile_handler:
+            self.right_hand_tactile_handler.cleanup()
+            self.right_hand_tactile_handler = None
         
         if self.fsm_command_pub:
             self.fsm_command_pub.destroy()
