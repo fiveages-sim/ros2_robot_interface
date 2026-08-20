@@ -42,6 +42,7 @@
   - [坐标转换](#坐标转换)
   - [系统信息查询](#系统信息查询)
   - [控制器节点名](#控制器节点名)
+  - [控制器执行参数](#控制器执行参数)
   - [笛卡尔速度](#笛卡尔速度)
   - [机器人描述与参数查询](#机器人描述与参数查询)
 - [常量 (Constants)](#常量-constants)
@@ -84,6 +85,7 @@ https://github.com/user-attachments/assets/f7fef847-4e6d-4905-93cb-176b4fc81c34
 - 配置：`config.end_effector_target_topic` / `config.right_end_effector_target_topic`
 - 到位依赖：控制器回写 `/left_current_target` 或 `/right_current_target`（Topic 订阅，`PoseStamped`）
 - 隐式 FSM：切到 OCS2（经 `/fsm_command`）
+- 执行参数：消息无时长；`arm_controller` 上的 `movel_*`（见 [控制器执行参数](#控制器执行参数)）
 
 **参数：**
 - `frame_id` (`Optional[str]`): 目标位姿所在坐标系，如 `arm_base`、`base_link`、`head_link2`、`left_eef`；可省略，省略时回退到最近订阅到的 `self.frame_id`
@@ -132,6 +134,7 @@ interface.left_arm_handler.send_target_stamped(relative_pose)
 - 消息：`geometry_msgs/msg/TwistStamped`
 - 到位依赖：控制器回写 `/left_current_target` 或 `/right_current_target`
 - 隐式 FSM：切到 OCS2（经 `/fsm_command`）
+- 执行参数：同上，`arm_controller` 上的 `movel_*`
 
 **参数：**
 - `dx` / `dy` / `dz` (`float`): 平移增量，单位米，表达在 `frame_id` 下
@@ -169,6 +172,7 @@ https://github.com/user-attachments/assets/b80e994e-e374-4580-b947-769c8c169ba2
 - 消息：`geometry_msgs/msg/Pose`
 - 配置：`config.end_effector_target_topic` / `config.right_end_effector_target_topic`
 - 隐式 FSM：切到 OCS2（经 `/fsm_command`）
+- 执行参数：同上，`arm_controller` 上的 `movel_*`
 
 **参数：**
 - `pose` (`Pose`): 已经位于 `base_frame` 坐标系下的目标位姿
@@ -211,6 +215,7 @@ https://github.com/user-attachments/assets/eed9c1d2-6d9d-4c84-9152-1a9a472440a6
 - 消息：`std_msgs/msg/Float64MultiArray`
 - 配置：`config.left_arm_joint_controller_topic` / `config.right_arm_joint_controller_topic`
 - 隐式 FSM：切到 MOVEJ（经 `/fsm_command`）；已是 MOVEJ 则跳过
+- 执行参数：对应臂控节点上的 `movej_duration`、`movej_interpolation_type`、`movej_tanh_scale`（见 [控制器执行参数](#控制器执行参数)）
 
 **参数：**
 - `positions` (`List[float]`): 目标关节角列表，单位为弧度
@@ -402,6 +407,7 @@ while True:
 - 名称：`/dual_target/stamped`
 - 消息：`nav_msgs/msg/Path`（双臂 2 个 `PoseStamped`；WBC + `body_pose` 时为 `[left, right, body]`）
 - 可选 `movel_duration`：对 `arm_controller` 节点调用 **参数服务** `SetParameters`，写 `movel_duration`
+- 其余 `movel_*`（速度/加速度/jerk、`movel_auto_extend_duration`）同样生效，见 [控制器执行参数](#控制器执行参数)
 - 可选 `body_mode`：Topic 发布 `/mode_command`（`std_msgs/String`）
 - 到位依赖：订阅 `/left_current_target`、`/right_current_target`
 - 隐式 FSM：切到 OCS2
@@ -476,6 +482,7 @@ if left_result['arrived'] and right_result['arrived']:
 - 消息：`std_msgs/msg/Float64MultiArray`
 - 缺某一臂 / 躯干 / 头部时从 `/joint_states` hold 当前角
 - 隐式 FSM：切到 MOVEJ
+- 执行参数：统一控制器节点上的 `movej_*`
 
 **参数：**
 - `left_arm_positions` (List[float]): 左臂关节位置列表（弧度）
@@ -936,6 +943,7 @@ result = interface.left_gripper_handler.check_arrival(
 - 消息：`std_msgs/msg/Float64MultiArray`
 - 隐式 FSM：切到 MOVEJ
 - 目标缓存在接口内部，供 `check_arrive(part='head')` 使用
+- 执行参数：头部控制器（或 WBC）节点上的 `movej_*`
 
 **参数：**
 - `positions` (List[float]): 目标关节位置列表（弧度）
@@ -1065,6 +1073,7 @@ result = interface.check_arrive('head', position_threshold=0.01)
 - 消息：`std_msgs/msg/Float64MultiArray`
 - 隐式 FSM：切到 MOVEJ
 - 目标缓存在接口内部，供 `check_arrive(part='body')` 使用
+- 执行参数：`body_controller` 上的 `movej_*`
 
 **参数：**
 - `positions` (List[float]): 目标关节位置列表（弧度）
@@ -1091,6 +1100,7 @@ interface.send_body_joint_positions(body_positions)
 - 消息：`geometry_msgs/msg/TwistStamped`
 - 隐式 FSM：切到 OCS2；再经 `/mode_command` 切到 `BODY_TRACKING`（已是该模式则不重复发）
 - 到位依赖：`/body_current_target`
+- 执行参数：与手臂笛卡尔相同，`arm_controller` 上的 `movel_*`
 
 **参数：** 与 `ArmHandler.send_relative` 相同（米 / 弧度 RPY；`frame_id` 默认空）
 
@@ -1115,6 +1125,7 @@ interface.send_body_relative(0.03, 0.0, 0.0)
   - WBC：`/ocs2_wbc_controller/waist_lifting`
 - 消息：`std_msgs/msg/Float64`
 - 隐式 FSM：切到 MOVEJ
+- 执行参数：`body_controller` 上的 `waist_lifting_duration`（默认 3 s）
 
 **示例：**
 ```python
@@ -1132,6 +1143,7 @@ interface.send_waist_lifting_relative_position(0.05)
   - WBC：`/ocs2_wbc_controller/waist_lifting_pose_relative`
 - 消息：`std_msgs/msg/Float64MultiArray`，数据 `[dx, dz, dphi]`
 - 隐式 FSM：切到 MOVEJ
+- 执行参数：`body_controller` 上的 `waist_lifting_duration`（默认 3 s）
 
 **参数：**
 - `dx` (`float`): 局部 x 方向相对位移
@@ -1157,6 +1169,7 @@ interface.send_waist_lifting_pose_relative(0.02, 0.05, 0.10)
   - WBC：`/ocs2_wbc_controller/waist_lifting_pose_absolute`
 - 消息：`std_msgs/msg/Float64MultiArray`，数据 `[x, z, phi]`
 - 隐式 FSM：切到 MOVEJ
+- 执行参数：`body_controller` 上的 `waist_lifting_duration`（默认 3 s）
 
 **参数：**
 - `x` (`float`): `base_footprint` 坐标系下目标 x
@@ -1183,6 +1196,7 @@ interface.send_waist_lifting_pose_absolute(0.12, 0.45, 0.20)
   - WBC：`/ocs2_wbc_controller/waist_lifting_command`
 - 消息：`std_msgs/msg/Float64`
 - 隐式 FSM：切到 MOVEJ
+- 执行参数：实际速度 = `scale × waist_lifting_default_parameter[0]`，三项为 `[目标速度, 最大加速度, 最大加加速度]`
 
 **示例：**
 ```python
@@ -1200,6 +1214,7 @@ interface.send_waist_lifting_velocity_scale(0.3)
   - WBC：`/ocs2_wbc_controller/waist_turning_command`
 - 消息：`std_msgs/msg/Float64`
 - 隐式 FSM：切到 MOVEJ
+- 执行参数：实际速度 = `scale × waist_turning_default_parameter[0]`，三项含义同上
 
 **示例：**
 ```python
@@ -1232,6 +1247,7 @@ interface.send_waist_turning_velocity_scale(-0.2)
 - `mode`：`WaistLiftingPose.Goal.MODE_ABSOLUTE` 或 `MODE_RELATIVE`
 - 隐式 FSM：默认切到 MOVEJ
 - 返回 result（含 `reachable` / `success` / `planned_x/z/phi` 等）；拒绝或超时返回 `None`
+- 执行参数：`body_controller` 上的 `waist_lifting_duration`（默认 3 s）
 
 #### `execute_waist_lifting_pose_absolute_action(x, z, phi, ...) -> Any`
 
@@ -1385,6 +1401,7 @@ wait_result = interface.wait_until_arrive(
 - 消息：`std_msgs/msg/Int32`
 - 实际状态回读：Topic 订阅 `/fsm_state`（latched `Int32`，见 `get_fsm_state()`）
 - HOME / OCS2 / MOVEJ / COMPLIANCE 若当前不是 HOLD，会先发 HOLD 再发目标（各等 `fsm_state_switch_settle_time`）
+- 执行参数：仅 HOME（`command=1`）受控制器 `home_duration`（默认 5 s）、`home_interpolation_type`、`home_1`…`home_N` 影响；其它态切换没有时长参数
 
 **参数：**
 - `command` (int): FSM 命令值
@@ -1661,6 +1678,7 @@ ok = interface.wait_until_mode_commands_applied(
 - 非 WBC 但有统一臂 topic：双臂走统一 topic；躯干可再走 split body topic
 - 其它：回退到左右臂 handler 的分臂 topic / `send_body_joint_positions` / `send_head_joint_positions`
 - 隐式 FSM：默认切到 MOVEJ
+- 执行参数：各部位对应控制器上的 `movej_*`
 
 **参数：**
 - `body_positions` / `left_arm_positions` / `right_arm_positions` / `head_positions`：至少一组非空
@@ -1758,6 +1776,7 @@ if categorized_state:
 - 类型：Topic 发布
 - 名称：`config.left_hand_joint_controller_topic`（自动检测 `/left_hand_controller/target_joint_position`）
 - 消息：`std_msgs/msg/Float64MultiArray`
+- 执行参数：该手控制器节点上的 `movej_*`
 
 **说明：**
 - 适用于需要独立控制灵巧手每个关节的位置场景
@@ -1770,6 +1789,7 @@ if categorized_state:
 - 类型：Topic 发布
 - 名称：`config.right_hand_joint_controller_topic`（自动检测 `/right_hand_controller/target_joint_position`）
 - 消息：`std_msgs/msg/Float64MultiArray`
+- 执行参数：该手控制器节点上的 `movej_*`
 
 **示例：**
 ```python
@@ -1959,6 +1979,7 @@ else:
 - 类型：`arms_ros2_control_msgs/srv/ExecutePath`
 - 空列表表示该臂不更新（控制器保持原参考轨迹）
 - 隐式 FSM：切到 OCS2
+- 执行参数：`trajectory_duration=0` 时用 `arm_controller` 节点参数 `movel_trajectory_duration`（臂控 YAML 默认 6 s）
 
 **说明：**
 - 不要求左右轨迹点数量一致（支持不等长路径）
@@ -2020,6 +2041,7 @@ print(f"execute_path success: {ok}")
 - 名称：`/{controller_name}/target_joint_trajectory`（`controller_name` 从左/右臂关节 topic 第一段解析，如 `/ocs2_wbc_controller/target_joint_trajectory`）
 - 消息：`trajectory_msgs/msg/JointTrajectory`
 - `trajectory_duration` 若给定：对 `arm_controller` 调用 `SetParameters` 写 `movej_trajectory_duration`
+- 路点融合另可读节点参数 `movej_trajectory_blend_ratio`
 - 隐式 FSM：切到 MOVEJ
 - 需要等待结果时请用 `execute_joint_trajectory_action`
 
@@ -2344,6 +2366,31 @@ if matching_nodes:
 
 ---
 
+### 控制器执行参数
+
+Topic 类命令的消息里通常没有时长/速度字段。控制器在收到目标时读**本节点参数**做规划。用 `set_node_parameters` 写入；参数是节点全局的，改完一直生效到下次再改。节点名用上面的 `arm_controller` / `body_controller`。W2 默认值来自 `fa_w2_ws` 的 `fa-w2-description/config/ros2_control/common.yaml`。
+
+```python
+interface.set_node_parameters(interface.arm_controller, {"movel_duration": 3.0})
+interface.set_node_parameters(interface.body_controller, {"waist_lifting_duration": 10.0})
+```
+
+| 接口 | 节点 | 可改参数 |
+|------|------|----------|
+| `send_fsm_command(1)` HOME | 对应控制器 | `home_duration`（默认 5 s）、`home_interpolation_type`、`home_1`…`home_N` |
+| `send_target` / `send_target_stamped` / `send_relative` | `arm_controller` | `movel_duration`（默认 2 s）、`movel_max_linear_*` / `movel_max_angular_*`、`movel_auto_extend_duration`、`movel_sample_interval` |
+| `send_dual_arm_target_stamped` | 同上 | 同一套 `movel_*`（方法参数 `movel_duration` 会先写入节点） |
+| `send_body_relative` | 同上 | 同一套 `movel_*` |
+| `execute_path` / `execute_left_path` / `execute_right_path` | `arm_controller` | Service 字段 `trajectory_duration`；`0` 时用 `movel_trajectory_duration`（臂控 YAML 默认 6 s） |
+| `send_joint_positions`、`send_head_joint_positions`、`send_body_joint_positions`、`send_*_hand_joint_positions`、`send_dual_arm_joint_positions`、`send_coordinated_joint_positions` | 各控制器 | `movej_duration`、`movej_interpolation_type`（`linear` / `tanh` / `doubles`）、`movej_tanh_scale` |
+| `send_joint_trajectory` | `arm_controller` | `movej_trajectory_duration`（方法参数会先写入）、`movej_trajectory_blend_ratio` |
+| `send_waist_lifting_relative_position`、`send_waist_lifting_pose_*`、`execute_waist_lifting_pose_*_action` | `body_controller` | `waist_lifting_duration`（默认 3 s） |
+| `send_waist_lifting_velocity_scale` / `send_waist_turning_velocity_scale` | `body_controller` | `waist_lifting_default_parameter` / `waist_turning_default_parameter` = `[目标速度, 最大加速度, 最大加加速度]`；实际速度 = `scale × 第一项` |
+
+MoveL / MoveC Action 和 `joint_trajectory_with_para` 的时长写在 goal / request 里，不是这张表。力控见 `set_compliance_force`。
+
+---
+
 ### 笛卡尔速度
 
 #### `send_cartesian_velocity(linear, angular) -> None`
@@ -2393,13 +2440,13 @@ if matching_nodes:
 
 **示例：**
 ```python
-node_name = "/my_controller"
-params = interface.list_node_parameters(node_name)
+ctrl = interface.arm_controller
+params = interface.list_node_parameters(ctrl)
 print(f"可配置参数数量: {len(params)}")
 
-ok = interface.set_node_parameters(node_name, {
-    "trajectory_duration": 2.0,
-    "enable_safety_check": True,
+ok = interface.set_node_parameters(ctrl, {
+    "movel_duration": 3.0,
+    "movej_duration": 4.0,
 })
 print(f"参数设置结果: {ok}")
 ```
@@ -2487,6 +2534,8 @@ interface.send_fsm_command(FSM_OCS2)
    - `/mode_command` 控制 WBC 身体/双臂/底盘模式；`/fsm_command` 控制 HOME/HOLD/OCS2/MOVEJ
    - 多条 mode 建议先全部 `send_mode_command`，再一次 `wait_until_mode_commands_applied`，不要按条等待（对端常只更新一次合并后的 `current_state`）
    - 关节 / 位姿控制在开启 `auto_switch_fsm_before_control` 时会隐式切 FSM（关节→MOVEJ，位姿→OCS2）；一般不必显式调用自动切换 API
+
+10. **控制器执行参数**：Topic 类命令的快慢不在消息里，而在控制器节点参数（`movel_duration`、`movej_duration`、`waist_lifting_duration` 等）。改完全局生效，详见 [控制器执行参数](#控制器执行参数)。
 
 ---
 
