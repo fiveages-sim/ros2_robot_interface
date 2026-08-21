@@ -7,9 +7,9 @@ Arm Handler - 单臂处理器
 
 import logging
 from enum import Enum
-from typing import Optional, Dict, Any, List, Callable
+from typing import Optional, Dict, Any, List, Callable, Tuple
 
-from geometry_msgs.msg import Pose, PoseStamped, TwistStamped
+from geometry_msgs.msg import Pose, PoseStamped, Twist, TwistStamped
 from rclpy.node import Node
 from rclpy.publisher import Publisher
 from rclpy.subscription import Subscription
@@ -90,6 +90,7 @@ class ArmHandler:
         self.target_pub: Optional[Publisher] = None
         self.target_stamped_pub: Optional[Publisher] = None
         self.relative_pub: Optional[Publisher] = None
+        self.twist_pub: Optional[Publisher] = None
         self.joint_controller_pub: Optional[Publisher] = None
     
     def initialize(self) -> None:
@@ -128,6 +129,9 @@ class ArmHandler:
             )
             self.relative_pub = self.node.create_publisher(
                 TwistStamped, f"{self.target_topic}/relative", 10
+            )
+            self.twist_pub = self.node.create_publisher(
+                Twist, f"{self.target_topic}/twist", 10
             )
             logger.debug(f"{self.label}: Created target publishers for {self.target_topic}")
         else:
@@ -296,7 +300,56 @@ class ArmHandler:
             f"Published {self.label.lower()} relative in frame '{frame_id}': "
             f"linear=({dx}, {dy}, {dz}) angular=({droll}, {dpitch}, {dyaw})"
         )
-    
+
+    def send_velocity(
+        self,
+        linear: Tuple[float, float, float],
+        angular: Tuple[float, float, float],
+    ) -> None:
+        """发送连续笛卡尔速度流（OCS2 状态）。
+
+        控制器把速度按控制周期 ``dt`` 积分为目标位姿（latched 速度流）。
+        每条 Twist 被 latch 后持续积分，但 0.2s 内没有新的 Twist 消息会自动停止。
+        因此：
+          - 线速度单位为 m/s，角速度单位为 rad/s，表达在控制器 base_frame 下。
+          - 单次调用只维持约 0.2s；持续运动需要调用方以 ≥5Hz 循环发布。
+          - 显式停止可发布全零速度 (0,0,0) / (0,0,0)。
+
+        Args:
+            linear: 线速度 (vx, vy, vz)（m/s）。
+            angular: 角速度 (wx, wy, wz)（rad/s）。
+
+        Raises:
+            ROS2NotConnectedError: 如果发布器未初始化
+        """
+        if self.twist_pub is None:
+            raise ROS2NotConnectedError(f"{self.label} twist publisher not initialized")
+
+        if self.config.auto_switch_fsm_before_control and self.fsm_command_callback is not None:
+            try:
+                current = self.query_fsm_command()
+                if current != FSM_OCS2:
+                    self.fsm_command_callback(FSM_OCS2)
+                    logger.debug(f"{self.label}: auto-switched FSM to OCS2 for arm velocity control")
+            except Exception as e:
+                logger.warning(f"{self.label}: failed to auto-switch FSM to OCS2: {e}")
+
+        # 速度流期间目标位姿持续变化，清空旧的 current target，避免到位误判
+        self.latest_target_pose = None
+
+        msg = Twist()
+        msg.linear.x = float(linear[0])
+        msg.linear.y = float(linear[1])
+        msg.linear.z = float(linear[2])
+        msg.angular.x = float(angular[0])
+        msg.angular.y = float(angular[1])
+        msg.angular.z = float(angular[2])
+        self.twist_pub.publish(msg)
+        logger.debug(
+            f"Published {self.label.lower()} twist: "
+            f"linear={tuple(linear)} angular={tuple(angular)}"
+        )
+
     def get_target_pose(self) -> Optional[Pose]:
         if not self.current_target_topic:
             return None
@@ -420,7 +473,11 @@ class ArmHandler:
         if self.relative_pub:
             self.relative_pub.destroy()
             self.relative_pub = None
-        
+
+        if self.twist_pub:
+            self.twist_pub.destroy()
+            self.twist_pub = None
+
         if self.joint_controller_pub:
             self.joint_controller_pub.destroy()
             self.joint_controller_pub = None

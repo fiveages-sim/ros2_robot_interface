@@ -159,6 +159,45 @@ interface.left_arm_handler.send_relative(0.03, 0.0, 0.0, frame_id="left_eef")
 ---
 
 
+#### `send_velocity(linear, angular) -> None`
+
+**功能：** 发送连续笛卡尔速度流，控制器按控制周期积分成目标位姿（OCS2 状态）。
+
+**原理：**
+- 类型：Topic 发布
+- 名称：`{end_effector_target_topic}/twist`，即 `/left_target/twist` 或 `/right_target/twist`；右臂仅双臂模式存在
+- 消息：`geometry_msgs/msg/Twist`
+- 隐式 FSM：切到 OCS2（经 `/fsm_command`）
+
+**参数：**
+- `linear` (`Tuple[float, float, float]`): 线速度 `(vx, vy, vz)`，单位 m/s
+- `angular` (`Tuple[float, float, float]`): 角速度 `(wx, wy, wz)`，单位 rad/s
+
+**说明：**
+- 速度表达在控制器 `base_frame` 下（Twist 无 frame 字段，直接在当前目标位姿上积分）
+- **latched 速度流**：控制器 latch 每条 Twist 并按控制周期 `dt` 积分；**0.2s 内没有新 Twist 消息会自动停止**
+- 单次调用只维持约 0.2s；持续运动需调用方以 ≥5Hz 循环发布同一速度
+- 显式停止：发布全零速度 `(0,0,0)` / `(0,0,0)`
+- 发布前会清空 `latest_target_pose`，避免到位误判
+- 未创建 publisher 时抛 `ROS2NotConnectedError`
+
+**示例：**
+```python
+import time
+
+# 沿 base_frame 的 X 以 0.05 m/s 持续移动；控制器 0.2s 无新消息会自动停，
+# 因此需要循环发布维持速度
+for _ in range(10):  # 约 0.5s 持续运动
+    interface.left_arm_handler.send_velocity((0.05, 0.0, 0.0), (0.0, 0.0, 0.0))
+    time.sleep(0.05)
+
+# 显式停止
+interface.left_arm_handler.send_velocity((0.0, 0.0, 0.0), (0.0, 0.0, 0.0))
+```
+
+---
+
+
 https://github.com/user-attachments/assets/b80e994e-e374-4580-b947-769c8c169ba2
 
 
@@ -960,6 +999,40 @@ head_positions = [0.5, -0.3]  # 弧度
 interface.send_head_joint_positions(head_positions)
 ```
 
+#### `send_head_joint_trajectory(joint_names: List[str], waypoints: List[List[float]], trajectory_duration: float | None = None) -> None`
+
+**功能：** 发送头部关节多路点轨迹（split 拓扑）。
+
+**原理：**
+- 类型：Topic 发布
+- 名称：`config.head_joint_trajectory_topic`（自动检测 `/head_joint_controller/target_joint_trajectory`）
+- 消息：`trajectory_msgs/msg/JointTrajectory`
+- 隐式 FSM：切到 MOVEJ
+- 执行参数：`trajectory_duration` 非空时写 `movej_trajectory_duration` 到 head 控制器节点（`head_joint_controller`）
+- 控制器自动把当前位置作为首路点
+
+**参数：**
+- `joint_names` (`List[str]`): 头部关节名列表（须与控制器关节一致）
+- `waypoints` (`List[List[float]]`): 多路点，每点为与 `joint_names` 等长的关节位置列表（弧度）
+- `trajectory_duration` (`float | None`): 可选总轨迹时长（秒）；`None` 沿用控制器当前参数
+
+**说明：**
+- 仅 split 拓扑存在该话题；WBC full-body 请用 `send_joint_trajectory()`（`/ocs2_wbc_controller/target_joint_trajectory`，`joint_names` 选头部关节）
+- 会把末路点缓存到内部，供 `check_arrive(part='head')` 使用
+- 未检测到 topic 时 `logger.warning` 后返回，不抛异常
+
+**示例：**
+```python
+interface.send_head_joint_trajectory(
+    joint_names=["head_joint1", "head_joint2"],
+    waypoints=[
+        [0.5, -0.3],
+        [0.0, 0.0],
+    ],
+    trajectory_duration=3.0,
+)
+```
+
 ---
 
 ### 获取状态
@@ -1090,6 +1163,40 @@ body_positions = [0.0, 0.0, 0.0, 0.0]  # 弧度
 interface.send_body_joint_positions(body_positions)
 ```
 
+#### `send_body_joint_trajectory(joint_names: List[str], waypoints: List[List[float]], trajectory_duration: float | None = None) -> None`
+
+**功能：** 发送躯干关节多路点轨迹（split 拓扑）。
+
+**原理：**
+- 类型：Topic 发布
+- 名称：`config.body_joint_trajectory_topic`（自动检测 `/body_joint_controller/target_joint_trajectory`）
+- 消息：`trajectory_msgs/msg/JointTrajectory`
+- 隐式 FSM：切到 MOVEJ
+- 执行参数：`trajectory_duration` 非空时写 `movej_trajectory_duration` 到 body 控制器节点（`body_joint_controller`）
+- 控制器自动把当前位置作为首路点
+
+**参数：**
+- `joint_names` (`List[str]`): 躯干关节名列表（须与控制器关节一致）
+- `waypoints` (`List[List[float]]`): 多路点，每点为与 `joint_names` 等长的关节位置列表（弧度）
+- `trajectory_duration` (`float | None`): 可选总轨迹时长（秒）；`None` 沿用控制器当前参数
+
+**说明：**
+- 仅 split 拓扑存在该话题；WBC full-body 请用 `send_joint_trajectory()`（`/ocs2_wbc_controller/target_joint_trajectory`，`joint_names` 选躯干关节）
+- 会把末路点缓存到内部，供 `check_arrive(part='body')` 使用
+- 未检测到 topic 时 `logger.warning` 后返回，不抛异常
+
+**示例：**
+```python
+interface.send_body_joint_trajectory(
+    joint_names=["body_joint1", "body_joint2", "body_joint3", "body_joint4"],
+    waypoints=[
+        [0.0, 0.0, 0.0, 0.0],
+        [0.2, 0.0, 0.1, 0.0],
+    ],
+    trajectory_duration=3.0,
+)
+```
+
 #### `send_body_relative(dx, dy, dz, droll=0.0, dpitch=0.0, dyaw=0.0, frame_id="") -> None`
 
 **功能：** 发送身体一次笛卡尔相对位移，叠到当前身体指令目标上并走 MoveL。
@@ -1112,6 +1219,68 @@ interface.send_body_joint_positions(body_positions)
 **示例：**
 ```python
 interface.send_body_relative(0.03, 0.0, 0.0)
+```
+
+#### `send_body_target(pose: Pose) -> None`
+
+**功能：** 发送 body 绝对位姿目标（控制器 base_frame 坐标系下，立即生效、不插值）。
+
+**原理：**
+- 类型：Topic 发布
+- 名称：`config.body_target_topic`（自动检测 `/body_target`）
+- 消息：`geometry_msgs/msg/Pose`
+- 隐式 FSM：切到 OCS2；再经 `/mode_command` 切到 `BODY_TRACKING`（已是该模式则不重复发）
+- 到位依赖：`/body_current_target`（`body_current_target_pose_topic`）
+
+**参数：**
+- `pose` (`Pose`): 目标位姿，位于控制器 base_frame 坐标系下
+
+**说明：**
+- `pose` 不做 TF 变换，必须已是 base_frame 下的绝对目标；跨坐标系请用 `send_body_target_stamped()`
+- 与 `send_dual_arm_target_stamped(..., body_pose=...)` 不同，本方法不要求同时提供双臂目标
+- 仅 WBC 图上通常才有该 topic；未检测到时 `logger.warning` 后返回，不抛异常
+- 发布前清空 `body_current_target_pose`
+
+**示例：**
+```python
+from geometry_msgs.msg import Pose
+
+target = Pose()
+target.position.x = 0.0
+target.position.y = 0.0
+target.position.z = 0.05
+target.orientation.w = 1.0
+interface.send_body_target(target)
+```
+
+#### `send_body_target_stamped(frame_id: str = "", pose: Optional[Pose] = None) -> None`
+
+**功能：** 发送带坐标系信息的 body 绝对位姿目标（PoseStamped）。
+
+**原理：**
+- 类型：Topic 发布
+- 名称：`{config.body_target_topic}/stamped`（即 `/body_target/stamped`）
+- 消息：`geometry_msgs/msg/PoseStamped`
+- 隐式 FSM：切到 OCS2；再经 `/mode_command` 切到 `BODY_TRACKING`
+- 到位依赖：`/body_current_target`（`body_current_target_pose_topic`）
+
+**参数：**
+- `frame_id` (`str`): 目标位姿所在坐标系；控制器对 `frame_id == base_frame` 直接采用，其它坐标系会 TF 转换到 base_frame（转换失败则丢弃该目标）。空字符串时原样发布（不会触发 TF），建议显式传入实际 `base_frame` 名
+- `pose` (`Optional[Pose]`): 目标位姿；必须提供，否则抛 `ValueError`
+
+**说明：**
+- TF 转换由控制器端完成，Python 端不做转换
+- 未检测到 topic 时 `logger.warning` 后返回，不抛异常
+- 发布前清空 `body_current_target_pose`
+
+**示例：**
+```python
+from geometry_msgs.msg import Pose
+
+target = Pose()
+target.position.x = 0.05
+target.orientation.w = 1.0
+interface.send_body_target_stamped("base_link", target)
 ```
 
 #### `send_waist_lifting_relative_position(position: float) -> None`
@@ -2384,6 +2553,8 @@ interface.set_node_parameters(interface.body_controller, {"waist_lifting_duratio
 | `execute_path` / `execute_left_path` / `execute_right_path` | `arm_controller` | Service 字段 `trajectory_duration`；`0` 时用 `movel_trajectory_duration`（臂控 YAML 默认 6 s） |
 | `send_joint_positions`、`send_head_joint_positions`、`send_body_joint_positions`、`send_*_hand_joint_positions`、`send_dual_arm_joint_positions`、`send_coordinated_joint_positions` | 各控制器 | `movej_duration`、`movej_interpolation_type`（`linear` / `tanh` / `doubles`）、`movej_tanh_scale` |
 | `send_joint_trajectory` | `arm_controller` | `movej_trajectory_duration`（方法参数会先写入）、`movej_trajectory_blend_ratio` |
+| `send_body_joint_trajectory` | `body_joint_controller` | `movej_trajectory_duration`（方法参数会先写入）、`movej_trajectory_blend_ratio` |
+| `send_head_joint_trajectory` | `head_joint_controller` | 同上 |
 | `send_waist_lifting_relative_position`、`send_waist_lifting_pose_*`、`execute_waist_lifting_pose_*_action` | `body_controller` | `waist_lifting_duration`（默认 3 s） |
 | `send_waist_lifting_velocity_scale` / `send_waist_turning_velocity_scale` | `body_controller` | `waist_lifting_default_parameter` / `waist_turning_default_parameter` = `[目标速度, 最大加速度, 最大加加速度]`；实际速度 = `scale × 第一项` |
 
@@ -2400,6 +2571,8 @@ MoveL / MoveC Action 和 `joint_trajectory_with_para` 的时长写在 goal / req
 **原理：**
 - **未实现**。调用只打 `logger.warning("Cartesian velocity control not implemented yet")`，不发布任何 topic。
 - `config.max_linear_velocity` / `max_angular_velocity` 目前也未使用。
+
+> **实际可用的左右臂速度控制见 [手臂控制](#手臂控制-arm-handler) 的 `left_arm_handler.send_velocity()` / `right_arm_handler.send_velocity()`**（发布到 `/left_target/twist`、`/right_target/twist`）。
 
 ---
 
@@ -2479,14 +2652,14 @@ interface.send_fsm_command(FSM_OCS2)
 
 | 部分 | Handler 访问 | 发送命令 | 获取状态 | 检查到达 |
 |------|-------------|---------|---------|---------|
-| **左臂** | `left_arm_handler` | `send_target_stamped()` ⭐<br>`send_relative()`<br>`send_target()`<br>`send_joint_positions()`<br>`execute_movel_action()` | `get_pose()` ⭐<br>`get_target_pose()` | `check_arrival()` ⭐ |
+| **左臂** | `left_arm_handler` | `send_target_stamped()` ⭐<br>`send_relative()`<br>`send_velocity()`<br>`send_target()`<br>`send_joint_positions()`<br>`execute_movel_action()` | `get_pose()` ⭐<br>`get_target_pose()` | `check_arrival()` ⭐ |
 | **右臂** | `right_arm_handler` | 同上 | 同上 | 同上 |
 | **双臂** | 直接方法 | `send_dual_arm_target_stamped()`<br>`send_dual_arm_joint_positions()`<br>`execute_path()` | — | `check_arrive()` |
 | **左夹爪** | `left_gripper_handler` | `send_target_command()` ⭐<br>`send_joint_positions()` | `get_target_position()` | `check_arrival()` |
 | **右夹爪** | `right_gripper_handler` | `send_target_command()` ⭐<br>`send_joint_positions()` | `get_target_position()` | `check_arrival()` |
 | **灵巧手触觉** | 直接方法 | — | `get_hand_tactile(side, finger)` ⭐<br>`finger="all"` 取五指 | — |
-| **头部** | 直接方法 | `send_head_joint_positions()` | `get_joint_state()` | `check_arrive('head')` |
-| **身体** | 直接方法 | `send_body_joint_positions()`<br>`send_body_relative()`<br>`send_waist_lifting_pose_*()`<br>`execute_waist_lifting_pose_*_action()` | `get_joint_state()`<br>`get_body_current_pose()` | `check_arrive('body')`<br>`check_arrive('body_pose')` |
+| **头部** | 直接方法 | `send_head_joint_positions()`<br>`send_head_joint_trajectory()` | `get_joint_state()` | `check_arrive('head')` |
+| **身体** | 直接方法 | `send_body_joint_positions()`<br>`send_body_joint_trajectory()`<br>`send_body_relative()`<br>`send_body_target()` ⭐<br>`send_body_target_stamped()`<br>`send_waist_lifting_pose_*()`<br>`execute_waist_lifting_pose_*_action()` | `get_joint_state()`<br>`get_body_current_pose()` | `check_arrive('body')`<br>`check_arrive('body_pose')` |
 
 ---
 

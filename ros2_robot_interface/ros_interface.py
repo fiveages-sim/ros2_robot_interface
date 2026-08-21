@@ -124,10 +124,14 @@ class ROS2RobotInterface:
         self.waist_lifting_pose_action_client: ActionClient | None = None
         self.dual_target_stamped_pub: Publisher | None = None
         self.body_target_relative_pub: Publisher | None = None
+        self.body_target_pub: Publisher | None = None
+        self.body_target_stamped_pub: Publisher | None = None
         self.fsm_command_pub: Publisher | None = None
         self.mode_command_pub: Publisher | None = None
         self.head_joint_controller_pub: Publisher | None = None
         self.body_joint_controller_pub: Publisher | None = None
+        self.head_joint_trajectory_pub: Publisher | None = None
+        self.body_joint_trajectory_pub: Publisher | None = None
         self.left_hand_joint_controller_pub: Publisher | None = None
         self.right_hand_joint_controller_pub: Publisher | None = None
         self.arm_trajectory_pub: Publisher | None = None  # Unified trajectory publisher for both arms
@@ -380,6 +384,15 @@ class ROS2RobotInterface:
             )
             logger.info("Detected split head joint topic: /head_joint_controller/target_joint_position")
 
+        # split 拓扑的多路点轨迹话题（WBC 复用统一 WBC trajectory，不在此检测）
+        if self.config.body_joint_trajectory_topic is None and "/body_joint_controller/target_joint_trajectory" in topic_names:
+            self.config.body_joint_trajectory_topic = "/body_joint_controller/target_joint_trajectory"
+            logger.info("Detected split body joint trajectory topic: /body_joint_controller/target_joint_trajectory")
+
+        if self.config.head_joint_trajectory_topic is None and "/head_joint_controller/target_joint_trajectory" in topic_names:
+            self.config.head_joint_trajectory_topic = "/head_joint_controller/target_joint_trajectory"
+            logger.info("Detected split head joint trajectory topic: /head_joint_controller/target_joint_trajectory")
+
         if "/body_joint_controller/current_target_joint" in topic_names:
             self.config.body_joint_current_target_topic = "/body_joint_controller/current_target_joint"
 
@@ -394,6 +407,10 @@ class ROS2RobotInterface:
         if self.config.body_target_relative_topic is None and "/body_target/relative" in topic_names:
             self.config.body_target_relative_topic = "/body_target/relative"
             logger.info("Detected body target relative topic: /body_target/relative")
+
+        if self.config.body_target_topic is None and "/body_target" in topic_names:
+            self.config.body_target_topic = "/body_target"
+            logger.info("Detected body target topic: /body_target")
 
         if "/body_joint_controller/waist_lifting" in topic_names:
             self.config.waist_lifting_topic = "/body_joint_controller/waist_lifting"
@@ -664,6 +681,15 @@ class ROS2RobotInterface:
                 )
                 logger.info(f"Created body target relative publisher: {self.config.body_target_relative_topic}")
 
+            if self.config.body_target_topic:
+                self.body_target_pub = self.robot_node.create_publisher(
+                    Pose, self.config.body_target_topic, 10
+                )
+                self.body_target_stamped_pub = self.robot_node.create_publisher(
+                    PoseStamped, f"{self.config.body_target_topic}/stamped", 10
+                )
+                logger.info(f"Created body target publishers: {self.config.body_target_topic} (+ /stamped)")
+
             if self.config.joint_trajectory_action_name:
                 self.joint_trajectory_action_client = ActionClient(
                     self.robot_node,
@@ -865,6 +891,18 @@ class ROS2RobotInterface:
                 self.body_joint_controller_pub = self.robot_node.create_publisher(
                     Float64MultiArray, self.config.body_joint_controller_topic, 10
                 )
+
+            if self.config.body_joint_trajectory_topic:
+                self.body_joint_trajectory_pub = self.robot_node.create_publisher(
+                    JointTrajectory, self.config.body_joint_trajectory_topic, 10
+                )
+                logger.info(f"Created body joint trajectory publisher: {self.config.body_joint_trajectory_topic}")
+
+            if self.config.head_joint_trajectory_topic:
+                self.head_joint_trajectory_pub = self.robot_node.create_publisher(
+                    JointTrajectory, self.config.head_joint_trajectory_topic, 10
+                )
+                logger.info(f"Created head joint trajectory publisher: {self.config.head_joint_trajectory_topic}")
 
             if self.config.waist_lifting_topic:
                 self.waist_lifting_pub = self.robot_node.create_publisher(
@@ -2631,6 +2669,70 @@ class ROS2RobotInterface:
             f"linear=({dx}, {dy}, {dz}) angular=({droll}, {dpitch}, {dyaw})"
         )
 
+    def send_body_target(self, pose: Pose) -> None:
+        """发送 body 绝对位姿目标（控制器 base_frame 坐标系下，立即生效、不插值）。
+
+        Args:
+            pose: 目标位姿，位于控制器 base_frame 坐标系下。
+        """
+        if not self.is_connected:
+            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+
+        if self.body_target_pub is None:
+            logger.warning(
+                "Body target publisher not initialized. Set body_target_topic in config."
+            )
+            return
+
+        self.auto_switch_fsm_for_control("arm_pose")
+        self._switch_body_mode_if_needed("BODY_TRACKING")
+
+        # 清除旧的 current target，避免在收到新目标前误判为已到达
+        self.body_current_target_pose = None
+
+        self.body_target_pub.publish(pose)
+        logger.debug(f"Published body target: {pose}")
+
+    def send_body_target_stamped(self, frame_id: str = "", pose: Optional[Pose] = None) -> None:
+        """发送带坐标系信息的 body 绝对位姿目标（PoseStamped）。
+
+        TF 转换由控制器端完成：``frame_id`` 等于控制器 ``base_frame`` 名时直接采用，
+        其它坐标系会 lookupTransform 到 base_frame（TF 失败则丢弃该目标）。
+        ``frame_id`` 为空字符串时原样发布（frame_id 留空，不会触发 TF），
+        因此持续有效的用法是显式传入实际的 ``base_frame`` 名。
+
+        Args:
+            frame_id: 目标位姿所在坐标系；空字符串表示按控制器 base_frame 语义处理。
+            pose: 目标位姿。
+
+        Raises:
+            ValueError: 未提供 ``pose``。
+        """
+        if not self.is_connected:
+            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+
+        if self.body_target_stamped_pub is None:
+            logger.warning(
+                "Body target stamped publisher not initialized. Set body_target_topic in config."
+            )
+            return
+
+        if pose is None:
+            raise ValueError("pose is required in send_body_target_stamped()")
+
+        self.auto_switch_fsm_for_control("arm_pose")
+        self._switch_body_mode_if_needed("BODY_TRACKING")
+
+        # 清除旧的 current target，避免在收到新目标前误判为已到达
+        self.body_current_target_pose = None
+
+        msg = PoseStamped()
+        msg.header.frame_id = frame_id
+        msg.header.stamp = self.robot_node.get_clock().now().to_msg()
+        msg.pose = pose
+        self.body_target_stamped_pub.publish(msg)
+        logger.debug(f"Published body target (stamped) in frame '{frame_id}': {pose}")
+
     def send_waist_lifting_relative_position(self, position: float) -> None:
         """Send target relative position for waist lifting."""
         if not self.is_connected:
@@ -3478,8 +3580,143 @@ class ROS2RobotInterface:
                    f"for {len(joint_names)} joints")
         logger.debug(f"Joint names: {joint_names}")
         logger.debug(f"Waypoints: {len(waypoints)} points")
-    
-    
+
+    def send_body_joint_trajectory(self,
+                                   joint_names: List[str],
+                                   waypoints: List[List[float]],
+                                   trajectory_duration: float | None = None) -> None:
+        """发送躯干关节多路点轨迹（split 拓扑）。
+
+        控制器会把当前位置自动插到轨迹起点；``trajectory_duration`` 非空时，
+        发布前将 body 控制器节点（``body_joint_controller``）参数
+        ``movej_trajectory_duration`` 设为该值。
+
+        Args:
+            joint_names: 躯干关节名列表（须与控制器关节一致）。
+            waypoints: 多路点，每点为与 joint_names 等长的关节位置列表（弧度）。
+            trajectory_duration: 可选总轨迹时长（秒）；None 沿用控制器当前参数。
+
+        Raises:
+            ROS2NotConnectedError: 接口未连接。
+            ValueError: 路点非法。
+        """
+        if not self.is_connected:
+            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+
+        if not waypoints or len(waypoints) < 2:
+            raise ValueError("At least 2 waypoints are required (current position will be added as first waypoint)")
+
+        if len(joint_names) == 0:
+            raise ValueError("joint_names cannot be empty")
+
+        if self.body_joint_trajectory_pub is None:
+            logger.warning(
+                "Body joint trajectory publisher not initialized. Set body_joint_trajectory_topic in config."
+            )
+            return
+
+        self.auto_switch_fsm_for_control("body_joint")
+
+        for i, waypoint in enumerate(waypoints):
+            if len(waypoint) != len(joint_names):
+                raise ValueError(f"Waypoint {i} has {len(waypoint)} positions, but expected {len(joint_names)}")
+
+        if trajectory_duration is not None:
+            if trajectory_duration <= 0:
+                raise ValueError("trajectory_duration must be positive")
+            ctrl = self.body_controller
+            if not ctrl:
+                logger.warning("Body controller node unknown; cannot set movej_trajectory_duration")
+            elif not self.set_node_parameters(ctrl, {"movej_trajectory_duration": trajectory_duration}):
+                logger.warning("Failed to set movej_trajectory_duration on %s", ctrl)
+
+        trajectory_msg = JointTrajectory()
+        trajectory_msg.header.stamp = self.robot_node.get_clock().now().to_msg()
+        trajectory_msg.header.frame_id = ""
+        trajectory_msg.joint_names = joint_names
+
+        for waypoint in waypoints:
+            point = JointTrajectoryPoint()
+            point.positions = waypoint
+            trajectory_msg.points.append(point)
+
+        self.body_joint_trajectory_pub.publish(trajectory_msg)
+
+        # 缓存末路点供 check_arrive(part='body') 使用
+        self.body_target_positions = waypoints[-1].copy()
+
+        logger.info(f"Published body joint trajectory with {len(waypoints)} waypoints for {len(joint_names)} joints")
+        logger.debug(f"Joint names: {joint_names}")
+        logger.debug(f"Waypoints: {len(waypoints)} points")
+
+    def send_head_joint_trajectory(self,
+                                   joint_names: List[str],
+                                   waypoints: List[List[float]],
+                                   trajectory_duration: float | None = None) -> None:
+        """发送头部关节多路点轨迹（split 拓扑）。
+
+        控制器会把当前位置自动插到轨迹起点；``trajectory_duration`` 非空时，
+        发布前将 head 控制器节点（``head_joint_controller``）参数
+        ``movej_trajectory_duration`` 设为该值。
+
+        Args:
+            joint_names: 头部关节名列表（须与控制器关节一致）。
+            waypoints: 多路点，每点为与 joint_names 等长的关节位置列表（弧度）。
+            trajectory_duration: 可选总轨迹时长（秒）；None 沿用控制器当前参数。
+
+        Raises:
+            ROS2NotConnectedError: 接口未连接。
+            ValueError: 路点非法。
+        """
+        if not self.is_connected:
+            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+
+        if not waypoints or len(waypoints) < 2:
+            raise ValueError("At least 2 waypoints are required (current position will be added as first waypoint)")
+
+        if len(joint_names) == 0:
+            raise ValueError("joint_names cannot be empty")
+
+        if self.head_joint_trajectory_pub is None:
+            logger.warning(
+                "Head joint trajectory publisher not initialized. Set head_joint_trajectory_topic in config."
+            )
+            return
+
+        self.auto_switch_fsm_for_control("head_joint")
+
+        for i, waypoint in enumerate(waypoints):
+            if len(waypoint) != len(joint_names):
+                raise ValueError(f"Waypoint {i} has {len(waypoint)} positions, but expected {len(joint_names)}")
+
+        if trajectory_duration is not None:
+            if trajectory_duration <= 0:
+                raise ValueError("trajectory_duration must be positive")
+            ctrl = self._controller_node_from_topic(self.config.head_joint_controller_topic)
+            if not ctrl:
+                logger.warning("Head controller node unknown; cannot set movej_trajectory_duration")
+            elif not self.set_node_parameters(ctrl, {"movej_trajectory_duration": trajectory_duration}):
+                logger.warning("Failed to set movej_trajectory_duration on %s", ctrl)
+
+        trajectory_msg = JointTrajectory()
+        trajectory_msg.header.stamp = self.robot_node.get_clock().now().to_msg()
+        trajectory_msg.header.frame_id = ""
+        trajectory_msg.joint_names = joint_names
+
+        for waypoint in waypoints:
+            point = JointTrajectoryPoint()
+            point.positions = waypoint
+            trajectory_msg.points.append(point)
+
+        self.head_joint_trajectory_pub.publish(trajectory_msg)
+
+        # 缓存末路点供 check_arrive(part='head') 使用
+        self.head_target_positions = waypoints[-1].copy()
+
+        logger.info(f"Published head joint trajectory with {len(waypoints)} waypoints for {len(joint_names)} joints")
+        logger.debug(f"Joint names: {joint_names}")
+        logger.debug(f"Waypoints: {len(waypoints)} points")
+
     def _check_joint_arrival(self, part_name: str, target_positions: Optional[List[float]], 
                             current_positions: Optional[List[float]], threshold: float) -> Dict[str, Any]:
         """Check if joint positions have arrived at target."""
@@ -4273,6 +4510,14 @@ class ROS2RobotInterface:
             self.body_target_relative_pub.destroy()
             self.body_target_relative_pub = None
 
+        if self.body_target_pub:
+            self.body_target_pub.destroy()
+            self.body_target_pub = None
+
+        if self.body_target_stamped_pub:
+            self.body_target_stamped_pub.destroy()
+            self.body_target_stamped_pub = None
+
         self.body_current_pose = None
         self.body_current_target_pose = None
 
@@ -4372,7 +4617,15 @@ class ROS2RobotInterface:
         if self.body_joint_controller_pub:
             self.body_joint_controller_pub.destroy()
             self.body_joint_controller_pub = None
-        
+
+        if self.head_joint_trajectory_pub:
+            self.head_joint_trajectory_pub.destroy()
+            self.head_joint_trajectory_pub = None
+
+        if self.body_joint_trajectory_pub:
+            self.body_joint_trajectory_pub.destroy()
+            self.body_joint_trajectory_pub = None
+
         if self.left_hand_joint_controller_pub:
             self.left_hand_joint_controller_pub.destroy()
             self.left_hand_joint_controller_pub = None

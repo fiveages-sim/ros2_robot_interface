@@ -65,6 +65,8 @@ class ROS2RobotInterfaceConfig:
     # 也可以手动配置
     head_joint_controller_topic: str | None = None  # 【可自动检测】头部关节；WBC: /ocs2_wbc_controller/target_joint_position/head，split: /head_joint_controller/target_joint_position
     body_joint_controller_topic: str | None = None  # 【可自动检测】躯干关节；WBC: /ocs2_wbc_controller/target_joint_position/body，split: /body_joint_controller/target_joint_position
+    head_joint_trajectory_topic: str | None = None  # 【可自动检测】split 头部多路点轨迹话题（JointTrajectory），例如 "/head_joint_controller/target_joint_trajectory"；WBC 复用统一 WBC trajectory，不检测
+    body_joint_trajectory_topic: str | None = None  # 【可自动检测】split 躯干多路点轨迹话题（JointTrajectory），例如 "/body_joint_controller/target_joint_trajectory"；WBC 复用统一 WBC trajectory，不检测
     left_hand_joint_controller_topic: str | None = None  # 【可自动检测】左灵巧手关节控制器话题，例如 "/left_hand_controller/target_joint_position"
     right_hand_joint_controller_topic: str | None = None  # 【可自动检测】右灵巧手关节控制器话题，例如 "/right_hand_controller/target_joint_position"
     waist_lifting_topic: str | None = None  # 【可自动检测】腰部升降相对位置控制话题，例如 "/body_joint_controller/waist_lifting"
@@ -76,6 +78,7 @@ class ROS2RobotInterfaceConfig:
     body_current_pose_topic: str | None = None  # 【可自动检测】body 当前笛卡尔位姿话题（PoseStamped），例如 "/body_current_pose"，用于 body pose 到位判定
     body_current_target_pose_topic: str | None = None  # 【可自动检测】body 目标笛卡尔位姿话题（PoseStamped），例如 "/body_current_target"，用于 body pose 到位判定
     body_target_relative_topic: str | None = None  # 【可自动检测】body 一次笛卡尔相对位移话题（TwistStamped），例如 "/body_target/relative"
+    body_target_topic: str | None = None  # 【可自动检测】body 绝对位姿目标话题（Pose），例如 "/body_target"；stamped 由 f"{body_target_topic}/stamped" 推导
 
     # ============================================================================
     # 六维力 FT wrench 话题（可自动检测；robot.local.yaml 中 left_ft/right_ft 为 none 时可能不存在）
