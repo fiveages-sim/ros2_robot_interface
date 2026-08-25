@@ -211,7 +211,7 @@ https://github.com/user-attachments/assets/b80e994e-e374-4580-b947-769c8c169ba2
 - 消息：`geometry_msgs/msg/Pose`
 - 配置：`config.end_effector_target_topic` / `config.right_end_effector_target_topic`
 - 隐式 FSM：切到 OCS2（经 `/fsm_command`）
-- 执行参数：同上，`arm_controller` 上的 `movel_*`
+- 执行语义：控制器立即采用该绝对目标，不执行 MoveL 插值；`movel_*` 参数不影响本接口
 
 **参数：**
 - `pose` (`Pose`): 已经位于 `base_frame` 坐标系下的目标位姿
@@ -596,12 +596,25 @@ interface.send_dual_arm_joint_positions(left_positions, right_positions)
 - 类型：`arms_ros2_control_msgs/action/ExecuteLinear`（goal 内嵌 `LinearMessage`）
 - 隐式 FSM：`auto_switch_fsm=True` 时切到 MOVEJ（经 `/fsm_command`）
 
-**参数（节选）：**
-- `arm_name` (`str`): `"left"` / `"right"` / `"both"`
-- `endpoint_pose`: 终点位姿（`Pose` 或 `PoseStamped`）
-- `right_endpoint_pose`: 双臂时右臂终点
-- `feedback_callback`: 收到的是 action feedback 对象
-- 返回：action result；被拒绝或超时返回 `None`
+**参数：**
+
+**目标参数：**
+- `arm_name` (`str`): `"left"` / `"right"` / `"both"`；双臂时右侧目标参数必须与左侧输入成对提供
+- `endpoint_pose`: 终点位姿（`Pose` 或 `PoseStamped`）；平移单位为米
+- `right_endpoint_pose`: 双臂时右臂终点（`Pose` 或 `PoseStamped`）
+
+**规划参数：**
+- `duration` (`float`): 目标运动时长，单位秒，默认 3.0；`time_mode=True` 时作为时间约束
+- `time_mode` (`bool`): `True` 按 `duration` 时间约束执行；`False` 按速度、加速度和 jerk 约束规划
+- `frame_id` (`str | None`): 目标位姿坐标系；传 `None` 时不覆盖消息默认值，控制器对空字符串读取 `cartesian_defaults.frame_id`
+- `ik_type` (`str | None`): 逆解类型；传 `None` 时不覆盖消息默认值，控制器对空字符串读取 `cartesian_defaults.ik_type`
+- `max_linear_velocity` / `max_linear_acceleration` / `max_linear_jerk` (`float | None`): 线速度（m/s）、线加速度、线 jerk 约束；平移单位为米
+- `max_angular_velocity` / `max_angular_acceleration` / `max_angular_jerk` (`float | None`): 角速度、角加速度、角 jerk 约束；旋转角、角速度、角加速度和角 jerk 使用弧度制。六个 `max_*` 传 `None` 时 Python 不写字段，控制器对非正值回退对应 `cartesian_defaults.*`
+
+
+
+**返回值：**
+- action result；goal 被拒绝或超时返回 `None`
 
 **示例：**
 ```python
@@ -625,6 +638,28 @@ result = interface.execute_movel_action("left", goal, duration=3.0, frame_id="ar
 - 类型：`arms_ros2_control_msgs/action/MovecUseIK`（`use_three_point_method=True`）
 - 隐式 FSM：默认切到 MOVEJ
 
+**参数：**
+
+**目标参数：**
+- `arm_name` (`str`): `"left"` / `"right"` / `"both"`；双臂时右侧目标参数必须与左侧输入成对提供
+- `midpoint_pose`: 圆弧中点位姿（`Pose` 或 `PoseStamped`），平移单位为米
+- `endpoint_pose`: 圆弧终点位姿（`Pose` 或 `PoseStamped`），平移单位为米
+- `rotate_angle` (`float`): 圆弧转角，单位弧度
+- `right_midpoint_pose` / `right_endpoint_pose`: 双臂时右臂中点 / 终点（`Pose` 或 `PoseStamped`）
+- `right_rotate_angle` (`float`): 双臂时右臂圆弧转角，单位弧度
+
+**规划参数：**
+- `duration` (`float`): 目标运动时长，单位秒，默认 6.0；`time_mode=True` 时作为时间约束
+- `time_mode` (`bool`): `True` 按 `duration` 时间约束执行；`False` 按速度、加速度和 jerk 约束规划（默认 `False`）
+- `frame_id` (`str | None`): 目标位姿坐标系；传 `None` 时不覆盖消息默认值，控制器对空字符串读取 `cartesian_defaults.frame_id`
+- `ik_type` (`str | None`): 逆解类型；传 `None` 时不覆盖消息默认值，控制器对空字符串读取 `cartesian_defaults.ik_type`
+- `use_slerp_for_orientation` (`bool`): 是否用 slerp 插值姿态，默认 `False`
+- `max_linear_velocity` / `max_linear_acceleration` / `max_linear_jerk` (`float | None`): 线速度（m/s）、线加速度、线 jerk 约束；平移单位为米
+- `max_angular_velocity` / `max_angular_acceleration` / `max_angular_jerk` (`float | None`): 角速度、角加速度、角 jerk 约束；旋转角、角速度、角加速度和角 jerk 使用弧度制。六个 `max_*` 传 `None` 时 Python 不写字段，控制器对非正值回退对应 `cartesian_defaults.*`
+
+**返回值：**
+- action result；goal 被拒绝或超时返回 `None`
+
 #### `execute_movec_action_parametric(arm_name, center, axis, rotate_angle, *, endpoint_pose=None, duration=6.0, ...) -> Any`
 
 **功能：** 圆心 / 轴 / 转角参数化圆弧（MoveC）。
@@ -634,6 +669,40 @@ result = interface.execute_movel_action("left", goal, duration=3.0, frame_id="ar
 - 名称：同上 `config.movec_action_name`
 - 类型：`arms_ros2_control_msgs/action/MovecUseIK`（`use_three_point_method=False`）
 - 隐式 FSM：默认切到 MOVEJ
+
+**参数：**
+
+**目标参数：**
+- `arm_name` (`str`): `"left"` / `"right"` / `"both"`；双臂时右侧目标参数必须与左侧输入成对提供
+- `center`: 圆弧圆心（`Point` 或 `(x, y, z)`，单位米）
+- `axis`: 圆弧旋转轴（`Vector3` 或 `(x, y, z)`）
+- `rotate_angle` (`float`): 圆弧转角，单位弧度
+- `endpoint_pose`: 可选终点姿态（`Pose` 或 `PoseStamped`），只取其中 orientation 作为方向姿态；省略时默认单位四元数
+- `right_center` / `right_axis` / `right_rotate_angle` / `right_endpoint_pose`: 双臂时右臂圆弧参数，语义同左侧
+
+**规划参数：** 同三点法 MoveC（见上文 `execute_movec_action_three_point`）：`duration`、`time_mode`、`frame_id`、`ik_type`、`use_slerp_for_orientation`、六个 `max_*`（含单位、`None` 与 `cartesian_defaults.*` 回退语义）
+
+**执行与等待参数：** 同三点法 MoveC：`auto_switch_fsm`、`feedback_callback`、`timeout`（默认 60.0）、`wait_for_server_timeout`（默认 5.0）
+
+**返回值：**
+- action result；goal 被拒绝或超时返回 `None`
+
+**Action 控制器默认值（`cartesian_defaults.*`）：**
+
+调用时省略（`None`）的字段由控制器按下列回退参数补齐，数据来自 W2 `common.yaml`：
+
+| Action 回退参数 | W2 默认值 | 生效条件 |
+|-----------------|------------|----------|
+| `cartesian_defaults.frame_id` | `arm_base` | goal 的 `frame_id` 为空 |
+| `cartesian_defaults.ik_type` | `AUTO` | goal 的 `ik_type` 为空 |
+| `cartesian_defaults.max_linear_velocity` | `0.3` | goal 对应值非正 |
+| `cartesian_defaults.max_linear_acceleration` | `1.0` | goal 对应值非正 |
+| `cartesian_defaults.max_linear_jerk` | `5.0` | goal 对应值非正 |
+| `cartesian_defaults.max_angular_velocity` | `0.5` | goal 对应值非正 |
+| `cartesian_defaults.max_angular_acceleration` | `1.0` | goal 对应值非正 |
+| `cartesian_defaults.max_angular_jerk` | `5.0` | goal 对应值非正 |
+
+这些是 MoveL / MoveC Action 的 goal 回退值，不是 `send_target_stamped` 等 Topic 接口的 `movel_*` 参数。
 
 ---
 
@@ -659,6 +728,20 @@ result = interface.execute_movel_action("left", goal, duration=3.0, frame_id="ar
 - 隐式 FSM：默认切到 MOVEJ
 - 与 `send_joint_trajectory()` 不同：后者是 **Topic 发布** `/{controller}/target_joint_trajectory`，本方法走 Action 并等待结果
 
+**参数：**
+- `joint_names` (`List[str]`): 被控制关节名；不可为空，每个 waypoint 长度必须等于关节数
+- `waypoints` (`List[List[float]]`): 路点关节角列表，单位弧度；不可为空，每个路点长度必须等于 `joint_names` 长度，否则抛 `ValueError`
+- `time_mode` (`bool`): `True` 按固定时间约束执行；`False` 按速度 / 加速度 / jerk 约束规划（默认 `True`）
+- `total_time` (`float | None`): 写入每个 waypoint 的总时长（秒）；`None` 时沿用控制器默认规划
+- `max_velocity` / `max_acceleration` / `max_jerk` (`float | List[float] | None`): 速度 / 加速度 / jerk 约束；可传标量（广播到每个关节）或逐关节列表，列表长度与 `joint_names` 不匹配时抛 `ValueError`
+- `auto_switch_fsm` (`bool`): 是否自动切到 MOVEJ（经 `/fsm_command`），默认 `True`
+- `feedback_callback`: 收到的是 action feedback 对象
+- `timeout` (`float`): 等待 action result 的超时（秒），默认 30.0
+- `wait_for_server_timeout` (`float`): 等待 action server 就绪的超时（秒），默认 5.0
+
+**返回值：**
+- action result；goal 被拒绝或超时返回 `None`
+
 **示例：**
 ```python
 result = interface.execute_joint_trajectory_action(
@@ -668,11 +751,22 @@ result = interface.execute_joint_trajectory_action(
 )
 ```
 
-#### `execute_dual_arm_movej_action(left_arm_positions, right_arm_positions, *, duration=None, ...) -> Any`
+#### `execute_dual_arm_movej_action(left_arm_positions, right_arm_positions, *, duration=None, time_mode=True, left_joint_names=None, right_joint_names=None, max_velocity=None, max_acceleration=None, max_jerk=None, auto_switch_fsm=True, feedback_callback=None, timeout=30.0, wait_for_server_timeout=5.0) -> Any`
 
 **功能：** 双臂参数化 MoveJ 的便捷封装（把左右臂关节拼成一条 `execute_joint_trajectory_action`）。
 
 **原理：** 同 `execute_joint_trajectory_action`（同一个 Action）。
+
+**参数：**
+- `left_arm_positions` / `right_arm_positions` (`List[float]`): 左右臂关节角列表，单位弧度；左右拼接成单个 waypoint（左在前、右在后）
+- `duration` (`float | None`): 总时长（秒），转发为 `total_time` 写入 waypoint；`None` 时沿用控制器默认规划
+- `time_mode` (`bool`): 同 `execute_joint_trajectory_action`
+- `left_joint_names` / `right_joint_names` (`List[str] | None`): 左右臂关节名，拼接为 `joint_names`；默认各使用 7 个标准关节名（`left_joint1..7` / `right_joint1..7`）
+- `max_velocity` / `max_acceleration` / `max_jerk`: 同 `execute_joint_trajectory_action`（标量广播 / 列表长度校验）
+- `auto_switch_fsm`、`feedback_callback`、`timeout`、`wait_for_server_timeout`: 语义与 `execute_joint_trajectory_action` 一致
+
+**返回值：**
+- action result；goal 被拒绝或超时返回 `None`
 
 ---
 
@@ -710,6 +804,15 @@ interface.right_gripper_handler
 ---
 
 ### 发送命令
+
+**控制器后端与执行参数：**
+
+夹爪 / 灵巧手的命令可能落到两类控制器之一，参数不能互相套用：
+
+- **灵巧手（`BasicJointController`）**：`send_target_command`（离散开合）与 `send_position_percent`（百分比）走 `target_command` / `target_percent` 订阅路径，由 `target_command_enabled` 控制是否启用；`target_command_close_config` / `target_command_open_config` 选择 `home_<index>` 配置（默认索引 1 / 0，机器人 YAML 可覆盖）；`target_command_hold_joints` 指定执行离散/百分比命令时保持当前值的关节。`send_joint_positions` 走普通关节位置路径。
+- **夹爪（`AdaptiveGripperController`）**：`use_effort_interface`、`force_threshold`、`force_feedback_ratio` 只影响 `send_target_command` 与 `send_position_percent` 的开合/百分比路径；`force_feedback_ratio=0` 表示触发力阈值后停在当前位置，`1` 表示继续运动到原目标。`send_joint_positions` 进入 direct position mode，**不使用**自适应力反馈。
+
+对应节点为左/右 `hand_controller` 或 `gripper_controller`（见 [控制器执行参数](#控制器执行参数)）。
 
 
 https://github.com/user-attachments/assets/16c98f20-b795-4ef3-9872-06cc6ece01f1
@@ -776,6 +879,7 @@ https://github.com/user-attachments/assets/17ff1a2b-1496-4f19-aa37-cbce55c11c04
 - 位置会自动限制在 `gripper_min_position` 和 `gripper_max_position` 之间
 - 会更新内部 `target_position`，并清空位置历史
 - 这里的 `position` 是实际行程值，不是百分比
+- 对 AdaptiveGripperController 进入 direct position mode，**不使用**自适应力反馈；`use_effort_interface` / `force_threshold` / `force_feedback_ratio` 不适用于本方法
 
 **示例：**
 ```python
@@ -1263,6 +1367,7 @@ interface.send_body_target(target)
 - 消息：`geometry_msgs/msg/PoseStamped`
 - 隐式 FSM：切到 OCS2；再经 `/mode_command` 切到 `BODY_TRACKING`
 - 到位依赖：`/body_current_target`（`body_current_target_pose_topic`）
+- 执行参数：`arm_controller` 上的 `movel_duration`、`movel_max_linear_*` / `movel_max_angular_*`、`movel_auto_extend_duration`、`movel_sample_interval`（见 [控制器执行参数](#控制器执行参数)）
 
 **参数：**
 - `frame_id` (`str`): 目标位姿所在坐标系；控制器对 `frame_id == base_frame` 直接采用，其它坐标系会 TF 转换到 base_frame（转换失败则丢弃该目标）。空字符串时原样发布（不会触发 TF），建议显式传入实际 `base_frame` 名
@@ -1285,6 +1390,8 @@ interface.send_body_target_stamped("base_link", target)
 
 #### `send_waist_lifting_relative_position(position: float) -> None`
 
+> ⚠️ **兼容旧接口：** 新代码统一使用对应的 `execute_waist_lifting_pose_*_action`；本 Topic 仅用于兼容既有调用，不提供执行结果与可达性信息。它只兼容单一 `dz`，推荐替换为 `execute_waist_lifting_pose_relative_action(0.0, dz, 0.0)`。
+
 **功能：** 发送腰部升降相对位置命令（单标量）。
 
 **原理：**
@@ -1302,6 +1409,8 @@ interface.send_waist_lifting_relative_position(0.05)
 ```
 
 #### `send_waist_lifting_pose_relative(dx: float, dz: float, dphi: float) -> None`
+
+> ⚠️ **兼容旧接口：** 新代码统一使用对应的 `execute_waist_lifting_pose_*_action`；本 Topic 仅用于兼容既有调用，不提供执行结果与可达性信息。推荐替换为 `execute_waist_lifting_pose_relative_action(dx, dz, dphi)`。
 
 **功能：** 发送腰部局部 x/z/phi 相对移动命令
 
@@ -1328,6 +1437,8 @@ interface.send_waist_lifting_pose_relative(0.02, 0.05, 0.10)
 ```
 
 #### `send_waist_lifting_pose_absolute(x: float, z: float, phi: float) -> None`
+
+> ⚠️ **兼容旧接口：** 新代码统一使用对应的 `execute_waist_lifting_pose_*_action`；本 Topic 仅用于兼容既有调用，不提供执行结果与可达性信息。推荐替换为 `execute_waist_lifting_pose_absolute_action(x, z, phi)`。
 
 **功能：** 发送腰部 x/z/phi 绝对目标命令
 
@@ -1415,20 +1526,39 @@ interface.send_waist_turning_velocity_scale(-0.2)
 - 类型：`arms_ros2_control_msgs/action/WaistLiftingPose`
 - `mode`：`WaistLiftingPose.Goal.MODE_ABSOLUTE` 或 `MODE_RELATIVE`
 - 隐式 FSM：默认切到 MOVEJ
-- 返回 result（含 `reachable` / `success` / `planned_x/z/phi` 等）；拒绝或超时返回 `None`
 - 执行参数：`body_controller` 上的 `waist_lifting_duration`（默认 3 s）
 
-#### `execute_waist_lifting_pose_absolute_action(x, z, phi, ...) -> Any`
+**参数：**
+- `mode` (`int`): `WaistLiftingPose.Goal.MODE_ABSOLUTE` 或 `MODE_RELATIVE`
+- `x` / `z` (`float`): 目标 x/z；绝对模式为 `body_base` 下绝对目标，相对模式为增量 `dx` / `dz`；单位米
+- `phi` (`float`): 平面角目标 / 增量 `dphi`；单位弧度
+- `auto_switch_fsm` (`bool`): 是否自动切到 body MoveJ（经 `/fsm_command`），默认 `True`
+- `feedback_callback`: 收到的是 action feedback 对象
+- `timeout` (`float`): 等待 action result 的超时（秒），默认 30.0
+- `wait_for_server_timeout` (`float`): 等待 action server 就绪的超时（秒），默认 5.0
+
+**返回值：**
+- result（含 `reachable` / `success` / `planned_x/z/phi` 等）；goal 被拒绝或超时返回 `None`
+
+#### `execute_waist_lifting_pose_absolute_action(x, z, phi, *, auto_switch_fsm=True, feedback_callback=None, timeout=30.0, wait_for_server_timeout=5.0) -> Any`
 
 **功能：** 腰部绝对位姿运动（`MODE_ABSOLUTE` 包装）。x/z/phi 为 `body_base` 下绝对目标。
 
 **原理：** 同 `execute_waist_lifting_pose_action`。
 
-#### `execute_waist_lifting_pose_relative_action(dx, dz, dphi, ...) -> Any`
+**参数：** 完整公共参数与 `execute_waist_lifting_pose_action` 一致（`x`、`z`、`phi`、`auto_switch_fsm`、`feedback_callback`、`timeout`、`wait_for_server_timeout`），其中 `mode` 固定为 `MODE_ABSOLUTE`。
+
+**返回值：** 同 `execute_waist_lifting_pose_action`。
+
+#### `execute_waist_lifting_pose_relative_action(dx, dz, dphi, *, auto_switch_fsm=True, feedback_callback=None, timeout=30.0, wait_for_server_timeout=5.0) -> Any`
 
 **功能：** 腰部相对位姿运动（`MODE_RELATIVE` 包装）。
 
 **原理：** 同 `execute_waist_lifting_pose_action`。
+
+**参数：** 完整公共参数与 `execute_waist_lifting_pose_action` 一致（`dx`、`dz`、`dphi`、`auto_switch_fsm`、`feedback_callback`、`timeout`、`wait_for_server_timeout`），其中 `mode` 固定为 `MODE_RELATIVE`。
+
+**返回值：** 同 `execute_waist_lifting_pose_action`。
 
 ---
 
@@ -1947,6 +2077,9 @@ if categorized_state:
 - 消息：`std_msgs/msg/Float64MultiArray`
 - 执行参数：该手控制器节点上的 `movej_*`
 
+**参数：**
+- `positions` (`List[float]`): 灵巧手目标关节角，单位弧度；列表长度和顺序必须与对应手控制器的 `joints` 配置一致
+
 **说明：**
 - 适用于需要独立控制灵巧手每个关节的位置场景
 
@@ -1959,6 +2092,9 @@ if categorized_state:
 - 名称：`config.right_hand_joint_controller_topic`（自动检测 `/right_hand_controller/target_joint_position`）
 - 消息：`std_msgs/msg/Float64MultiArray`
 - 执行参数：该手控制器节点上的 `movej_*`
+
+**参数：**
+- `positions` (`List[float]`): 灵巧手目标关节角，单位弧度；列表长度和顺序必须与对应手控制器的 `joints` 配置一致
 
 **示例：**
 ```python
@@ -2131,11 +2267,13 @@ else:
 - 名称：`/target_path`
 - 消息：`nav_msgs/msg/Path`
 - 隐式 FSM：切到 OCS2
+- 执行参数：`arm_controller` 上的 `movel_trajectory_duration`，作为整条已弃用 Topic 路径的规划时长
 
 **说明：**
 - 要求双臂模式
 - 左右轨迹点数量需要一致（按阶段一一对应）
 - 可传入 `Pose` 或 `PoseStamped`
+- `frame_id` 未提供时，取第一个 `PoseStamped` 的 `header.frame_id`，否则用 `base_link`
 - 会清空旧 target 缓存，避免到达判断误判
 
 #### `execute_path(left_poses, right_poses, trajectory_duration: float = 0.0, frame_id: Optional[str] = "arm_base") -> bool`
@@ -2149,6 +2287,11 @@ else:
 - 空列表表示该臂不更新（控制器保持原参考轨迹）
 - 隐式 FSM：切到 OCS2
 - 执行参数：`trajectory_duration=0` 时用 `arm_controller` 节点参数 `movel_trajectory_duration`（臂控 YAML 默认 6 s）
+
+**参数：**
+- `left_poses` / `right_poses` (`List[Pose | PoseStamped]`): 左右臂路径点，接受 `Pose` 或 `PoseStamped` 序列；Service 支持左右不等长，空列表表示该臂保持当前参考轨迹
+- `trajectory_duration` (`float`): 整条路径总时长，单位秒；`0` 时回退 `arm_controller` 节点参数 `movel_trajectory_duration`（臂控 YAML 默认 6 s）
+- `frame_id` (`str | None`): 未携带 frame 的 `Pose` 的默认坐标系，默认 `arm_base`
 
 **说明：**
 - 不要求左右轨迹点数量一致（支持不等长路径）
@@ -2215,7 +2358,13 @@ print(f"execute_path success: {ok}")
 - 需要等待结果时请用 `execute_joint_trajectory_action`
 
 **参数：**
-- `trajectory_duration`：可选，整条轨迹总时长（秒）。若指定，会在发布前将臂控制器节点参数 `movej_trajectory_duration` 设为该值（与 ros2-viser 控制器配置一致）；`None` 则沿用控制器当前参数。
+- `joint_names` (`List[str]`): 被控制关节名，顺序决定每个 waypoint 中数值的对应关系；不可为空
+- `waypoints` (`List[List[float]]`): 目标关节角路点，单位弧度；不可为空，每个路点长度必须等于 `joint_names` 长度；控制器会把当前关节位置作为首个路点，因此至少需提供 2 个路点
+- `trajectory_duration` (`float | None`): 整条轨迹总时长，单位秒；给定时先写入 `arm_controller.movej_trajectory_duration`（与 ros2-viser 控制器配置一致），`None` 沿用当前节点参数
+
+**异常：**
+- `ROS2NotConnectedError`: 接口未连接，或轨迹发布器 / `arm_controller` 节点未知
+- `ValueError`: `joint_names` 为空、路点少于 2 个、`trajectory_duration` 非正，或路点长度与 `joint_names` 不一致
 
 **示例：**
 ```python
@@ -2546,15 +2695,17 @@ interface.set_node_parameters(interface.body_controller, {"waist_lifting_duratio
 
 | 接口 | 节点 | 可改参数 |
 |------|------|----------|
-| `send_fsm_command(1)` HOME | 对应控制器 | `home_duration`（默认 5 s）、`home_interpolation_type`、`home_1`…`home_N` |
-| `send_target` / `send_target_stamped` / `send_relative` | `arm_controller` | `movel_duration`（默认 2 s）、`movel_max_linear_*` / `movel_max_angular_*`、`movel_auto_extend_duration`、`movel_sample_interval` |
-| `send_dual_arm_target_stamped` | 同上 | 同一套 `movel_*`（方法参数 `movel_duration` 会先写入节点） |
-| `send_body_relative` | 同上 | 同一套 `movel_*` |
-| `execute_path` / `execute_left_path` / `execute_right_path` | `arm_controller` | Service 字段 `trajectory_duration`；`0` 时用 `movel_trajectory_duration`（臂控 YAML 默认 6 s） |
+| `send_fsm_command(1)` HOME | 对应控制器 | `home_duration`、`home_interpolation_type`、`home_tanh_scale`（tanh 插值曲线缩放，须为有限正数）、`home_1`…`home_N` |
+| `send_target` / `send_body_target` | 对应控制器 | 无 MoveL 插值参数；控制器立即采用 base frame 下的绝对 `Pose` |
+| `send_target_stamped` / `send_relative` / `send_dual_arm_target_stamped` / `send_body_target_stamped` / `send_body_relative` | `arm_controller` | `movel_duration`、`movel_max_linear_*` / `movel_max_angular_*`、`movel_auto_extend_duration`、`movel_sample_interval`；方法显式提供时长时先写入节点参数 |
+| `send_target_path`（已弃用） | `arm_controller` | `movel_trajectory_duration` |
+| `execute_path` / `execute_left_path` / `execute_right_path` | `arm_controller` | Service 字段 `trajectory_duration`；值为 `0` 时回退 `movel_trajectory_duration` |
 | `send_joint_positions`、`send_head_joint_positions`、`send_body_joint_positions`、`send_*_hand_joint_positions`、`send_dual_arm_joint_positions`、`send_coordinated_joint_positions` | 各控制器 | `movej_duration`、`movej_interpolation_type`（`linear` / `tanh` / `doubles`）、`movej_tanh_scale` |
 | `send_joint_trajectory` | `arm_controller` | `movej_trajectory_duration`（方法参数会先写入）、`movej_trajectory_blend_ratio` |
 | `send_body_joint_trajectory` | `body_joint_controller` | `movej_trajectory_duration`（方法参数会先写入）、`movej_trajectory_blend_ratio` |
 | `send_head_joint_trajectory` | `head_joint_controller` | 同上 |
+| `send_target_command`（离散开合） / `send_position_percent`（百分比） | 对应左/右 `hand_controller`（BasicJointController） | `target_command_enabled`（是否订阅离散/百分比 topic）、`target_command_close_config` / `target_command_open_config`（选择 `home_<index>` 配置，默认 1 / 0，YAML 可覆盖）、`target_command_hold_joints`（执行离散/百分比时保持当前值的关节） |
+| `send_target_command` / `send_position_percent`（开合/百分比） | 对应左/右 `gripper_controller`（AdaptiveGripperController） | `use_effort_interface`、`force_threshold`、`force_feedback_ratio`（`0` 触发阈值后停在当前位置，`1` 继续到原目标）；`send_joint_positions` 为 direct position mode，不使用力反馈 |
 | `send_waist_lifting_relative_position`、`send_waist_lifting_pose_*`、`execute_waist_lifting_pose_*_action` | `body_controller` | `waist_lifting_duration`（默认 3 s） |
 | `send_waist_lifting_velocity_scale` / `send_waist_turning_velocity_scale` | `body_controller` | `waist_lifting_default_parameter` / `waist_turning_default_parameter` = `[目标速度, 最大加速度, 最大加加速度]`；实际速度 = `scale × 第一项` |
 
