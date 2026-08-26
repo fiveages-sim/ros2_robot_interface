@@ -5,7 +5,7 @@
 第 1、6 步使用 MoveJ；第 2～5、7 步使用 OCS2 笛卡尔参考规划。
 
 启用 ENABLE_TRAJ_RECORD 时，MPC 步骤（2～5、7）分段录制到
-examples/test/traj_compare/record_data/<会话时间戳>/step*/，
+examples/test/cart_trajectory_compare/record_data/<会话时间戳>/step*/，
 可由 compare_pose_traj.py 按会话→step 选择对比（pred↔real）。
 """
 
@@ -32,12 +32,12 @@ MOVEJ_DURATION = 5.0
 MOVEL_DURATION = 5.0
 POUR_TRAJECTORY_DURATION = 10.0
 
-# 分段轨迹录制：产物落在 traj_compare/record_data，便于对比脚本直接选取
+# 分段轨迹录制：产物落在 cart_trajectory_compare/record_data，便于对比脚本直接选取
 ENABLE_TRAJ_RECORD = True
 CONTROLLER_NODE_OVERRIDE: Optional[str] = None
 RECORD_ROOT = os.path.abspath(
     os.path.join(
-        os.path.dirname(__file__), "..", "..", "test", "traj_compare", "record_data"
+        os.path.dirname(__file__), "..", "..", "test", "cart_trajectory_compare", "record_data"
     )
 )
 LEFT_INITIAL_JOINTS = [

@@ -16,6 +16,16 @@
     - ARMS_COUPLED 要求左右臂均已启用，且机器人具备双臂耦合能力（has_bimanual_coupling）。
     - 本脚本在臂使能序列开头会先发 ARMS_INDEPENDENT，末尾再发 ARMS_INDEPENDENT 恢复。
 
+HOME_JOINT_ON / HOME_JOINT_OFF 专用前置条件:
+    - 须为 WBC 栈（interface.is_wbc=True），且 task 文件已启用 HOME 关节参考能力
+      （homeJointReference.activate=true，参见 fa-w2-description/config/ocs2/*.info）。
+      未启用时控制器会忽略该命令并打印 "HOME joint reference command ignored"。
+    - HOME_JOINT_* 是参考约束开关，不是 HumanoidMode 位，由 WBC 控制器在任何 FSM 状态
+      （HOLD/MOVEJ/OCS2）都会应用；但仍建议保持脚本默认流程（先切 OCS2）。
+    - send_mode_command 只负责发布；HOME_JOINT_* 没有对应的 current_state 字段映射，
+      无法用 wait_until_mode_commands_applied 确认，需直接读
+      current_state.home_joint_reference_enabled 判断是否生效。
+
 send_mode_command(command: str) 用法:
     在已连接的 ROS2RobotInterface 实例上调用，向 /mode_command 发布模式字符串。
     无返回值；未连接时抛出 ROS2NotConnectedError。
@@ -57,6 +67,8 @@ send_mode_command() 行为（本脚本依次调用该接口）:
     LEFT_ARM_ENABLE     启用左臂
     LEFT_ARM_DISABLE    禁用左臂
     ARMS_COUPLED        双臂耦合（要求左右臂均已启用）
+    HOME_JOINT_ON       参考关节开启（软拉向 controller HOME）
+    HOME_JOINT_OFF      参考关节关闭
 
 本脚本流程:
     1. 连接接口，打印初始 get_fsm_state()。
@@ -103,6 +115,15 @@ ARM_SEQUENCE = [
     ("启用左臂（恢复）", "LEFT_ARM_ENABLE", 2.0),
     ("双臂耦合", "ARMS_COUPLED", 2.0),
     ("双臂独立（恢复）", "ARMS_INDEPENDENT", 2.0),
+]
+
+# HOME_JOINT_ON/OFF 走 /mode_command，由 WBC 控制器 handleHomeJointReferenceCommand 处理
+# （先于 resolveHumanoidModeCommand），不进入 mode 位解析；末尾恢复为「开启」。
+# 生效确认读 current_state.home_joint_reference_enabled（wait_until_* 无 HOME_JOINT 映射）。
+HOME_JOINT_SEQUENCE = [
+    ("参考关节开启（软拉向 HOME）", "HOME_JOINT_ON", 2.0),
+    ("参考关节关闭", "HOME_JOINT_OFF", 2.0),
+    ("参考关节开启（恢复）", "HOME_JOINT_ON", 2.0),
 ]
 
 
@@ -178,6 +199,17 @@ def main() -> int:
                 ARM_SEQUENCE,
                 "arm enable / bimanual coupling mode commands",
             )
+            run_sequence(
+                interface,
+                HOME_JOINT_SEQUENCE,
+                "HOME joint reference mode commands",
+            )
+            enabled = (
+                interface.wbc_state.home_joint_reference_enabled
+                if interface.wbc_state is not None
+                else None
+            )
+            print(f"current_state.home_joint_reference_enabled: {enabled}")
         return 0
     finally:
         cleanup(interface)
