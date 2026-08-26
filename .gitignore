@@ -44,5 +44,5 @@ log/
 # Joint recording files (关节录制文件)
 record/joint_records/
 
-# Trajectory comparison recordings (轨迹对比录制数据)
-examples/test/traj_compare/record_data/
+# Cartesian trajectory comparison recordings (笛卡尔轨迹对比录制数据)
+examples/test/cart_trajectory_compare/record_data/

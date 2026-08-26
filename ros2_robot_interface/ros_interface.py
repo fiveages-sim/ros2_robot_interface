@@ -4474,18 +4474,24 @@ class ROS2RobotInterface:
         if self.tf_buffer is not None:
             self.tf_buffer = None
         self._connected = False
-        
-        if self.executor:
-            self.executor.shutdown()
-            self.executor = None
-        
-        if self.executor_thread:
-            self.executor_thread.join(timeout=2.0)
-            self.executor_thread = None
+
+        # 先将节点移出 executor，再销毁高频 joint_states 订阅。这样 Zenoh
+        # 的尾部数据到达时 context 与 executor guard 仍然有效，不会在
+        # executor 已 shutdown 后触发订阅回调竞态。
+        if self.executor and self.robot_node:
+            self.executor.remove_node(self.robot_node)
         if self.joint_state_sub:
             self.joint_state_sub.destroy()
             self.joint_state_sub = None
-        
+
+        if self.executor:
+            self.executor.shutdown()
+            self.executor = None
+
+        if self.executor_thread:
+            self.executor_thread.join(timeout=2.0)
+            self.executor_thread = None
+
         if self.fsm_state_sub:
             self.fsm_state_sub.destroy()
             self.fsm_state_sub = None

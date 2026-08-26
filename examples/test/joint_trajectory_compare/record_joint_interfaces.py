@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""记录 controller_manager introspection 中手臂关节的接口数值。
+"""记录 controller_manager introspection 中手臂关节空间的接口数值。
 
 数据源：/controller_manager/introspection_data/full
   (pal_statistics_msgs/msg/Statistics，controller_manager 每个周期发布)
@@ -25,6 +25,7 @@ import argparse
 import csv
 import os
 import re
+import signal
 import sys
 import threading
 import time
@@ -33,6 +34,7 @@ from datetime import datetime
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
+from rclpy.signals import SignalHandlerOptions
 
 from pal_statistics_msgs.msg import Statistics
 
@@ -365,31 +367,50 @@ def main():
     if invalid:
         parser.error(f"非法字段: {','.join(invalid)}，可选: {','.join(VALID_FIELDS)}")
 
-    out_dir = args.output if args.output is not None else make_session_dir(record_root)
+    node = None
+    timer = None
+    rclpy_initialized = False
+    stop_requested = threading.Event()
+    previous_signal_handlers = {}
 
-    rclpy.init()
-    node = IfaceRecorder(out_dir, fields, do_plot=args.plot)
+    def request_stop(_signum, _frame):
+        # 不在信号回调中调用 rclpy.shutdown()；让主循环退出后依次完成
+        # CSV/HTML 落盘、节点销毁与 context shutdown。
+        stop_requested.set()
+
     try:
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            previous_signal_handlers[signum] = signal.getsignal(signum)
+            signal.signal(signum, request_stop)
+
+        rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
+        rclpy_initialized = True
+        out_dir = args.output if args.output is not None else make_session_dir(record_root)
+        node = IfaceRecorder(out_dir, fields, do_plot=args.plot)
         if args.duration > 0:
-            stop = threading.Event()
-            timer = threading.Timer(args.duration, stop.set)
+            timer = threading.Timer(args.duration, stop_requested.set)
             timer.start()
-            while rclpy.ok() and not stop.is_set():
-                rclpy.spin_once(node, timeout_sec=0.2)
-            timer.cancel()
-        else:
-            rclpy.spin(node)
+        while rclpy.ok() and not stop_requested.is_set():
+            rclpy.spin_once(node, timeout_sec=0.2)
     except KeyboardInterrupt:
         pass
     except Exception as exc:
         print(f"recorder stopped: {exc}", file=sys.stderr)
+        raise
     finally:
+        if timer is not None:
+            timer.cancel()
         try:
-            node.close()
-            node.destroy_node()
+            if node is not None:
+                try:
+                    node.close()
+                finally:
+                    node.destroy_node()
         finally:
-            if rclpy.ok():
+            if rclpy_initialized and rclpy.ok():
                 rclpy.shutdown()
+            for signum, previous_handler in previous_signal_handlers.items():
+                signal.signal(signum, previous_handler)
 
 
 if __name__ == "__main__":

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """从 HOME 起点使用 MoveL Action 将左臂沿基坐标系 +Z 移动 30 cm。
 
-本脚本只负责运动，不启动 ``record_joint_interfaces.py``。如需录制关节接口，
-请在另一个终端提前启动录制脚本。
+HOME 稳定后会自动以 ``--plot`` 启动 ``record_joint_interfaces.py``，运动结束、
+异常或中断时自动停止录制，并在 ``record_data/movel_action_*`` 中生成 CSV 与图表。
 
-运行：
-    python3 move_left_up_movel_action.py
+运行（从 fa-py-libraries 根目录）：
+    .venv/bin/python ros2_robot_interface/examples/test/joint_trajectory_compare/move_left_up_movel_action.py
 
 安全说明：
     机器人会先回 HOME，然后执行 30 cm 直线运动。运行前请确认左臂上方空间充足。
@@ -21,6 +21,8 @@ import time
 from geometry_msgs.msg import Pose
 
 from ros2_robot_interface import ROS2RobotInterface, ROS2RobotInterfaceConfig
+
+from _recording_process import RecorderProcess, finish_recorder, start_recorder
 
 
 Z_OFFSET_M = 0.30
@@ -39,6 +41,7 @@ HOME_STABLE_ORIENTATION_DEG = 1.0
 POSITION_THRESHOLD_M = 0.02
 ORIENTATION_THRESHOLD_DEG = 3.0
 COUNTDOWN_SEC = 3
+HOLD_RETRY_SEC = 0.2
 
 
 def print_pose(pose: Pose, label: str) -> None:
@@ -147,17 +150,42 @@ def countdown() -> None:
         time.sleep(1.0)
 
 
-def cleanup(interface: ROS2RobotInterface) -> None:
+def ensure_hold(interface: ROS2RobotInterface) -> None:
+    deadline = time.monotonic() + FSM_WAIT_SEC
+    last_error: BaseException | None = None
+    while time.monotonic() < deadline:
+        try:
+            interface.send_fsm_command(2)
+        except BaseException as exc:
+            last_error = exc
+        if interface.get_fsm_state() == 2:
+            return
+        time.sleep(HOLD_RETRY_SEC)
+    raise RuntimeError(
+        f"FSM 未进入 HOLD，当前状态: {interface.get_fsm_state()}, last_error={last_error}"
+    )
+
+
+def cleanup(interface: ROS2RobotInterface) -> list[str]:
+    failures: list[str] = []
     try:
         if interface.is_connected:
             print("\n[cleanup] 切换到 HOLD")
-            interface.send_fsm_command(2)
-    except Exception as exc:  # noqa: BLE001
-        print(f"[cleanup] 警告: 切换 HOLD 失败: {exc}")
+            ensure_hold(interface)
+    except BaseException as exc:
+        message = f"切换并确认 HOLD 失败: {exc}"
+        failures.append(message)
+        print(f"[cleanup] 警告: {message}")
     finally:
         if interface.is_connected:
-            interface.disconnect()
-            print("[cleanup] 已断开连接")
+            try:
+                interface.disconnect()
+                print("[cleanup] 已断开连接")
+            except BaseException as exc:
+                message = f"断开连接失败: {exc}"
+                failures.append(message)
+                print(f"[cleanup] 警告: {message}")
+    return failures
 
 
 def main() -> int:
@@ -166,9 +194,10 @@ def main() -> int:
     print("=" * 70)
 
     interface = ROS2RobotInterface(ROS2RobotInterfaceConfig())
-    interface.connect()
+    recorder: RecorderProcess | None = None
 
     try:
+        interface.connect()
         print(f"[1] 等待位姿数据 {DATA_WAIT_SEC:.1f}s...")
         time.sleep(DATA_WAIT_SEC)
 
@@ -198,8 +227,11 @@ def main() -> int:
         print_pose(home_pose, "HOME")
         print_pose(target_pose, "目标(+Z 0.30m)")
 
+        print("    启动关节接口录制（--plot）...")
+        recorder = start_recorder("movel_action")
+
         # MoveL Action 内部执行 IK 关节轨迹，会自动从 HOLD 切换到 MOVEJ。
-        interface.send_fsm_command(2)
+        ensure_hold(interface)
         countdown()
         print("[4] 调用 execute_movel_action()...")
         result = interface.execute_movel_action(
@@ -222,7 +254,24 @@ def main() -> int:
         print(f"  相对 HOME 的实际 Z 位移: {actual_dz:.4f} m")
         return 0
     finally:
-        cleanup(interface)
+        active_exception = sys.exc_info()[0] is not None
+        failures: list[str] = []
+        try:
+            if recorder is not None:
+                recorder.request_stop()
+        except BaseException as exc:
+            failures.append(f"请求 recorder 停止失败: {exc}")
+        failures.extend(cleanup(interface))
+        try:
+            finish_recorder(recorder)
+        except KeyboardInterrupt:
+            raise
+        except BaseException as exc:
+            failures.append(f"recorder/plot 清理失败: {exc}")
+        if failures:
+            print(f"[cleanup] 未完整成功: {'; '.join(failures)}")
+            if not active_exception:
+                raise RuntimeError("清理未完整成功: " + "; ".join(failures))
 
 
 if __name__ == "__main__":
