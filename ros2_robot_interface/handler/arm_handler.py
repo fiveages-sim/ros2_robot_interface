@@ -418,7 +418,7 @@ class ArmHandler:
         msg = Float64MultiArray()
         msg.data = positions
         self.joint_controller_pub.publish(msg)
-        print(f"Published {self.label.lower()} joint positions: {positions}", flush=True)
+        logger.debug("Published %s joint positions: %s", self.label.lower(), positions)
     
     def check_arrival(self, pose_threshold: float | None = None,
                      orient_threshold: float | None = None) -> Dict[str, Any]:

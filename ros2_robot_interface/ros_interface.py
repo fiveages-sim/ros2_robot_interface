@@ -1524,10 +1524,23 @@ class ROS2RobotInterface:
     ) -> Any:
         """Execute parameterized MoveJ through ``JointTrajectory`` action.
 
+        ``max_velocity`` / ``max_acceleration`` / ``max_jerk`` may be omitted.
+        Empty ``max_*`` arrays on each waypoint let the controller use its
+        current ``movej_max_velocity`` / ``movej_max_acceleration`` /
+        ``movej_max_jerk`` (defaults 2.0 / 4.0 / 20.0). Runtime
+        ``ros2 param set`` on the controller node is picked up on the next
+        call.
+
         Args:
             joint_names: Joint names controlled by the action.
             waypoints: Position arrays. Each waypoint must match ``joint_names`` length.
+            time_mode: ``True`` (default) uses ``total_time`` as duration (controller
+                falls back to 3 s if ``total_time`` is unset). ``False`` is constraint
+                mode: duration is computed from vel/acc/jerk.
+            total_time: Optional duration in seconds for time mode.
             max_velocity/max_acceleration/max_jerk: Optional scalar or per-joint list.
+                ``None`` (default) does not fill the arrays; the controller applies
+                ``movej_max_*``.
             feedback_callback: Receives the action feedback object.
 
         Returns:
@@ -1593,7 +1606,12 @@ class ROS2RobotInterface:
         timeout: float = 30.0,
         wait_for_server_timeout: float = 5.0,
     ) -> Any:
-        """Convenience wrapper for dual-arm parameterized MoveJ action."""
+        """Convenience wrapper for dual-arm parameterized MoveJ action.
+
+        Duration and vel/acc/jerk are optional. Omitting ``max_velocity`` /
+        ``max_acceleration`` / ``max_jerk`` uses the controller ``movej_max_*``
+        parameters (see ``execute_joint_trajectory_action``).
+        """
         if left_joint_names is None:
             left_joint_names = [
                 "left_joint1", "left_joint2", "left_joint3", "left_joint4",

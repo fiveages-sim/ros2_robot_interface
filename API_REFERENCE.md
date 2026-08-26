@@ -708,6 +708,8 @@ result = interface.execute_movel_action("left", goal, duration=3.0, frame_id="ar
 
 ### 关节轨迹 Action（MoveJ）
 
+这组接口走 **Action**，会阻塞等待结果（或超时）。`max_velocity` / `max_acceleration` / `max_jerk` 均可省略：Python 不填充 waypoint 数组，C++ 运控用节点参数 `movej_max_*`。运行时 `ros2 param set` 会在下一次调用生效。
+
 #### `wait_for_joint_trajectory_action_server(timeout: float = 5.0) -> bool`
 
 **功能：** 等待参数化 MoveJ action server 就绪。
@@ -727,13 +729,14 @@ result = interface.execute_movel_action("left", goal, duration=3.0, frame_id="ar
 - 类型：`arms_ros2_control_msgs/action/JointTrajectory`（waypoint 为 `JointWaypoint`）
 - 隐式 FSM：默认切到 MOVEJ
 - 与 `send_joint_trajectory()` 不同：后者是 **Topic 发布** `/{controller}/target_joint_trajectory`，本方法走 Action 并等待结果
+- `max_*` 传 `None` 时 Python 不写 waypoint 数组，控制器回退 `movej_max_*`（见下表）
 
 **参数：**
 - `joint_names` (`List[str]`): 被控制关节名；不可为空，每个 waypoint 长度必须等于关节数
 - `waypoints` (`List[List[float]]`): 路点关节角列表，单位弧度；不可为空，每个路点长度必须等于 `joint_names` 长度，否则抛 `ValueError`
-- `time_mode` (`bool`): `True` 按固定时间约束执行；`False` 按速度 / 加速度 / jerk 约束规划（默认 `True`）
-- `total_time` (`float | None`): 写入每个 waypoint 的总时长（秒）；`None` 时沿用控制器默认规划
-- `max_velocity` / `max_acceleration` / `max_jerk` (`float | List[float] | None`): 速度 / 加速度 / jerk 约束；可传标量（广播到每个关节）或逐关节列表，列表长度与 `joint_names` 不匹配时抛 `ValueError`
+- `time_mode` (`bool`): `True`（默认）按 `total_time` 时间约束执行；`False` 按速度 / 加速度 / jerk 约束规划时长
+- `total_time` (`float | None`): 写入每个 waypoint 的总时长（秒）；`None` 时不写字段，时间模式下控制器回退 3 s
+- `max_velocity` / `max_acceleration` / `max_jerk` (`float | List[float] | None`): 速度 / 加速度 / jerk 约束，单位 rad/s、rad/s²、rad/s³。可传标量（广播到每个关节）或逐关节列表，列表长度与 `joint_names` 不匹配时抛 `ValueError`。`None`（默认）不填充数组，由运控 `movej_max_*` 补齐
 - `auto_switch_fsm` (`bool`): 是否自动切到 MOVEJ（经 `/fsm_command`），默认 `True`
 - `feedback_callback`: 收到的是 action feedback 对象
 - `timeout` (`float`): 等待 action result 的超时（秒），默认 30.0
@@ -744,6 +747,7 @@ result = interface.execute_movel_action("left", goal, duration=3.0, frame_id="ar
 
 **示例：**
 ```python
+# 不必传入 max_velocity / max_acceleration / max_jerk
 result = interface.execute_joint_trajectory_action(
     ["left_joint1", "left_joint2", "left_joint3", "left_joint4", "left_joint5", "left_joint6", "left_joint7"],
     [[0.0, 0.3, -0.2, 0.0, 1.2, 0.0, 0.0]],
@@ -755,18 +759,40 @@ result = interface.execute_joint_trajectory_action(
 
 **功能：** 双臂参数化 MoveJ 的便捷封装（把左右臂关节拼成一条 `execute_joint_trajectory_action`）。
 
-**原理：** 同 `execute_joint_trajectory_action`（同一个 Action）。
+**原理：** 同 `execute_joint_trajectory_action`（同一个 Action）。`duration` 与 `max_*` 均可省略。
 
 **参数：**
 - `left_arm_positions` / `right_arm_positions` (`List[float]`): 左右臂关节角列表，单位弧度；左右拼接成单个 waypoint（左在前、右在后）
-- `duration` (`float | None`): 总时长（秒），转发为 `total_time` 写入 waypoint；`None` 时沿用控制器默认规划
+- `duration` (`float | None`): 总时长（秒），转发为 `total_time` 写入 waypoint；`None` 时不写字段，时间模式下控制器回退 3 s
 - `time_mode` (`bool`): 同 `execute_joint_trajectory_action`
 - `left_joint_names` / `right_joint_names` (`List[str] | None`): 左右臂关节名，拼接为 `joint_names`；默认各使用 7 个标准关节名（`left_joint1..7` / `right_joint1..7`）
-- `max_velocity` / `max_acceleration` / `max_jerk`: 同 `execute_joint_trajectory_action`（标量广播 / 列表长度校验）
+- `max_velocity` / `max_acceleration` / `max_jerk`: 同 `execute_joint_trajectory_action`；`None`（默认）不填充数组，由运控 `movej_max_*` 补齐
 - `auto_switch_fsm`、`feedback_callback`、`timeout`、`wait_for_server_timeout`: 语义与 `execute_joint_trajectory_action` 一致
 
 **返回值：**
 - action result；goal 被拒绝或超时返回 `None`
+
+**示例：**
+```python
+result = interface.execute_dual_arm_movej_action(
+    left_joints,
+    right_joints,
+    duration=4.0,
+)
+```
+
+**Action 控制器默认值（`movej_max_*`）：**
+
+调用时省略（`None`）的 `max_*` 由控制器按下列节点参数补齐；可用 `ros2 param set` 或 `set_node_parameters` 改，下一次 Action 调用生效：
+
+| Action 回退参数 | 默认值 | 生效条件 |
+|-----------------|--------|----------|
+| `movej_max_velocity` | `2.0` | waypoint 的 `max_velocity` 为空 |
+| `movej_max_acceleration` | `4.0` | waypoint 的 `max_acceleration` 为空 |
+| `movej_max_jerk` | `20.0` | waypoint 的 `max_jerk` 为空 |
+| 时间模式下的时长 | `3.0` s | `time_mode=True` 且未写 `total_time` |
+
+这些是 MoveJ Action 的 goal 回退值，不是 Topic 接口 `send_joint_positions` 的 `movej_duration`。
 
 ---
 
@@ -2709,7 +2735,7 @@ interface.set_node_parameters(interface.body_controller, {"waist_lifting_duratio
 | `send_waist_lifting_relative_position`、`send_waist_lifting_pose_*`、`execute_waist_lifting_pose_*_action` | `body_controller` | `waist_lifting_duration`（默认 3 s） |
 | `send_waist_lifting_velocity_scale` / `send_waist_turning_velocity_scale` | `body_controller` | `waist_lifting_default_parameter` / `waist_turning_default_parameter` = `[目标速度, 最大加速度, 最大加加速度]`；实际速度 = `scale × 第一项` |
 
-MoveL / MoveC Action 和 `joint_trajectory_with_para` 的时长写在 goal / request 里，不是这张表。力控见 `set_compliance_force`。
+MoveL / MoveC Action 的时长写在 goal 里；六个笛卡尔 `max_*` 省略时回退 `cartesian_defaults.*`。MoveJ Action（`joint_trajectory_with_para`）的 `max_velocity` / `max_acceleration` / `max_jerk` 省略时回退控制器节点参数 `movej_max_velocity` / `movej_max_acceleration` / `movej_max_jerk`（默认 2.0 / 4.0 / 20.0），时长仍可写在 goal 的 `total_time` 里（时间模式未写时控制器回退 3 s）。力控见 `set_compliance_force`。
 
 ---
 
@@ -2805,7 +2831,7 @@ interface.send_fsm_command(FSM_OCS2)
 |------|-------------|---------|---------|---------|
 | **左臂** | `left_arm_handler` | `send_target_stamped()` ⭐<br>`send_relative()`<br>`send_velocity()`<br>`send_target()`<br>`send_joint_positions()`<br>`execute_movel_action()` | `get_pose()` ⭐<br>`get_target_pose()` | `check_arrival()` ⭐ |
 | **右臂** | `right_arm_handler` | 同上 | 同上 | 同上 |
-| **双臂** | 直接方法 | `send_dual_arm_target_stamped()`<br>`send_dual_arm_joint_positions()`<br>`execute_path()` | — | `check_arrive()` |
+| **双臂** | 直接方法 | `send_dual_arm_target_stamped()`<br>`send_dual_arm_joint_positions()`<br>`execute_path()`<br>`execute_joint_trajectory_action()`<br>`execute_dual_arm_movej_action()` | — | `check_arrive()` |
 | **左夹爪** | `left_gripper_handler` | `send_target_command()` ⭐<br>`send_joint_positions()` | `get_target_position()` | `check_arrival()` |
 | **右夹爪** | `right_gripper_handler` | `send_target_command()` ⭐<br>`send_joint_positions()` | `get_target_position()` | `check_arrival()` |
 | **灵巧手触觉** | 直接方法 | — | `get_hand_tactile(side, finger)` ⭐<br>`finger="all"` 取五指 | — |
@@ -2859,7 +2885,7 @@ interface.send_fsm_command(FSM_OCS2)
    - 多条 mode 建议先全部 `send_mode_command`，再一次 `wait_until_mode_commands_applied`，不要按条等待（对端常只更新一次合并后的 `current_state`）
    - 关节 / 位姿控制在开启 `auto_switch_fsm_before_control` 时会隐式切 FSM（关节→MOVEJ，位姿→OCS2）；一般不必显式调用自动切换 API
 
-10. **控制器执行参数**：Topic 类命令的快慢不在消息里，而在控制器节点参数（`movel_duration`、`movej_duration`、`waist_lifting_duration` 等）。改完全局生效，详见 [控制器执行参数](#控制器执行参数)。
+10. **控制器执行参数**：Topic 类命令的快慢不在消息里，而在控制器节点参数（`movel_duration`、`movej_duration`、`waist_lifting_duration` 等）。改完全局生效，详见 [控制器执行参数](#控制器执行参数)。MoveJ Action 省略 `max_velocity` / `max_acceleration` / `max_jerk` 时回退 `movej_max_*`（默认 2.0 / 4.0 / 20.0）；MoveL / MoveC Action 省略笛卡尔 `max_*` 时回退 `cartesian_defaults.*`。
 
 ---
 

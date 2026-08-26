@@ -7,6 +7,7 @@ A standalone Python package for communicating with ROS 2 robots through topics. 
 - Subscribe to joint states from ROS 2 topics
 - Subscribe to end-effector pose information
 - Publish target end-effector poses
+- Parameterized MoveJ / MoveL / MoveC actions (vel/acc/jerk may be omitted; the C++ controller fills defaults)
 - Control gripper position
 - Thread-safe data access
 - Configurable timeouts and recovery mechanisms
@@ -139,6 +140,8 @@ config = ROS2RobotInterfaceConfig(
 - `send_coordinated_joint_positions(...)` - 一次性协调下发臂/躯干/头关节（默认隐式 MOVEJ）
 - `send_head_joint_positions(positions)` / `send_body_joint_positions(positions)` - 头部 / 身体关节
 - `send_dual_arm_target_stamped(left_pose, right_pose, frame_id)` - 双臂笛卡尔目标 pose
+- `execute_joint_trajectory_action(...)` / `execute_dual_arm_movej_action(...)` - 参数化 MoveJ Action；`max_velocity` / `max_acceleration` / `max_jerk` 可省略，由运控节点 `movej_max_*` 补齐（默认 2.0 / 4.0 / 20.0）
+- `execute_movel_action(...)` / `execute_movec_action_*` - 参数化 MoveL / MoveC Action；笛卡尔 `max_*` 可省略，回退 `cartesian_defaults.*`
 
 **到达检查**
 - `check_arrive(part, ...)` / `wait_until_arrive(...)` - 按 part 检查/等待（臂为笛卡尔位姿；头身为缓存关节目标）
