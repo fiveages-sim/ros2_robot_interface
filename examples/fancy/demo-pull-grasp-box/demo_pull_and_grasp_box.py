@@ -4,7 +4,7 @@
 右夹爪随后抓取并抬起料箱。
 
 启用 ENABLE_TRAJ_RECORD 时，笛卡尔步骤分段录制到
-examples/test/cart_trajectory_compare/record_data/<会话时间戳>/step*/（pred↔real）。
+examples/test/15_cart_trajectory_compare/record_data/<会话时间戳>/step*/（pred↔real）。
 MoveJ 与夹爪动作不录制。
 """
 
@@ -36,7 +36,7 @@ ENABLE_TRAJ_RECORD = True
 CONTROLLER_NODE_OVERRIDE: Optional[str] = None
 RECORD_ROOT = os.path.abspath(
     os.path.join(
-        os.path.dirname(__file__), "..", "..", "test", "cart_trajectory_compare", "record_data"
+        os.path.dirname(__file__), "..", "..", "test", "15_cart_trajectory_compare", "record_data"
     )
 )
 

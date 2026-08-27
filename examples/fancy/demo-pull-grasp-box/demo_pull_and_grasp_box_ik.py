@@ -7,7 +7,7 @@
 运行前需确保 /ocs2_arm_controller/execute_linear Action 可用。
 
 启用 ENABLE_TRAJ_RECORD 时，MoveL 步骤分段录制到
-examples/test/cart_trajectory_compare/record_data/<会话时间戳>/step*/（cal↔real）。
+examples/test/15_cart_trajectory_compare/record_data/<会话时间戳>/step*/（cal↔real）。
 MoveJ 与夹爪动作不录制。
 """
 
@@ -40,7 +40,7 @@ ENABLE_TRAJ_RECORD = True
 CONTROLLER_NODE_OVERRIDE: Optional[str] = None
 RECORD_ROOT = os.path.abspath(
     os.path.join(
-        os.path.dirname(__file__), "..", "..", "test", "cart_trajectory_compare", "record_data"
+        os.path.dirname(__file__), "..", "..", "test", "15_cart_trajectory_compare", "record_data"
     )
 )
 

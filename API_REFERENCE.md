@@ -745,6 +745,20 @@ result = interface.execute_movel_action("left", goal, duration=3.0, frame_id="ar
 **返回值：**
 - action result；goal 被拒绝或超时返回 `None`
 
+**参数：**
+- `joint_names` (`List[str]`): 被控制关节名；不可为空，每个 waypoint 长度必须等于关节数
+- `waypoints` (`List[List[float]]`): 路点关节角列表，单位弧度；不可为空，每个路点长度必须等于 `joint_names` 长度，否则抛 `ValueError`
+- `time_mode` (`bool`): `True` 按固定时间约束执行；`False` 按速度 / 加速度 / jerk 约束规划（默认 `True`）
+- `total_time` (`float | None`): 写入每个 waypoint 的总时长（秒）；`None` 时沿用控制器默认规划
+- `max_velocity` / `max_acceleration` / `max_jerk` (`float | List[float] | None`): 速度 / 加速度 / jerk 约束；可传标量（广播到每个关节）或逐关节列表，列表长度与 `joint_names` 不匹配时抛 `ValueError`
+- `auto_switch_fsm` (`bool`): 是否自动切到 MOVEJ（经 `/fsm_command`），默认 `True`
+- `feedback_callback`: 收到的是 action feedback 对象
+- `timeout` (`float`): 等待 action result 的超时（秒），默认 30.0
+- `wait_for_server_timeout` (`float`): 等待 action server 就绪的超时（秒），默认 5.0
+
+**返回值：**
+- action result；goal 被拒绝或超时返回 `None`
+
 **示例：**
 ```python
 # 不必传入 max_velocity / max_acceleration / max_jerk
@@ -793,6 +807,17 @@ result = interface.execute_dual_arm_movej_action(
 | 时间模式下的时长 | `3.0` s | `time_mode=True` 且未写 `total_time` |
 
 这些是 MoveJ Action 的 goal 回退值，不是 Topic 接口 `send_joint_positions` 的 `movej_duration`。
+
+**参数：**
+- `left_arm_positions` / `right_arm_positions` (`List[float]`): 左右臂关节角列表，单位弧度；左右拼接成单个 waypoint（左在前、右在后）
+- `duration` (`float | None`): 总时长（秒），转发为 `total_time` 写入 waypoint；`None` 时沿用控制器默认规划
+- `time_mode` (`bool`): 同 `execute_joint_trajectory_action`
+- `left_joint_names` / `right_joint_names` (`List[str] | None`): 左右臂关节名，拼接为 `joint_names`；默认各使用 7 个标准关节名（`left_joint1..7` / `right_joint1..7`）
+- `max_velocity` / `max_acceleration` / `max_jerk`: 同 `execute_joint_trajectory_action`（标量广播 / 列表长度校验）
+- `auto_switch_fsm`、`feedback_callback`、`timeout`、`wait_for_server_timeout`: 语义与 `execute_joint_trajectory_action` 一致
+
+**返回值：**
+- action result；goal 被拒绝或超时返回 `None`
 
 ---
 
