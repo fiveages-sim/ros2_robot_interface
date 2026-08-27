@@ -106,9 +106,6 @@ class CircleTrajectoryActionClient(Node):
             time_mode=True,
             left_joint_names=self.left_arm_joint_names,
             right_joint_names=self.right_arm_joint_names,
-            max_velocity=0.5,
-            max_acceleration=1.0,
-            max_jerk=2.0,
             feedback_callback=self.movej_feedback_callback,
             timeout=max(duration + 10.0, 30.0),
         )
