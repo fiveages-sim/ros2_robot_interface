@@ -5,7 +5,7 @@ arm_base。该脚本会驱动真机，运行前需要启动双臂分体 OCS2 控
 
 每段录制前先确保处于 OCS2，并用 5 秒单点路径移动到第 0 个基准点；随后开启
 录制并立即调用 execute_right_path。所有运动仅等待对应的 trajectory_duration，
-不进行到位判断。CSV 写入 cart_trajectory_compare/record_data。
+不进行到位判断。CSV 写入 15_cart_trajectory_compare/record_data。
 
 运行：
     conda run -n fa-ros2 python examples/test-demo/check_execute_right_path_three_durations.py
@@ -29,7 +29,7 @@ TRAJECTORY_DURATION = 25.0
 RECORD_ROOT = (
     Path(__file__).resolve().parents[1]
     / "test"
-    / "cart_trajectory_compare"
+    / "15_cart_trajectory_compare"
     / "record_data"
 )
 

@@ -55,7 +55,7 @@ SPEED_PROFILES = (
 RECORD_ROOT = (
     Path(__file__).resolve().parents[1]
     / "test"
-    / "cart_trajectory_compare"
+    / "15_cart_trajectory_compare"
     / "record_data"
 )
 

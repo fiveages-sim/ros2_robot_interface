@@ -45,4 +45,4 @@ log/
 record/joint_records/
 
 # Cartesian trajectory comparison recordings (笛卡尔轨迹对比录制数据)
-examples/test/cart_trajectory_compare/record_data/
+examples/test/15_cart_trajectory_compare/record_data/
