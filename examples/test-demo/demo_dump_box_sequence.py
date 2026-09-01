@@ -127,8 +127,18 @@ def execute_step(interface: ROS2RobotInterface, step: dict) -> None:
     )
     time.sleep(duration_s)
 
-    left_result = interface.wait_until_arrive(part="left_arm", timeout=ARRIVAL_TIMEOUT)
-    right_result = interface.wait_until_arrive(part="right_arm", timeout=ARRIVAL_TIMEOUT)
+    left_result = interface.wait_until_arrive(
+        part="left_arm",
+        timeout=ARRIVAL_TIMEOUT,
+        arm_pose_threshold=0.015,
+        arm_orient_threshold=10.0,
+    )
+    right_result = interface.wait_until_arrive(
+        part="right_arm",
+        timeout=ARRIVAL_TIMEOUT,
+        arm_pose_threshold=0.015,
+        arm_orient_threshold=10.0,
+    )
     for part, result in (("left_arm", left_result), ("right_arm", right_result)):
         if not result.get("arrived", False):
             print(f"[{name}] 警告: {part} 未到位: {result.get('result')}")
