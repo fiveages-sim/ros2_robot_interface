@@ -7,6 +7,7 @@ from .exceptions import (
     ROS2AlreadyConnectedError,
 )
 from .quat_pose import (
+    check_pose_arrival,
     pose_from_tuple,
     quat_conjugate,
     quat_multiply,
@@ -22,6 +23,7 @@ __all__ = [
     "ROS2InterfaceError",
     "ROS2NotConnectedError",
     "ROS2AlreadyConnectedError",
+    "check_pose_arrival",
     "pose_from_tuple",
     "quat_conjugate",
     "quat_multiply",

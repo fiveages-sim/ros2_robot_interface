@@ -7,6 +7,7 @@ A standalone Python package for communicating with ROS 2 robots through topics. 
 - Subscribe to joint states from ROS 2 topics
 - Subscribe to end-effector pose information
 - Publish target end-effector poses
+- Parameterized MoveJ / MoveL / MoveC actions (vel/acc/jerk may be omitted; the C++ controller fills defaults)
 - Control gripper position
 - Thread-safe data access
 - Configurable timeouts and recovery mechanisms
@@ -136,16 +137,33 @@ config = ROS2RobotInterfaceConfig(
 
 #### ROS2RobotInterface 主要方法
 
-- `connect()` - 连接到 ROS 2 并创建订阅器和发布器
-- `disconnect()` - 断开连接并清理资源
-- `get_joint_state(categorized=False)` - 获取关节状态
-- `send_fsm_command(command)` - 发送 FSM 状态切换命令
-- `send_head_joint_positions(positions)` - 发送头部关节位置
-- `send_body_joint_positions(positions)` - 发送身体关节位置
-- `send_waist_phi_velocity_scale(velocity_scale)` - 发送 body_joint3 phi 速度系数（非零持续运动，发送 `0.0` 停止）
-- `send_dual_arm_target_stamped(left_pose, right_pose, frame_id)` - 发送双臂目标 pose
-- `check_arrive(part, ...)` - 统一检查到达状态
+**连接与发现**
+- `connect()` / `disconnect()` - 连接 / 断开 ROS 2
 - `list_nodes()` - 查询当前运行的 ROS 2 节点列表
+- `get_joint_state(categorized=False)` - 获取关节状态
+
+**FSM / Mode**
+- `send_fsm_command(command)` - 发送 FSM 状态切换命令
+- `send_mode_command(command)` - 向 `/mode_command` 发布 WBC / 底盘模式
+- `wait_until_mode_commands_applied(commands, ...)` - 对照 `/ocs2_wbc_controller/current_state` 确认一组 mode
+
+**六维力 / COMPLIANCE**
+- `get_original_wrench(side)` - 读取左右 FT 原始 wrench 缓存
+- `get_filtered_wrench(side)` - 读取左右 FT 滤波 wrench 缓存（通常 COMPLIANCE 下有数据）
+- `call_compliance_zero_wrench()` - 请求零力校准（不等待 `zero_cal_done`）
+- `enter_compliance()` - 进入 COMPLIANCE FSM（自动 HOLD 中转）
+- `set_compliance_force(task_selection, force_setpoint, force_xmax_lin=None, force_xmax_ang=None)` - 写入 6 维任务选择与目标力，可选平移/旋转最大位移软限 [m/rad]
+
+**运动下发**
+- `send_coordinated_joint_positions(...)` - 一次性协调下发臂/躯干/头关节（默认隐式 MOVEJ）
+- `send_head_joint_positions(positions)` / `send_body_joint_positions(positions)` - 头部 / 身体关节
+- `send_dual_arm_target_stamped(left_pose, right_pose, frame_id)` - 双臂笛卡尔目标 pose
+- `execute_joint_trajectory_action(...)` / `execute_dual_arm_movej_action(...)` - 参数化 MoveJ Action；`max_velocity` / `max_acceleration` / `max_jerk` 可省略，由运控节点 `movej_max_*` 补齐（默认 2.0 / 4.0 / 20.0）
+- `execute_movel_action(...)` / `execute_movec_action_*` - 参数化 MoveL / MoveC Action；笛卡尔 `max_*` 可省略，回退 `cartesian_defaults.*`
+
+**到达检查**
+- `check_arrive(part, ...)` / `wait_until_arrive(...)` - 按 part 检查/等待（臂为笛卡尔位姿；头身为缓存关节目标）
+- `wait_until_joint_arrive(...)` - 按显式关节角目标等待（支持部分索引 / 角距离，适合 MoveJ）
 
 #### 属性
 

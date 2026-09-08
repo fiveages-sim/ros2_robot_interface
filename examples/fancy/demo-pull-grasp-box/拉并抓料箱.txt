@@ -1,0 +1,148 @@
+来源：run_20260714_214405.log 第一组拉抓（A1, L2, pull=left, grasp=right）
+时间：2026-07-14 21:44:29 ~ 21:45:26
+
+1、机器人初始关节位置
+【接口标注】
+- 推荐一次性协调下发双臂和腰部：
+  interface.send_coordinated_joint_positions(
+      body_positions=body弧度值,
+      left_arm_positions=left_initial_joints,
+      right_arm_positions=right_initial_joints,
+  )
+- 该接口的关节输入单位是弧度，下面的“角度值”不能直接传入。
+- 下发后可使用 interface.wait_until_joint_arrive(
+      left_target_positions=left_initial_joints,
+      right_target_positions=right_initial_joints,
+      body_target_positions=body弧度值,
+  ) 等待关节到位。
+坐标系：joint
+左手：left_initial_joints = [-0.087266, 1.256637, 0.680678, -2.286381, -1.029744, -0.453786, -0.383972]
+右手：right_initial_joints = [0.087266, 1.256637, -0.680678, -2.286381, 1.029744, -0.453786, 0.383972]
+腰部body所有关节弧度值：[-0.900066, -1.799958, -0.900066, 0]
+腰部body所有关节角度值：[-51.57, -103.13, -51.57, 0]
+
+2、抓取点的两侧pose（视觉 first）
+【接口标注】
+- “视觉 first”是上游视觉系统提供的点位数据；当前 ros2_robot_interface 目录中没有视觉识别或抓取点计算接口。
+- 若本步骤需要让机器人移动到这组点位，将左右数组构造成 geometry_msgs.msg.Pose 后调用：
+  interface.send_dual_arm_target_stamped(left_pose, right_pose, frame_id="arm_base")
+- 下发后分别使用 interface.wait_until_arrive(part="left_arm") 和
+  interface.wait_until_arrive(part="right_arm") 等待双臂到位。
+坐标系：arm_base
+左手四元数pose：[0.7775, 0.4002, -0.1842, -0.70721, 0.055572, -0.703763, -0.038516]
+右手四元数pose：[0.761, -0.3758, -0.1854, 0.704799, 0.082384, 0.701853, -0.062235]
+
+3、拉箱抓取点pose（视觉 second）
+【接口标注】
+- “视觉 second”本身不是 ros2_robot_interface 的接口；它是本步骤 Pose 的数据来源。
+- 若直接执行该双臂单点，调用：
+  interface.send_dual_arm_target_stamped(left_pose, right_pose, frame_id="arm_base")
+- 若只把该点作为第 4 步四段逼近的末点/朝向来源，则本步骤只保存数据，不单独下发运动。
+坐标系：arm_base
+左手四元数pose：[0.7663, 0.1843, -0.1705, -0.708125, 0.049176, -0.703646, -0.031979]
+右手四元数pose：[0.7676, -0.5756, -0.1842, 0.704039, 0.08846, 0.701228, -0.069165]
+
+4、拉箱四段逼近执行点（姿态沿用 second 的 rpy→四元数）
+【接口标注】
+- 将四组左右路点分别构造成 Pose 列表后调用：
+  interface.execute_path(
+      left_poses=[left_step1, left_step2, left_step3, left_step4],
+      right_poses=[right_step1, right_step2, right_step3, right_step4],
+      trajectory_duration=实际轨迹时长秒数,
+      frame_id="arm_base",
+  )
+- execute_path() 返回 bool，表示 ExecutePath 服务是否成功接收/生成路径；应检查返回值。
+- 旧接口 interface.send_target_path() 已弃用，不建议用于新流程。
+坐标系：arm_base
+step=1/4 name=中间过渡点
+左手四元数pose：[0.5354, 0.3909, -0.1558, -0.708125, 0.049176, -0.703646, -0.031979]
+右手四元数pose：[0.3043, -0.4668, -0.1606, 0.704039, 0.08846, 0.701228, -0.069165]
+step=2/4 name=手臂两侧的斜上方位
+左手四元数pose：[0.7663, 0.2143, -0.1505, -0.708125, 0.049176, -0.703646, -0.031979]
+右手四元数pose：[0.3043, -0.4668, -0.1606, 0.704039, 0.08846, 0.701228, -0.069165]
+step=3/4 name=抓取点位侧边
+左手四元数pose：[0.7663, 0.2143, -0.1705, -0.708125, 0.049176, -0.703646, -0.031979]
+右手四元数pose：[0.3043, -0.4668, -0.1606, 0.704039, 0.08846, 0.701228, -0.069165]
+step=4/4 name=最终抓取
+左手四元数pose：[0.7663, 0.1843, -0.1705, -0.708125, 0.049176, -0.703646, -0.031979]
+右手四元数pose：[0.3043, -0.4668, -0.1606, 0.704039, 0.08846, 0.701228, -0.069165]
+
+5、拉箱合爪轻提pose（lift_m=0.030）
+【接口标注】
+- “合爪”和“双臂移动”是两个独立接口动作。当前流程标明 pull=left，因此拉箱侧优先关闭左夹爪：
+  interface.left_gripper_handler.send_position_percent(0.0)
+  其中 0.0=完全关闭、1.0=完全打开；也可按硬件方式改用 send_joint_positions(position) 或 send_target_command(0)。
+- 文件没有给出夹爪行程/力度目标，执行时应使用该夹爪的实测安全值，不能从 Pose 推导夹爪值。
+- 合爪确认后，将轻提点构造成左右 Pose 并调用：
+  interface.send_dual_arm_target_stamped(left_pose, right_pose, frame_id="arm_base")
+- 下发后分别使用 interface.wait_until_arrive(part="left_arm") 和
+  interface.wait_until_arrive(part="right_arm") 等待双臂到位。
+坐标系：arm_base
+左手四元数pose：[0.7663, 0.1843, -0.1405, -0.708125, 0.049176, -0.703646, -0.031979]
+右手四元数pose：[0.3043, -0.4668, -0.1606, 0.704039, 0.08846, 0.701228, -0.069165]
+
+6、拉箱横拉后pose（dy=+0.300m）
+【接口标注】
+- 将横拉后的左右点构造成 Pose 后调用：
+  interface.send_dual_arm_target_stamped(left_pose, right_pose, frame_id="arm_base")
+- 这是双臂单点运动，左夹爪继续保持上一阶段的闭合状态；Pose 接口不会改变夹爪。
+- 下发后分别使用 interface.wait_until_arrive(part="left_arm") 和
+  interface.wait_until_arrive(part="right_arm") 等待双臂到位。
+坐标系：arm_base
+左手四元数pose：[0.7667, 0.4846, -0.1475, -0.708125, 0.049176, -0.703646, -0.031979]
+右手四元数pose：[0.3049, -0.4681, -0.1614, 0.704039, 0.08846, 0.701228, -0.069165]
+
+7、抓取点pose（视觉 third）
+【接口标注】
+- “视觉 third”是上游视觉点位数据，当前 ros2_robot_interface 目录中没有对应的视觉识别接口。
+- 若直接执行该双臂单点，调用：
+  interface.send_dual_arm_target_stamped(left_pose, right_pose, frame_id="arm_base")
+- 若该点仅用于生成第 8 步的逼近路径，则本步骤只保存数据，不单独下发运动。
+坐标系：arm_base
+左手四元数pose：[0.7443, 0.4578, -0.1201, -0.703532, 0.089012, -0.705067, 0.000267]
+右手四元数pose：[0.7635, -0.3025, -0.1953, -0.694838, -0.047969, -0.710836, 0.098037]
+
+8、抓取四段逼近执行点（姿态沿用 third 的 rpy→四元数）
+【接口标注】
+- 将四组左右路点分别构造成 Pose 列表后调用：
+  interface.execute_path(
+      left_poses=[left_step1, left_step2, left_step3, left_step4],
+      right_poses=[right_step1, right_step2, right_step3, right_step4],
+      trajectory_duration=实际轨迹时长秒数,
+      frame_id="arm_base",
+  )
+- execute_path() 返回 bool，表示 ExecutePath 服务是否成功接收/生成路径；应检查返回值，并在夹爪闭合前确认双臂已到达最终抓取点。
+坐标系：arm_base
+step=1/4 name=中间过渡点
+左手四元数pose：[0.7665, 0.4844, -0.1473, -0.703532, 0.089012, -0.705067, 0.000267]
+右手四元数pose：[0.5345, -0.4509, -0.1688, -0.694838, -0.047969, -0.710836, 0.098037]
+step=2/4 name=手臂两侧的斜上方位
+左手四元数pose：[0.7665, 0.4844, -0.1473, -0.703532, 0.089012, -0.705067, 0.000267]
+右手四元数pose：[0.7635, -0.3325, -0.1753, -0.694838, -0.047969, -0.710836, 0.098037]
+step=3/4 name=抓取点位侧边
+左手四元数pose：[0.7665, 0.4844, -0.1473, -0.703532, 0.089012, -0.705067, 0.000267]
+右手四元数pose：[0.7635, -0.3325, -0.1953, -0.694838, -0.047969, -0.710836, 0.098037]
+step=4/4 name=最终抓取
+左手四元数pose：[0.7665, 0.4844, -0.1473, -0.703532, 0.089012, -0.705067, 0.000267]
+右手四元数pose：[0.7635, -0.3025, -0.1953, -0.694838, -0.047969, -0.710836, 0.098037]
+
+9、抓取抬起pose（raise_m=0.030）
+【接口标注】
+- 当前流程标明 grasp=right，因此抬起前优先关闭右夹爪：
+  interface.right_gripper_handler.send_position_percent(0.0)
+  其中 0.0=完全关闭、1.0=完全打开；也可按硬件方式改用 send_joint_positions(position) 或 send_target_command(0)。
+- 文件没有给出夹爪行程/力度目标，执行时应使用该夹爪的实测安全值。
+- 夹爪确认闭合后，将抬起点构造成左右 Pose 并调用：
+  interface.send_dual_arm_target_stamped(left_pose, right_pose, frame_id="arm_base")
+- 下发后分别使用 interface.wait_until_arrive(part="left_arm") 和
+  interface.wait_until_arrive(part="right_arm") 等待双臂到位。
+坐标系：arm_base
+左手四元数pose：[0.7665, 0.4844, -0.1473, -0.703532, 0.089012, -0.705067, 0.000267]
+右手四元数pose：[0.7635, -0.3025, -0.1653, -0.694838, -0.047969, -0.710836, 0.098037]
+
+说明：
+- pose 格式均为 [x, y, z, qx, qy, qz, qw]（米 + 四元数）
+- 笛卡尔点坐标系为 arm_base；关节点坐标系为 joint
+- log 中视觉点为 rpy(deg)，已按 ROS RPY=Rz(yaw)Ry(pitch)Rx(roll) 转四元数
+- 执行路点 log 仅有 xyz，姿态沿用对应阶段视觉 grasp pose 的朝向
+- 初始关节 log 为角度，已转为弧度以与倾倒任务.txt 一致

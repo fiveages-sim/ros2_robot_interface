@@ -6,15 +6,17 @@ This is a standalone implementation independent of LeRobot.
 """
 
 import logging
+import math
+import re
 import sys
 import threading
 import time
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import rclpy
 from action_msgs.msg import GoalStatus
-from geometry_msgs.msg import Point, Pose, PoseStamped, Quaternion, TransformStamped, Twist, Vector3
+from geometry_msgs.msg import Point, Pose, PoseStamped, Quaternion, TransformStamped, Twist, TwistStamped, Vector3, WrenchStamped
 from nav_msgs.msg import Path
 from rclpy.action import ActionClient
 from rclpy.duration import Duration
@@ -25,24 +27,34 @@ from rclpy.publisher import Publisher
 from rclpy.subscription import Subscription
 from rclpy.time import Time
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Float64, Float64MultiArray, Int32, String
+from std_msgs.msg import Float64, Float64MultiArray, Int32, String, UInt8MultiArray
+from std_srvs.srv import Trigger
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 import tf2_ros
 from tf2_ros import TransformException
 from tf2_geometry_msgs import do_transform_pose
 
-from arms_ros2_control_msgs.action import ExecuteLinear, JointTrajectory as JointTrajectoryAction, MovecUseIK
+from arms_ros2_control_msgs.action import ExecuteLinear, JointTrajectory as JointTrajectoryAction, MovecUseIK, WaistLiftingPose
 from arms_ros2_control_msgs.msg import CircleMessage, JointWaypoint, LinearMessage
 from arms_ros2_control_msgs.msg import WbcCurrentState
 from arms_ros2_control_msgs.srv import ExecutePath
 
 from .config import ControlType, ROS2RobotInterfaceConfig
-from .constants import FSM_HOLD, FSM_HOME, FSM_MOVEJ, FSM_OCS2
-from .utils.exceptions import ROS2AlreadyConnectedError, ROS2NotConnectedError
-from .utils.quat_pose import quat_multiply, rotate_vector_by_quat
-from .handler import ArmHandler, ArmType, GripperHandler, GripperType
+from .constants import (
+    FSM_COMPLIANCE,
+    FSM_HOLD,
+    FSM_HOME,
+    FSM_MOVEJ,
+    FSM_OCS2,
+    is_body_joint_name,
+    is_head_joint_name,
+)
+from .utils.exceptions import ROS2AlreadyConnectedError, ROS2InterfaceError, ROS2NotConnectedError
+from .utils.quat_pose import check_pose_arrival, quat_multiply, rotate_vector_by_quat
+from .handler import ArmHandler, ArmType, GripperHandler, GripperType, HandTactileHandler, HandType
 from .utils.discovery import (
     discover_topics as _discover_topics,
+    discover_actions as _discover_actions,
     list_nodes as _list_nodes,
     list_node_parameters as _list_node_parameters,
     set_node_parameters as _set_node_parameters,
@@ -71,6 +83,15 @@ class ROS2RobotInterface:
         "BODY_LOCK": "BODY_LOCK",
         "BODY_HEAD_COUPLED": "BODY_HEAD_COUPLED",
     }
+    # /mode_command 字符串 → (WbcCurrentState 字段名, 期望常量值)
+    # BODY_* 由 BODY_MODE_TO_STATE 派生，避免双份维护
+    MODE_COMMAND_TO_WBC_EXPECT: Dict[str, tuple[str, int]] = {
+        **{k: ("body_state", v) for k, v in BODY_MODE_TO_STATE.items()},
+        "ARMS_COUPLED": ("bimanual_state", WbcCurrentState.BIMANUAL_COUPLED),
+        "ARMS_INDEPENDENT": ("bimanual_state", WbcCurrentState.BIMANUAL_INDEPENDENT),
+        "BASE_LOCK": ("base_state", WbcCurrentState.BASE_LOCKED),
+        "BASE_UNLOCK": ("base_state", WbcCurrentState.BASE_UNLOCKED),
+    }
     MODE_SWITCH_SETTLE_TIME_SEC: float = 0.1
     
     def __init__(self, config: ROS2RobotInterfaceConfig):
@@ -84,17 +105,34 @@ class ROS2RobotInterface:
         self.fsm_state_sub: Subscription | None = None
         self.robot_description_sub: Subscription | None = None
         self.body_current_target_sub: Subscription | None = None
+        self.body_current_pose_sub: Subscription | None = None
+        self.body_current_target_pose_sub: Subscription | None = None
         self.wbc_state_sub: Subscription | None = None
+        self.left_ft_wrench_sub: Subscription | None = None
+        self.right_ft_wrench_sub: Subscription | None = None
+        self._latest_wrench_left: Dict[str, Any] | None = None
+        self._latest_wrench_right: Dict[str, Any] | None = None
+        self.left_ft_wrench_filtered_sub: Subscription | None = None
+        self.right_ft_wrench_filtered_sub: Subscription | None = None
+        self._latest_wrench_filtered_left: Dict[str, Any] | None = None
+        self._latest_wrench_filtered_right: Dict[str, Any] | None = None
+        self.compliance_zero_wrench_client: Client | None = None
         self.target_path_pub: Publisher | None = None
         self.execute_path_client: Client | None = None
         self.joint_trajectory_action_client: ActionClient | None = None
         self.movel_action_client: ActionClient | None = None
         self.movec_action_client: ActionClient | None = None
+        self.waist_lifting_pose_action_client: ActionClient | None = None
         self.dual_target_stamped_pub: Publisher | None = None
+        self.body_target_relative_pub: Publisher | None = None
+        self.body_target_pub: Publisher | None = None
+        self.body_target_stamped_pub: Publisher | None = None
         self.fsm_command_pub: Publisher | None = None
         self.mode_command_pub: Publisher | None = None
         self.head_joint_controller_pub: Publisher | None = None
         self.body_joint_controller_pub: Publisher | None = None
+        self.head_joint_trajectory_pub: Publisher | None = None
+        self.body_joint_trajectory_pub: Publisher | None = None
         self.left_hand_joint_controller_pub: Publisher | None = None
         self.right_hand_joint_controller_pub: Publisher | None = None
         self.arm_trajectory_pub: Publisher | None = None  # Unified trajectory publisher for both arms
@@ -112,6 +150,7 @@ class ROS2RobotInterface:
         # FSM state tracking
         self._current_fsm_state: int = 2  # Default to HOLD
         self._auto_switch_fsm_before_control: bool = bool(self.config.auto_switch_fsm_before_control)
+        self._defer_individual_joint_fsm_switch: bool = False
         self.is_wbc: bool = False
         # WBC unified joint topic capabilities discovered from ROS graph.
         # Some deployments expose body/head as dedicated sub-topics, and we use
@@ -134,6 +173,8 @@ class ROS2RobotInterface:
         self.head_target_positions: Optional[List[float]] = None
         self.body_target_positions: Optional[List[float]] = None
         self.body_current_target: Optional[List[float]] = None
+        self.body_current_pose: Optional[Pose] = None
+        self.body_current_target_pose: Optional[Pose] = None
         self.wbc_state: Optional[WbcCurrentState] = None
         
         self.tf_buffer: Optional[tf2_ros.Buffer] = None
@@ -146,6 +187,10 @@ class ROS2RobotInterface:
         # Gripper handlers
         self.left_gripper_handler: Optional[GripperHandler] = None
         self.right_gripper_handler: Optional[GripperHandler] = None
+
+        # Hand tactile handlers（灵巧手五指触觉，仅当检测到触觉话题时创建）
+        self.left_hand_tactile_handler: Optional[HandTactileHandler] = None
+        self.right_hand_tactile_handler: Optional[HandTactileHandler] = None
 
         # Nav2 navigation state（软依赖，connect() 时自动检测）
         self._nav_enabled: bool = False
@@ -169,6 +214,11 @@ class ROS2RobotInterface:
         suffix = "/target_joint_position"
         if t.endswith(suffix):
             node = t[: -len(suffix)]
+            return node if node else ""
+        # WBC 分通道，如 /ocs2_wbc_controller/target_joint_position/body
+        sub_channel = "/target_joint_position/"
+        if sub_channel in t:
+            node = t.split(sub_channel, 1)[0]
             return node if node else ""
         i = t.rfind("/")
         if i <= 0:
@@ -243,7 +293,9 @@ class ROS2RobotInterface:
             namespace=""
         )
     
-    def _auto_detect_configuration(self, topic_names: List[str]) -> bool:
+    def _auto_detect_configuration(
+        self, topic_names: List[str], action_names: Optional[List[str]] = None
+    ) -> bool:
         """Auto-detect robot configuration from topics. Returns True if dual-arm detected."""
         is_dual_arm = False
         self.is_wbc = False
@@ -305,43 +357,110 @@ class ROS2RobotInterface:
         if "/left_gripper_controller/target_percent" in topic_names:
             self.config.left_gripper_target_percent_topic = "/left_gripper_controller/target_percent"
             logger.info("Detected left gripper target_percent topic")
+        elif "/gripper_controller/target_percent" in topic_names:
+            self.config.left_gripper_target_percent_topic = "/gripper_controller/target_percent"
+            logger.info("Detected left gripper target_percent topic (single-arm gripper_controller)")
         if "/right_gripper_controller/target_percent" in topic_names:
             self.config.right_gripper_target_percent_topic = "/right_gripper_controller/target_percent"
             logger.info("Detected right gripper target_percent topic")
 
-        if "/head_joint_controller/target_joint_position" in topic_names:
-            self.config.head_joint_controller_topic = "/head_joint_controller/target_joint_position"
-        
-        if "/body_joint_controller/target_joint_position" in topic_names:
-            self.config.body_joint_controller_topic = "/body_joint_controller/target_joint_position"
+        # 躯干/头部关节：WBC 分 topic 优先，否则回退 split 控制器 topic（二选一）
+        # 供 send_body_joint_positions / send_head_joint_positions 使用
+        if "/ocs2_wbc_controller/target_joint_position/body" in topic_names:
+            self.config.body_joint_controller_topic = (
+                "/ocs2_wbc_controller/target_joint_position/body"
+            )
+            logger.info("Detected WBC body joint topic: /ocs2_wbc_controller/target_joint_position/body")
+        elif "/body_joint_controller/target_joint_position" in topic_names:
+            self.config.body_joint_controller_topic = (
+                "/body_joint_controller/target_joint_position"
+            )
+            logger.info("Detected split body joint topic: /body_joint_controller/target_joint_position")
+
+        if "/ocs2_wbc_controller/target_joint_position/head" in topic_names:
+            self.config.head_joint_controller_topic = (
+                "/ocs2_wbc_controller/target_joint_position/head"
+            )
+            logger.info("Detected WBC head joint topic: /ocs2_wbc_controller/target_joint_position/head")
+        elif "/head_joint_controller/target_joint_position" in topic_names:
+            self.config.head_joint_controller_topic = (
+                "/head_joint_controller/target_joint_position"
+            )
+            logger.info("Detected split head joint topic: /head_joint_controller/target_joint_position")
+
+        # split 拓扑的多路点轨迹话题（WBC 复用统一 WBC trajectory，不在此检测）
+        if self.config.body_joint_trajectory_topic is None and "/body_joint_controller/target_joint_trajectory" in topic_names:
+            self.config.body_joint_trajectory_topic = "/body_joint_controller/target_joint_trajectory"
+            logger.info("Detected split body joint trajectory topic: /body_joint_controller/target_joint_trajectory")
+
+        if self.config.head_joint_trajectory_topic is None and "/head_joint_controller/target_joint_trajectory" in topic_names:
+            self.config.head_joint_trajectory_topic = "/head_joint_controller/target_joint_trajectory"
+            logger.info("Detected split head joint trajectory topic: /head_joint_controller/target_joint_trajectory")
 
         if "/body_joint_controller/current_target_joint" in topic_names:
             self.config.body_joint_current_target_topic = "/body_joint_controller/current_target_joint"
 
+        if self.config.body_current_pose_topic is None and "/body_current_pose" in topic_names:
+            self.config.body_current_pose_topic = "/body_current_pose"
+            logger.info("Detected body current pose topic: /body_current_pose")
+
+        if self.config.body_current_target_pose_topic is None and "/body_current_target" in topic_names:
+            self.config.body_current_target_pose_topic = "/body_current_target"
+            logger.info("Detected body current target pose topic: /body_current_target")
+
+        if self.config.body_target_relative_topic is None and "/body_target/relative" in topic_names:
+            self.config.body_target_relative_topic = "/body_target/relative"
+            logger.info("Detected body target relative topic: /body_target/relative")
+
+        if self.config.body_target_topic is None and "/body_target" in topic_names:
+            self.config.body_target_topic = "/body_target"
+            logger.info("Detected body target topic: /body_target")
+
         if "/body_joint_controller/waist_lifting" in topic_names:
             self.config.waist_lifting_topic = "/body_joint_controller/waist_lifting"
+        elif "/ocs2_wbc_controller/waist_lifting" in topic_names:
+            self.config.waist_lifting_topic = "/ocs2_wbc_controller/waist_lifting"
+            logger.info("Detected WBC waist lifting topic")
 
         if "/body_joint_controller/waist_lifting_pose_relative" in topic_names:
             self.config.waist_lifting_pose_relative_topic = "/body_joint_controller/waist_lifting_pose_relative"
+        elif "/ocs2_wbc_controller/waist_lifting_pose_relative" in topic_names:
+            self.config.waist_lifting_pose_relative_topic = (
+                "/ocs2_wbc_controller/waist_lifting_pose_relative"
+            )
+            logger.info("Detected WBC waist lifting pose relative topic")
 
         if "/body_joint_controller/waist_lifting_pose_absolute" in topic_names:
             self.config.waist_lifting_pose_absolute_topic = "/body_joint_controller/waist_lifting_pose_absolute"
+        elif "/ocs2_wbc_controller/waist_lifting_pose_absolute" in topic_names:
+            self.config.waist_lifting_pose_absolute_topic = (
+                "/ocs2_wbc_controller/waist_lifting_pose_absolute"
+            )
+            logger.info("Detected WBC waist lifting pose absolute topic")
+
+        # 腰部位姿 action：只使用 action 发现结果精确匹配。
+        action_name_list = action_names or []
+        if self.config.waist_lifting_pose_action_name is None:
+            for candidate in (
+                "/ocs2_wbc_controller/waist_lifting_pose",
+                "/body_joint_controller/waist_lifting_pose",
+            ):
+                if candidate in action_name_list:
+                    self.config.waist_lifting_pose_action_name = candidate
+                    logger.info(f"Detected waist lifting pose action: {candidate}")
+                    break
 
         if "/body_joint_controller/waist_lifting_command" in topic_names:
             self.config.waist_lifting_command_topic = "/body_joint_controller/waist_lifting_command"
+        elif "/ocs2_wbc_controller/waist_lifting_command" in topic_names:
+            self.config.waist_lifting_command_topic = "/ocs2_wbc_controller/waist_lifting_command"
+            logger.info("Detected WBC waist lifting command topic")
 
         if "/body_joint_controller/waist_turning_command" in topic_names:
             self.config.waist_turning_command_topic = "/body_joint_controller/waist_turning_command"
-
-        if self.config.waist_phi_command_topic is None:
-            for topic in (
-                "/body_joint_controller/waist_phi_command",
-                "/ocs2_wbc_controller/waist_phi_command",
-                "/ocs2_arm_controller/waist_phi_command",
-            ):
-                if topic in topic_names:
-                    self.config.waist_phi_command_topic = topic
-                    break
+        elif "/ocs2_wbc_controller/waist_turning_command" in topic_names:
+            self.config.waist_turning_command_topic = "/ocs2_wbc_controller/waist_turning_command"
+            logger.info("Detected WBC waist turning command topic")
         
         # 检测灵巧手关节控制器 topic
         if "/left_hand_controller/target_joint_position" in topic_names:
@@ -395,7 +514,66 @@ class ROS2RobotInterface:
                     self.config.left_arm_joint_controller_topic = (
                         "/ocs2_arm_controller/target_joint_position/left"
                     )
-        
+
+        # 坤维六维力 FT broadcaster wrench（可自动检测；未启用 FT 时话题可能不存在）
+        if self.config.left_ft_wrench_topic is None and "/left_ft_broadcaster/wrench" in topic_names:
+            self.config.left_ft_wrench_topic = "/left_ft_broadcaster/wrench"
+            logger.info("Detected left FT wrench topic: /left_ft_broadcaster/wrench")
+        if self.config.right_ft_wrench_topic is None and "/right_ft_broadcaster/wrench" in topic_names:
+            self.config.right_ft_wrench_topic = "/right_ft_broadcaster/wrench"
+            logger.info("Detected right FT wrench topic: /right_ft_broadcaster/wrench")
+
+        # filtered 仅在 COMPLIANCE 期间发布，connect 时通常不在 graph → 按 original 对称推导，提前订阅
+        def _default_filtered_topic(original: str | None, fallback: str) -> str | None:
+            if not original:
+                return None
+            if original.endswith("/wrench"):
+                return original[: -len("/wrench")] + "/wrench_filtered"
+            return fallback
+
+        if self.config.left_ft_wrench_filtered_topic is None:
+            self.config.left_ft_wrench_filtered_topic = _default_filtered_topic(
+                self.config.left_ft_wrench_topic,
+                "/left_ft_broadcaster/wrench_filtered",
+            )
+        if self.config.right_ft_wrench_filtered_topic is None:
+            self.config.right_ft_wrench_filtered_topic = _default_filtered_topic(
+                self.config.right_ft_wrench_topic,
+                "/right_ft_broadcaster/wrench_filtered",
+            )
+
+        # 灵巧手五指触觉（can-ros2-control 以 read_tactile:=true 启动时才发布）
+        # 话题形如 /<o6|l6|o7>_hand/<left|right>/tactile/<finger>，型号段从图中反推
+        tactile_pattern = re.compile(
+            r"^/([a-z0-9]+(?:[_-][a-z0-9]+)*)_hand/(left|right)/tactile/"
+            r"(thumb|index|middle|ring|pinky)$"
+        )
+        detected_tactile_prefix: Dict[str, str] = {}
+        for topic_name in topic_names:
+            tactile_match = tactile_pattern.match(topic_name)
+            if tactile_match:
+                model, side = tactile_match.group(1), tactile_match.group(2)
+                detected_tactile_prefix[side] = f"/{model}_hand/{side}/tactile"
+
+        if (
+            self.config.left_hand_tactile_topic_prefix is None
+            and "left" in detected_tactile_prefix
+        ):
+            self.config.left_hand_tactile_topic_prefix = detected_tactile_prefix["left"]
+            logger.info(
+                f"Detected left hand tactile topic prefix: "
+                f"{detected_tactile_prefix['left']}"
+            )
+        if (
+            self.config.right_hand_tactile_topic_prefix is None
+            and "right" in detected_tactile_prefix
+        ):
+            self.config.right_hand_tactile_topic_prefix = detected_tactile_prefix["right"]
+            logger.info(
+                f"Detected right hand tactile topic prefix: "
+                f"{detected_tactile_prefix['right']}"
+            )
+
         return is_dual_arm
     
     def connect(self) -> None:
@@ -410,7 +588,14 @@ class ROS2RobotInterface:
             is_dual_arm_detected = False
             try:
                 topic_names = _discover_topics()
-                is_dual_arm_detected = self._auto_detect_configuration(topic_names)
+                try:
+                    action_names = _discover_actions()
+                except Exception as action_exc:
+                    logger.warning(f"Failed to discover actions: {action_exc}")
+                    action_names = []
+                is_dual_arm_detected = self._auto_detect_configuration(
+                    topic_names, action_names
+                )
             except Exception as e:
                 logger.warning(f"Failed to auto-detect configuration: {e}")
                 is_dual_arm_detected = False
@@ -476,6 +661,39 @@ class ROS2RobotInterface:
                 )
                 logger.info("✅ Subscribed to {} for body target tracking".format(self.config.body_joint_current_target_topic))
 
+            if self.config.body_current_pose_topic:
+                self.body_current_pose_sub = self.robot_node.create_subscription(
+                    PoseStamped,
+                    self.config.body_current_pose_topic,
+                    self._body_current_pose_callback,
+                    10
+                )
+                logger.info("✅ Subscribed to {} for body current pose tracking".format(self.config.body_current_pose_topic))
+
+            if self.config.body_current_target_pose_topic:
+                self.body_current_target_pose_sub = self.robot_node.create_subscription(
+                    PoseStamped,
+                    self.config.body_current_target_pose_topic,
+                    self._body_current_target_pose_callback,
+                    10
+                )
+                logger.info("✅ Subscribed to {} for body target pose tracking".format(self.config.body_current_target_pose_topic))
+
+            if self.config.body_target_relative_topic:
+                self.body_target_relative_pub = self.robot_node.create_publisher(
+                    TwistStamped, self.config.body_target_relative_topic, 10
+                )
+                logger.info(f"Created body target relative publisher: {self.config.body_target_relative_topic}")
+
+            if self.config.body_target_topic:
+                self.body_target_pub = self.robot_node.create_publisher(
+                    Pose, self.config.body_target_topic, 10
+                )
+                self.body_target_stamped_pub = self.robot_node.create_publisher(
+                    PoseStamped, f"{self.config.body_target_topic}/stamped", 10
+                )
+                logger.info(f"Created body target publishers: {self.config.body_target_topic} (+ /stamped)")
+
             if self.config.joint_trajectory_action_name:
                 self.joint_trajectory_action_client = ActionClient(
                     self.robot_node,
@@ -502,6 +720,16 @@ class ROS2RobotInterface:
                 )
                 logger.info(f"Created MOVC action client: {self.config.movec_action_name}")
 
+            if self.config.waist_lifting_pose_action_name:
+                self.waist_lifting_pose_action_client = ActionClient(
+                    self.robot_node,
+                    WaistLiftingPose,
+                    self.config.waist_lifting_pose_action_name,
+                )
+                logger.info(
+                    f"Created waist lifting pose action client: {self.config.waist_lifting_pose_action_name}"
+                )
+
             # Subscribe WBC current state for mode-aware command timing.
             if self.is_wbc:
                 self.wbc_state_sub = self.robot_node.create_subscription(
@@ -511,7 +739,62 @@ class ROS2RobotInterface:
                     10
                 )
                 logger.info("✅ Subscribed to /ocs2_wbc_controller/current_state for WBC mode tracking")
-            
+
+            # FT publishers (sensor + COMPLIANCE filtered) use SensorDataQoS (BEST_EFFORT).
+            from rclpy.qos import qos_profile_sensor_data
+
+            if self.config.left_ft_wrench_topic:
+                self.left_ft_wrench_sub = self.robot_node.create_subscription(
+                    WrenchStamped,
+                    self.config.left_ft_wrench_topic,
+                    self._left_ft_wrench_callback,
+                    qos_profile_sensor_data,
+                )
+                logger.info(f"✅ Subscribed to {self.config.left_ft_wrench_topic} for left FT wrench")
+            else:
+                logger.info("No left FT wrench topic configured; skipping left FT subscription")
+
+            if self.config.right_ft_wrench_topic:
+                self.right_ft_wrench_sub = self.robot_node.create_subscription(
+                    WrenchStamped,
+                    self.config.right_ft_wrench_topic,
+                    self._right_ft_wrench_callback,
+                    qos_profile_sensor_data,
+                )
+                logger.info(f"✅ Subscribed to {self.config.right_ft_wrench_topic} for right FT wrench")
+            else:
+                logger.info("No right FT wrench topic configured; skipping right FT subscription")
+
+            if self.config.left_ft_wrench_filtered_topic:
+                self.left_ft_wrench_filtered_sub = self.robot_node.create_subscription(
+                    WrenchStamped,
+                    self.config.left_ft_wrench_filtered_topic,
+                    self._left_ft_wrench_filtered_callback,
+                    qos_profile_sensor_data,
+                )
+                logger.info(
+                    f"✅ Subscribed to {self.config.left_ft_wrench_filtered_topic} for left FT filtered wrench"
+                )
+            else:
+                logger.info("No left FT filtered wrench topic configured; skipping left FT filtered subscription")
+
+            if self.config.right_ft_wrench_filtered_topic:
+                self.right_ft_wrench_filtered_sub = self.robot_node.create_subscription(
+                    WrenchStamped,
+                    self.config.right_ft_wrench_filtered_topic,
+                    self._right_ft_wrench_filtered_callback,
+                    qos_profile_sensor_data,
+                )
+                logger.info(
+                    f"✅ Subscribed to {self.config.right_ft_wrench_filtered_topic} for right FT filtered wrench"
+                )
+            else:
+                logger.info("No right FT filtered wrench topic configured; skipping right FT filtered subscription")
+
+            self.compliance_zero_wrench_client = self.robot_node.create_client(
+                Trigger, "/compliance_zero_wrench"
+            )
+
             # Initialize TF buffer first (needed by ArmHandler)
             self.tf_buffer = tf2_ros.Buffer()
             self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self.robot_node)
@@ -569,6 +852,36 @@ class ROS2RobotInterface:
                 logger.debug("Right gripper handler not created: no controller detected")
             else:
                 logger.debug("Right gripper handler not created: gripper_enabled=False")
+
+            # Create left hand tactile handler（仅当检测到触觉话题前缀）
+            if self.config.left_hand_tactile_topic_prefix:
+                self.left_hand_tactile_handler = HandTactileHandler(
+                    self.robot_node,
+                    HandType.LEFT,
+                    self.config
+                )
+                self.left_hand_tactile_handler.initialize()
+                logger.info(
+                    f"✅ Subscribed to {self.config.left_hand_tactile_topic_prefix}"
+                    f"/<finger> for left hand tactile"
+                )
+            else:
+                logger.debug("Left hand tactile handler not created: no tactile topic detected")
+
+            # Create right hand tactile handler（仅当检测到触觉话题前缀）
+            if self.config.right_hand_tactile_topic_prefix:
+                self.right_hand_tactile_handler = HandTactileHandler(
+                    self.robot_node,
+                    HandType.RIGHT,
+                    self.config
+                )
+                self.right_hand_tactile_handler.initialize()
+                logger.info(
+                    f"✅ Subscribed to {self.config.right_hand_tactile_topic_prefix}"
+                    f"/<finger> for right hand tactile"
+                )
+            else:
+                logger.debug("Right hand tactile handler not created: no tactile topic detected")
             
             self.fsm_command_pub = self.robot_node.create_publisher(Int32, "/fsm_command", 10)
             self.mode_command_pub = self.robot_node.create_publisher(String, "/mode_command", 10)
@@ -582,6 +895,18 @@ class ROS2RobotInterface:
                 self.body_joint_controller_pub = self.robot_node.create_publisher(
                     Float64MultiArray, self.config.body_joint_controller_topic, 10
                 )
+
+            if self.config.body_joint_trajectory_topic:
+                self.body_joint_trajectory_pub = self.robot_node.create_publisher(
+                    JointTrajectory, self.config.body_joint_trajectory_topic, 10
+                )
+                logger.info(f"Created body joint trajectory publisher: {self.config.body_joint_trajectory_topic}")
+
+            if self.config.head_joint_trajectory_topic:
+                self.head_joint_trajectory_pub = self.robot_node.create_publisher(
+                    JointTrajectory, self.config.head_joint_trajectory_topic, 10
+                )
+                logger.info(f"Created head joint trajectory publisher: {self.config.head_joint_trajectory_topic}")
 
             if self.config.waist_lifting_topic:
                 self.waist_lifting_pub = self.robot_node.create_publisher(
@@ -672,7 +997,7 @@ class ROS2RobotInterface:
         """Callback for FSM state topic (/fsm_state)."""
         try:
             state_code = int(msg.data)
-            valid_state_codes = {1, 2, 3, 4}
+            valid_state_codes = {1, 2, 3, 4, 5}
             if state_code not in valid_state_codes:
                 logger.debug(f"Ignored unknown FSM state code from /fsm_state: {state_code}")
                 return
@@ -699,12 +1024,64 @@ class ROS2RobotInterface:
         except Exception as e:
             logger.error(f"Error in body current target callback: {e}", exc_info=True)
 
+    def _body_current_pose_callback(self, msg: PoseStamped) -> None:
+        """Callback for body current cartesian pose messages."""
+        try:
+            self.body_current_pose = msg.pose
+        except Exception as e:
+            logger.error(f"Error in body current pose callback: {e}", exc_info=True)
+
+    def _body_current_target_pose_callback(self, msg: PoseStamped) -> None:
+        """Callback for body target cartesian pose messages."""
+        try:
+            self.body_current_target_pose = msg.pose
+        except Exception as e:
+            logger.error(f"Error in body current target pose callback: {e}", exc_info=True)
+
     def _wbc_state_callback(self, msg: WbcCurrentState) -> None:
         """Callback for /ocs2_wbc_controller/current_state."""
         try:
             self.wbc_state = msg
         except Exception as e:
             logger.error(f"Error in WBC state callback: {e}", exc_info=True)
+
+    @staticmethod
+    def _wrench_stamped_to_dict(msg: WrenchStamped) -> Dict[str, Any]:
+        stamp = msg.header.stamp
+        return {
+            "force": [msg.wrench.force.x, msg.wrench.force.y, msg.wrench.force.z],
+            "torque": [msg.wrench.torque.x, msg.wrench.torque.y, msg.wrench.torque.z],
+            "frame_id": msg.header.frame_id,
+            "stamp": stamp.sec + stamp.nanosec / 1e9,
+        }
+
+    def _left_ft_wrench_callback(self, msg: WrenchStamped) -> None:
+        """Callback for left FT WrenchStamped."""
+        try:
+            self._latest_wrench_left = self._wrench_stamped_to_dict(msg)
+        except Exception as e:
+            logger.error(f"Error in left FT wrench callback: {e}", exc_info=True)
+
+    def _right_ft_wrench_callback(self, msg: WrenchStamped) -> None:
+        """Callback for right FT WrenchStamped."""
+        try:
+            self._latest_wrench_right = self._wrench_stamped_to_dict(msg)
+        except Exception as e:
+            logger.error(f"Error in right FT wrench callback: {e}", exc_info=True)
+
+    def _left_ft_wrench_filtered_callback(self, msg: WrenchStamped) -> None:
+        """Callback for left FT filtered WrenchStamped."""
+        try:
+            self._latest_wrench_filtered_left = self._wrench_stamped_to_dict(msg)
+        except Exception as e:
+            logger.error(f"Error in left FT filtered wrench callback: {e}", exc_info=True)
+
+    def _right_ft_wrench_filtered_callback(self, msg: WrenchStamped) -> None:
+        """Callback for right FT filtered WrenchStamped."""
+        try:
+            self._latest_wrench_filtered_right = self._wrench_stamped_to_dict(msg)
+        except Exception as e:
+            logger.error(f"Error in right FT filtered wrench callback: {e}", exc_info=True)
 
     def _normalize_body_mode(self, body_mode: Optional[str], body_pose: Optional[Pose]) -> Optional[str]:
         """Normalize/validate body mode and preserve backward compatibility."""
@@ -846,10 +1223,10 @@ class ROS2RobotInterface:
                 elif name_lower.startswith('right_'):
                     category = 'right_arm'
                 else:
-                    # 与 WBC ``joint_names`` 分类一致：Galbot 等用 leg_joint* 表示底盘/腰链，归入 body
-                    if "head" in name_lower:
+                    # 与 WBC StateMoveJ body 前缀一致：body* / lift_joint / leg_*
+                    if is_head_joint_name(name):
                         category = "head"
-                    elif "body" in name_lower or name_lower.startswith("leg_"):
+                    elif is_body_joint_name(name):
                         category = "body"
                     else:
                         category = "other"
@@ -859,9 +1236,9 @@ class ROS2RobotInterface:
 
                 if is_gripper_or_hand:
                     category = 'gripper'
-                elif 'head' in name_lower:
+                elif is_head_joint_name(name):
                     category = 'head'
-                elif 'body' in name_lower or name_lower.startswith("leg_"):
+                elif is_body_joint_name(name):
                     category = 'body'
                 else:
                     category = 'arm' if 'joint' in name_lower else 'other'
@@ -947,6 +1324,14 @@ class ROS2RobotInterface:
             return None
         return list(self.body_current_target)
 
+    def get_body_current_pose(self) -> Optional[Pose]:
+        """Get latest body current cartesian pose (PoseStamped.pose)."""
+        return self.body_current_pose
+
+    def get_body_current_target_pose(self) -> Optional[Pose]:
+        """Get latest body target cartesian pose (PoseStamped.pose)."""
+        return self.body_current_target_pose
+
     def wait_for_movel_action_server(self, timeout: float = 5.0) -> bool:
         """Wait for the configured parameterized MOVL action server."""
         if self.movel_action_client is None:
@@ -958,6 +1343,12 @@ class ROS2RobotInterface:
         if self.movec_action_client is None:
             return False
         return self.movec_action_client.wait_for_server(timeout_sec=timeout)
+
+    def wait_for_waist_lifting_pose_action_server(self, timeout: float = 5.0) -> bool:
+        """等待腰部位姿 action server 可用。"""
+        if self.waist_lifting_pose_action_client is None:
+            return False
+        return self.waist_lifting_pose_action_client.wait_for_server(timeout_sec=timeout)
 
     def wait_for_joint_trajectory_action_server(self, timeout: float = 5.0) -> bool:
         """Wait for the configured parameterized MoveJ action server."""
@@ -1142,10 +1533,23 @@ class ROS2RobotInterface:
     ) -> Any:
         """Execute parameterized MoveJ through ``JointTrajectory`` action.
 
+        ``max_velocity`` / ``max_acceleration`` / ``max_jerk`` may be omitted.
+        Empty ``max_*`` arrays on each waypoint let the controller use its
+        current ``movej_max_velocity`` / ``movej_max_acceleration`` /
+        ``movej_max_jerk`` (defaults 2.0 / 4.0 / 20.0). Runtime
+        ``ros2 param set`` on the controller node is picked up on the next
+        call.
+
         Args:
             joint_names: Joint names controlled by the action.
             waypoints: Position arrays. Each waypoint must match ``joint_names`` length.
+            time_mode: ``True`` (default) uses ``total_time`` as duration (controller
+                falls back to 3 s if ``total_time`` is unset). ``False`` is constraint
+                mode: duration is computed from vel/acc/jerk.
+            total_time: Optional duration in seconds for time mode.
             max_velocity/max_acceleration/max_jerk: Optional scalar or per-joint list.
+                ``None`` (default) does not fill the arrays; the controller applies
+                ``movej_max_*``.
             feedback_callback: Receives the action feedback object.
 
         Returns:
@@ -1211,7 +1615,12 @@ class ROS2RobotInterface:
         timeout: float = 30.0,
         wait_for_server_timeout: float = 5.0,
     ) -> Any:
-        """Convenience wrapper for dual-arm parameterized MoveJ action."""
+        """Convenience wrapper for dual-arm parameterized MoveJ action.
+
+        Duration and vel/acc/jerk are optional. Omitting ``max_velocity`` /
+        ``max_acceleration`` / ``max_jerk`` uses the controller ``movej_max_*``
+        parameters (see ``execute_joint_trajectory_action``).
+        """
         if left_joint_names is None:
             left_joint_names = [
                 "left_joint1", "left_joint2", "left_joint3", "left_joint4",
@@ -1445,7 +1854,15 @@ class ROS2RobotInterface:
         dst.orientation.w = src.orientation.w
     
     def send_target_path(self, left_poses: List[Pose | PoseStamped], right_poses: List[Pose | PoseStamped], frame_id: Optional[str] = None) -> None:
-        """Send target path for dual-arm robot."""
+        """Send target path for dual-arm robot.
+
+        .. deprecated::
+            第一代双臂路径接口，通过发布 ``/target_path`` topic 下发路径。已被第二代
+            ExecutePath service 接口取代：请改用 :meth:`execute_path`、
+            :meth:`execute_left_path`、:meth:`execute_right_path`。第二代接口支持
+            ``trajectory_duration``、返回 ``success``、允许左右路径不等长、空侧保持
+            原有参考轨迹。本方法暂予保留仅为向后兼容，新代码不应再使用。
+        """
         if not self.is_connected:
             raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
         
@@ -1504,9 +1921,16 @@ class ROS2RobotInterface:
         left_poses: List[Pose | PoseStamped],
         right_poses: List[Pose | PoseStamped],
         trajectory_duration: float = 0.0,
-        frame_id: Optional[str] = None,
+        frame_id: Optional[str] = "arm_base",
     ) -> bool:
-        """Send unequal-waypoint dual-arm path via ExecutePath service."""
+        """Send dual-arm path through ExecutePath service.
+
+        Either side may be an empty list. An empty side means "do not update this arm":
+        the C++ PoseBasedReferenceManager will keep sampling that arm's previous
+        reference trajectory, and will hold its last reference pose after it ends.
+        The trajectory start time is decided by the controller when it receives the
+        request, not by the Python sender timestamp.
+        """
         if not self.is_connected:
             raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
 
@@ -1562,6 +1986,34 @@ class ROS2RobotInterface:
         )
         return response.success
 
+    def execute_left_path(
+        self,
+        left_poses: List[Pose | PoseStamped],
+        trajectory_duration: float = 0.0,
+        frame_id: Optional[str] = "arm_base",
+    ) -> bool:
+        """Execute a left-arm Cartesian path while the right arm keeps its current reference."""
+        return self.execute_path(
+            left_poses=left_poses,
+            right_poses=[],
+            trajectory_duration=trajectory_duration,
+            frame_id=frame_id,
+        )
+
+    def execute_right_path(
+        self,
+        right_poses: List[Pose | PoseStamped],
+        trajectory_duration: float = 0.0,
+        frame_id: Optional[str] = "arm_base",
+    ) -> bool:
+        """Execute a right-arm Cartesian path while the left arm keeps its current reference."""
+        return self.execute_path(
+            left_poses=[],
+            right_poses=right_poses,
+            trajectory_duration=trajectory_duration,
+            frame_id=frame_id,
+        )
+
     def send_dual_arm_target_stamped(
         self,
         left_pose: Pose,
@@ -1570,19 +2022,25 @@ class ROS2RobotInterface:
         body_pose: Optional[Pose] = None,
         body_frame_id: str = "base_footprint",
         body_mode: Optional[str] = None,
+        movel_duration: Optional[float] = None,
     ) -> None:
         """Send dual-arm target poses to /dual_target/stamped topic.
 
-        When ``body_pose`` is provided, an additional 3rd pose will be appended:
-        ``[left, right, body]``. This matches PoseBasedReferenceManager dual-target
-        format that supports both 2-pose and 3-pose messages.
+        When ``body_pose`` is provided, this method requires WBC mode and uses
+        ``BODY_TRACKING`` so the controller can track the body target together
+        with the two arm targets. In that case an additional 3rd pose is appended:
+        ``[left, right, body]``.
 
         Args:
-            body_mode: Optional body mode command, e.g. ``BODY_TRACKING``,
-                ``BODY_FREE``, ``BODY_RELATIVE`` (alias: ``BODY_VERTICAL``),
-                ``BODY_LOCK``, ``BODY_HEAD_COUPLED``.
-                If set and mode is not BODY_TRACKING,
-                body target pose will not be appended.
+            body_pose: Optional body target pose. Supported only in WBC mode.
+            body_frame_id: Frame ID for ``body_pose`` when body tracking is used.
+            body_mode: Optional body mode command. When ``body_pose`` is provided,
+                only ``BODY_TRACKING`` or ``None`` is valid. When ``body_pose`` is
+                omitted, existing body-mode-only switching behavior is preserved.
+            movel_duration: Optional controller ``movel_duration`` in seconds.
+                This updates the controller node parameter before publishing the
+                target. It is a controller-wide parameter and remains in effect
+                for later calls until changed again.
         """
         if not self.is_connected:
             raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
@@ -1591,8 +2049,45 @@ class ROS2RobotInterface:
         if self.dual_target_stamped_pub is None:
             raise ROS2NotConnectedError("Dual target stamped publisher not initialized")
 
+        if body_pose is not None and not self.is_wbc:
+            raise ValueError(
+                "body_pose is only supported in WBC mode for send_dual_arm_target_stamped(). "
+                "Current interface is not in WBC mode."
+            )
+
+        if body_pose is not None and body_mode is not None:
+            requested_body_mode = body_mode.strip().upper()
+            if requested_body_mode != "BODY_TRACKING":
+                raise ValueError(
+                    "body_pose requires body_mode='BODY_TRACKING' in "
+                    "send_dual_arm_target_stamped(); other body modes do not track body_pose."
+                )
+
         self.auto_switch_fsm_for_control("arm_pose")
-        
+
+        if movel_duration is not None:
+            if movel_duration <= 0:
+                raise ValueError(
+                    "movel_duration must be positive when provided to "
+                    "send_dual_arm_target_stamped()."
+                )
+
+            controller_node = self.arm_controller
+            if not controller_node:
+                raise ROS2NotConnectedError(
+                    "Cannot set movel_duration: arm controller node is not available."
+                )
+
+            if not self.set_node_parameters(
+                full_node_name=controller_node,
+                parameters={"movel_duration": float(movel_duration)},
+            ):
+                raise RuntimeError(
+                    f"Failed to set movel_duration={movel_duration:.3f}s on {controller_node}"
+                )
+
+            print(f"Set movel_duration to {movel_duration:.3f}s", flush=True)
+
         stamp = self.robot_node.get_clock().now().to_msg()
         path_msg = Path()
         path_msg.header.stamp = stamp
@@ -1608,6 +2103,9 @@ class ROS2RobotInterface:
         desired_body_mode = self._normalize_body_mode(body_mode, body_pose)
         self._switch_body_mode_if_needed(desired_body_mode)
 
+        if body_pose is not None and desired_body_mode == "BODY_TRACKING":
+            print("Body mode switched to BODY_TRACKING for body_pose target", flush=True)
+
         # Only BODY_TRACKING needs body target in dual_target/stamped.
         if body_pose is not None and desired_body_mode == "BODY_TRACKING":
             body_pose_stamped = PoseStamped()
@@ -1621,6 +2119,8 @@ class ROS2RobotInterface:
             self.left_arm_handler.latest_target_pose = None
         if self.right_arm_handler:
             self.right_arm_handler.latest_target_pose = None
+        if body_pose is not None and desired_body_mode == "BODY_TRACKING":
+            self.body_current_target_pose = None
         
         self.dual_target_stamped_pub.publish(path_msg)
         if len(path_msg.poses) == 2:
@@ -1647,6 +2147,7 @@ class ROS2RobotInterface:
                 - 2: HOLD
                 - 3: OCS2
                 - 4: MOVEJ
+                - 5: COMPLIANCE
                 - 0, 100, etc.: Special commands (do not update internal state)
         """
         if not self.is_connected:
@@ -1663,8 +2164,8 @@ class ROS2RobotInterface:
             # 等待状态机完成切换，避免后续指令在旧状态下执行
             time.sleep(self.config.fsm_state_switch_settle_time)
 
-        # 约束：HOME/OCS2/MOVEJ 只能由 HOLD 切换而来
-        hold_required_targets = {FSM_HOME, FSM_OCS2, FSM_MOVEJ}
+        # 约束：HOME/OCS2/MOVEJ/COMPLIANCE 只能由 HOLD 切换而来
+        hold_required_targets = {FSM_HOME, FSM_OCS2, FSM_MOVEJ, FSM_COMPLIANCE}
         current_state = self.get_fsm_state()
         if (
             command in hold_required_targets
@@ -1677,6 +2178,220 @@ class ROS2RobotInterface:
             _publish_and_wait(FSM_HOLD)
 
         _publish_and_wait(command)
+
+    def _get_cached_wrench(
+        self,
+        side: str,
+        *,
+        topic: str | None,
+        cache: dict | None,
+        kind: str,
+    ) -> dict:
+        if not self.is_connected:
+            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+        side_key = side.lower()
+        if side_key not in ("left", "right"):
+            raise ValueError(f"side must be 'left' or 'right', got: {side!r}")
+        if not topic:
+            raise ROS2InterfaceError(
+                f"No FT {kind} wrench topic configured for side={side_key!r}"
+            )
+        if cache is None:
+            raise ROS2InterfaceError(
+                f"No {kind} wrench message received yet on {topic} (side={side_key})"
+            )
+        return {
+            "force": list(cache["force"]),
+            "torque": list(cache["torque"]),
+            "frame_id": cache["frame_id"],
+            "stamp": cache["stamp"],
+        }
+
+    def get_original_wrench(self, side: str) -> dict:
+        """Latest raw FT wrench (/…/wrench)."""
+        side_key = side.lower()
+        if side_key not in ("left", "right"):
+            raise ValueError(f"side must be 'left' or 'right', got: {side!r}")
+        topic = (
+            self.config.left_ft_wrench_topic
+            if side_key == "left"
+            else self.config.right_ft_wrench_topic
+        )
+        cache = self._latest_wrench_left if side_key == "left" else self._latest_wrench_right
+        return self._get_cached_wrench(side, topic=topic, cache=cache, kind="original")
+
+    def get_filtered_wrench(self, side: str) -> dict:
+        """Latest filtered FT wrench (/…/wrench_filtered; COMPLIANCE only)."""
+        side_key = side.lower()
+        if side_key not in ("left", "right"):
+            raise ValueError(f"side must be 'left' or 'right', got: {side!r}")
+        topic = (
+            self.config.left_ft_wrench_filtered_topic
+            if side_key == "left"
+            else self.config.right_ft_wrench_filtered_topic
+        )
+        cache = (
+            self._latest_wrench_filtered_left
+            if side_key == "left"
+            else self._latest_wrench_filtered_right
+        )
+        return self._get_cached_wrench(side, topic=topic, cache=cache, kind="filtered")
+
+    def _get_hand_tactile_handler(self, side: str) -> HandTactileHandler:
+        """Resolve the tactile handler for one side, with unified guards."""
+        if not self.is_connected:
+            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+        side_key = str(side).strip().lower()
+        if side_key not in ("left", "right"):
+            raise ValueError(f"side must be 'left' or 'right', got: {side!r}")
+        handler = (
+            self.left_hand_tactile_handler
+            if side_key == "left"
+            else self.right_hand_tactile_handler
+        )
+        if handler is None:
+            raise ROS2InterfaceError(
+                f"No hand tactile handler for side={side_key!r}; start "
+                f"can-ros2-control with read_tactile:=true, or set config."
+                f"{side_key}_hand_tactile_topic_prefix before connect()"
+            )
+        return handler
+
+    def get_hand_tactile(
+        self, side: str, finger: str
+    ) -> "UInt8MultiArray | Dict[str, UInt8MultiArray]":
+        """获取指定灵巧手的触觉阵列消息。
+
+        ``finger`` 传具体手指名时返回该手指最新的一条消息；传 ``"all"`` 时一次
+        返回五根手指，键为手指名。
+
+        返回的就是话题上的原始 ``std_msgs/msg/UInt8MultiArray``，不做 reshape、
+        不做拷贝：``msg.layout.dim[0].size`` 为行数，``msg.layout.dim[1].size``
+        为列数，``msg.data`` 按行优先排列。O6 为 10×4（40 值），
+        L6 / O7 为 12×6（72 值），由消息自带的 layout 决定，无需事先知道型号。
+
+        ``finger="all"`` 时每根手指各取自己缓存中的最新值。驱动侧是逐指轮询
+        CAN（``0xB1``～``0xB5``）、五个话题独立发布，因此这五条消息
+        **不保证属于同一个采样批次**，彼此可能有数十毫秒级的时间错位。
+        需要严格同批次时请自行做时间窗口聚合。
+
+        Args:
+            side: ``"left"`` 或 ``"right"``（大小写不敏感）
+            finger: ``"thumb"`` / ``"index"`` / ``"middle"`` / ``"ring"`` /
+                ``"pinky"``，或 ``"all"``（大小写不敏感）
+
+        Returns:
+            单指时为该手指最新的 UInt8MultiArray 消息对象；``finger="all"`` 时为
+            ``{"thumb": msg, "index": msg, "middle": msg, "ring": msg, "pinky": msg}``
+
+        Raises:
+            ROS2NotConnectedError: 接口未连接
+            ValueError: side 或 finger 非法
+            ROS2InterfaceError: 该侧未检测到触觉话题，或对应手指尚未收到消息
+                （``finger="all"`` 时任一手指无数据即抛出，不做部分返回）
+
+        Example:
+            >>> msg = interface.get_hand_tactile("left", "index")
+            >>> all_msgs = interface.get_hand_tactile("left", "all")
+        """
+        return self._get_hand_tactile_handler(side).get(finger)
+
+    def enter_compliance(self) -> None:
+        """Enter COMPLIANCE FSM (auto HOLD transit via send_fsm_command)."""
+        if not self.is_connected:
+            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+        self.send_fsm_command(FSM_COMPLIANCE)
+
+    def set_compliance_force(
+        self,
+        task_selection: Sequence[float],
+        force_setpoint: Sequence[float],
+        force_xmax_lin: float | None = None,
+        force_xmax_ang: float | None = None,
+    ) -> None:
+        """Set COMPLIANCE hybrid selection, force setpoint, and optional displacement soft limits.
+
+        Axis order for task_selection / force_setpoint (base / teleop frame, default base_link):
+            [0]=Fx, [1]=Fy, [2]=Fz, [3]=Mx, [4]=My, [5]=Mz
+            (force in N, torque in Nm)
+
+        task_selection:
+            1.0 = force control on that axis, 0.0 = position control
+        force_setpoint:
+            desired wrench; only axes with task_selection==1 are applied as force targets
+        force_xmax_lin:
+            optional translational soft limit in meters for force axes (Fx/Fy/Fz shared);
+            maps to compliance_hybrid_force_xmax_lin. None = leave controller value unchanged.
+        force_xmax_ang:
+            optional rotational soft limit in radians for force axes (Mx/My/Mz shared);
+            maps to compliance_hybrid_force_xmax_ang. None = leave controller value unchanged.
+
+        Example — X-axis force control at 5 N, other axes position, 50 mm linear soft limit:
+            task_selection = [1, 0, 0, 0, 0, 0]
+            force_setpoint = [5, 0, 0, 0, 0, 0]
+            set_compliance_force(task_selection, force_setpoint, force_xmax_lin=0.05)
+        """
+        if not self.is_connected:
+            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+        sel = [float(x) for x in task_selection]
+        fdes = [float(x) for x in force_setpoint]
+        if len(sel) != 6 or len(fdes) != 6:
+            raise ValueError(
+                "task_selection and force_setpoint must each have length 6 "
+                f"[Fx,Fy,Fz,Mx,My,Mz] (got {len(sel)}, {len(fdes)})"
+            )
+
+        params: dict[str, object] = {
+            "compliance_task_selection": sel,
+            "compliance_force_setpoint": fdes,
+        }
+
+        if force_xmax_lin is not None:
+            lin = float(force_xmax_lin)
+            if not math.isfinite(lin) or lin < 0.0:
+                raise ValueError(
+                    f"force_xmax_lin must be a finite float >= 0 (meters), got {force_xmax_lin!r}"
+                )
+            params["compliance_hybrid_force_xmax_lin"] = lin
+
+        if force_xmax_ang is not None:
+            ang = float(force_xmax_ang)
+            if not math.isfinite(ang) or ang < 0.0:
+                raise ValueError(
+                    f"force_xmax_ang must be a finite float >= 0 (radians), got {force_xmax_ang!r}"
+                )
+            params["compliance_hybrid_force_xmax_ang"] = ang
+
+        ctrl = self.arm_controller
+        if not ctrl:
+            raise ROS2InterfaceError("Cannot resolve arm_controller node for set_parameters")
+        ok = self.set_node_parameters(ctrl, params)
+        if not ok:
+            raise ROS2InterfaceError(f"Failed to set compliance force parameters on {ctrl}")
+
+    def call_compliance_zero_wrench(self, timeout_sec: float = 5.0) -> None:
+        """Request FT zero calibration (Trigger). Does not wait for zero_cal_done."""
+        if not self.is_connected:
+            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+        client = self.compliance_zero_wrench_client
+        if client is None:
+            raise ROS2InterfaceError("compliance_zero_wrench client not initialized")
+        if not client.wait_for_service(timeout_sec=2.0):
+            raise ROS2InterfaceError(
+                "/compliance_zero_wrench not available; enter COMPLIANCE first"
+            )
+        future = client.call_async(Trigger.Request())
+        event = threading.Event()
+        future.add_done_callback(lambda _: event.set())
+        if not event.wait(timeout=timeout_sec):
+            raise ROS2InterfaceError("compliance_zero_wrench service call timed out")
+        response = future.result()
+        if response is None:
+            raise ROS2InterfaceError("compliance_zero_wrench service call failed")
+        if not response.success:
+            raise ROS2InterfaceError(
+                f"compliance_zero_wrench rejected: {response.message}"
+            )
 
     def send_mode_command(self, command: str) -> None:
         """Send mode command to /mode_command.
@@ -1695,6 +2410,106 @@ class ROS2RobotInterface:
         mode_msg.data = str(command)
         self.mode_command_pub.publish(mode_msg)
         time.sleep(self.MODE_SWITCH_SETTLE_TIME_SEC)
+
+    def mode_command_matches_wbc_state(self, command: str) -> bool | None:
+        """对照 ``/ocs2_wbc_controller/current_state`` 判断 mode 是否已生效。
+
+        Returns:
+            True / False：可判定且已匹配 / 未匹配；
+            None：尚无 ``wbc_state``，或该 command 无对应字段（无法用 current_state 确认）。
+        """
+        return self.mode_commands_match_wbc_state([command])
+
+    def mode_commands_match_wbc_state(self, commands: list[str] | tuple[str, ...]) -> bool | None:
+        """对照 ``current_state`` 判断一组 mode 是否全部生效。
+
+        同一字段若有多条命令，以最后一条为准。全部无映射时返回 None。
+        """
+        expects: Dict[str, int] = {}
+        for raw in commands:
+            key = str(raw).strip().upper()
+            expect = self.MODE_COMMAND_TO_WBC_EXPECT.get(key)
+            if expect is None:
+                continue
+            field, value = expect
+            expects[field] = int(value)
+        if not expects:
+            return None
+        if self.wbc_state is None:
+            return None
+        for field, value in expects.items():
+            if int(getattr(self.wbc_state, field)) != value:
+                return False
+        return True
+
+    def wait_until_mode_command_applied(
+        self,
+        command: str,
+        *,
+        timeout: float = 5.0,
+        poll_period: float = 0.05,
+        time_now_fn: Optional[Callable[[], float]] = None,
+        sleep_fn: Optional[Callable[[float], None]] = None,
+    ) -> bool:
+        """等待 ``/ocs2_wbc_controller/current_state`` 反映给定 mode command。"""
+        return self.wait_until_mode_commands_applied(
+            [command],
+            timeout=timeout,
+            poll_period=poll_period,
+            time_now_fn=time_now_fn,
+            sleep_fn=sleep_fn,
+        )
+
+    def wait_until_mode_commands_applied(
+        self,
+        commands: list[str] | tuple[str, ...],
+        *,
+        timeout: float = 5.0,
+        poll_period: float = 0.05,
+        time_now_fn: Optional[Callable[[], float]] = None,
+        sleep_fn: Optional[Callable[[float], None]] = None,
+    ) -> bool:
+        """等待 ``current_state`` 同时满足一组 mode 的期望字段。
+
+        对可映射命令合并期望（同字段以后者为准）后轮询；全部无法映射时返回 True。
+        超时返回 False。
+        """
+        keys = [str(c).strip().upper() for c in commands if str(c).strip()]
+        expects: Dict[str, int] = {}
+        for key in keys:
+            expect = self.MODE_COMMAND_TO_WBC_EXPECT.get(key)
+            if expect is None:
+                continue
+            field, value = expect
+            expects[field] = int(value)
+        if not expects:
+            logger.debug(f"No WBC current_state mapping for modes={keys!r}; skip wait")
+            return True
+
+        now_fn = time_now_fn or time.monotonic
+        wait_fn = sleep_fn or time.sleep
+        start = now_fn()
+        while (now_fn() - start) <= max(0.0, float(timeout)):
+            matched = self.mode_commands_match_wbc_state(keys)
+            if matched is True:
+                logger.debug(
+                    f"Modes {keys!r} confirmed on /ocs2_wbc_controller/current_state "
+                    f"(expect {expects})"
+                )
+                return True
+            wait_fn(max(0.0, float(poll_period)))
+
+        cur: Dict[str, int | None] = {}
+        for field in expects:
+            if self.wbc_state is not None:
+                cur[field] = int(getattr(self.wbc_state, field))
+            else:
+                cur[field] = None
+        logger.warning(
+            f"Timeout waiting for modes {keys!r} on current_state "
+            f"(expect {expects}, got {cur})"
+        )
+        return False
 
     def auto_switch_fsm_state(self, target_state: int) -> bool:
         """Automatically switch FSM state only when needed.
@@ -1728,6 +2543,8 @@ class ROS2RobotInterface:
         """Auto-switch FSM state based on control category rules."""
         if not self._auto_switch_fsm_before_control:
             return False
+        if self._defer_individual_joint_fsm_switch:
+            return False
 
         normalized_type = control_type.strip().lower()
         valid_types = {"arm_pose", "arm_joint", "body_joint", "head_joint", "other"}
@@ -1742,20 +2559,27 @@ class ROS2RobotInterface:
         if normalized_type == "arm_pose":
             return self.auto_switch_fsm_state(FSM_OCS2)
 
-        if normalized_type == "arm_joint":
+        if normalized_type in ("arm_joint", "body_joint", "head_joint"):
             return self.auto_switch_fsm_state(FSM_MOVEJ)
 
-        if self.is_wbc:
-            return self.auto_switch_fsm_state(FSM_MOVEJ)
+        return False
 
-        # Non-WBC: MOVEJ or OCS2 are both acceptable; OCS2 is preferred when switching is needed.
-        current_state = self.get_fsm_state()
-        if current_state in (FSM_MOVEJ, FSM_OCS2):
-            logger.debug(
-                f"FSM state {current_state} is acceptable for {normalized_type} in non-WBC mode"
-            )
-            return False
-        return self.auto_switch_fsm_state(FSM_OCS2)
+    def _auto_switch_fsm_for_coordinated_joint_motion(
+        self,
+        *,
+        has_body: bool,
+        has_left: bool,
+        has_right: bool,
+        has_head: bool,
+    ) -> bool:
+        """``send_coordinated_joint_positions`` 入口：按本次下发的关节组选 FSM（WBC / 分体统一走 MoveJ）。"""
+        if has_left or has_right:
+            return self.auto_switch_fsm_for_control("arm_joint")
+        if has_body:
+            return self.auto_switch_fsm_for_control("body_joint")
+        if has_head:
+            return self.auto_switch_fsm_for_control("head_joint")
+        return False
     
     def get_fsm_state(self) -> int:
         """Get current FSM state code.
@@ -1868,6 +2692,121 @@ class ROS2RobotInterface:
         
         self.body_target_positions = positions.copy() if positions else None
 
+    def send_body_relative(
+        self,
+        dx: float,
+        dy: float,
+        dz: float,
+        droll: float = 0.0,
+        dpitch: float = 0.0,
+        dyaw: float = 0.0,
+        frame_id: str = "",
+    ) -> None:
+        """发送身体一次笛卡尔相对位移（米 / 弧度 RPY）并走 MoveL。
+
+        Args:
+            dx: 平移增量 X（米），表达在 ``frame_id`` 下。
+            dy: 平移增量 Y（米）。
+            dz: 平移增量 Z（米）。
+            droll: 滚转增量（弧度）。
+            dpitch: 俯仰增量（弧度）。
+            dyaw: 偏航增量（弧度）。
+            frame_id: 增量坐标系；空字符串表示控制器内部 base_frame。
+        """
+        if not self.is_connected:
+            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+
+        if self.body_target_relative_pub is None:
+            logger.warning(
+                "Body target relative publisher not initialized. "
+                "Set body_target_relative_topic in config."
+            )
+            return
+
+        self.auto_switch_fsm_for_control("arm_pose")
+        self._switch_body_mode_if_needed("BODY_TRACKING")
+
+        self.body_current_target_pose = None
+
+        msg = TwistStamped()
+        msg.header.frame_id = frame_id
+        msg.header.stamp = self.robot_node.get_clock().now().to_msg()
+        msg.twist.linear.x = float(dx)
+        msg.twist.linear.y = float(dy)
+        msg.twist.linear.z = float(dz)
+        msg.twist.angular.x = float(droll)
+        msg.twist.angular.y = float(dpitch)
+        msg.twist.angular.z = float(dyaw)
+        self.body_target_relative_pub.publish(msg)
+        logger.debug(
+            f"Published body relative in frame '{frame_id}': "
+            f"linear=({dx}, {dy}, {dz}) angular=({droll}, {dpitch}, {dyaw})"
+        )
+
+    def send_body_target(self, pose: Pose) -> None:
+        """发送 body 绝对位姿目标（控制器 base_frame 坐标系下，立即生效、不插值）。
+
+        Args:
+            pose: 目标位姿，位于控制器 base_frame 坐标系下。
+        """
+        if not self.is_connected:
+            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+
+        if self.body_target_pub is None:
+            logger.warning(
+                "Body target publisher not initialized. Set body_target_topic in config."
+            )
+            return
+
+        self.auto_switch_fsm_for_control("arm_pose")
+        self._switch_body_mode_if_needed("BODY_TRACKING")
+
+        # 清除旧的 current target，避免在收到新目标前误判为已到达
+        self.body_current_target_pose = None
+
+        self.body_target_pub.publish(pose)
+        logger.debug(f"Published body target: {pose}")
+
+    def send_body_target_stamped(self, frame_id: str = "", pose: Optional[Pose] = None) -> None:
+        """发送带坐标系信息的 body 绝对位姿目标（PoseStamped）。
+
+        TF 转换由控制器端完成：``frame_id`` 等于控制器 ``base_frame`` 名时直接采用，
+        其它坐标系会 lookupTransform 到 base_frame（TF 失败则丢弃该目标）。
+        ``frame_id`` 为空字符串时原样发布（frame_id 留空，不会触发 TF），
+        因此持续有效的用法是显式传入实际的 ``base_frame`` 名。
+
+        Args:
+            frame_id: 目标位姿所在坐标系；空字符串表示按控制器 base_frame 语义处理。
+            pose: 目标位姿。
+
+        Raises:
+            ValueError: 未提供 ``pose``。
+        """
+        if not self.is_connected:
+            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+
+        if self.body_target_stamped_pub is None:
+            logger.warning(
+                "Body target stamped publisher not initialized. Set body_target_topic in config."
+            )
+            return
+
+        if pose is None:
+            raise ValueError("pose is required in send_body_target_stamped()")
+
+        self.auto_switch_fsm_for_control("arm_pose")
+        self._switch_body_mode_if_needed("BODY_TRACKING")
+
+        # 清除旧的 current target，避免在收到新目标前误判为已到达
+        self.body_current_target_pose = None
+
+        msg = PoseStamped()
+        msg.header.frame_id = frame_id
+        msg.header.stamp = self.robot_node.get_clock().now().to_msg()
+        msg.pose = pose
+        self.body_target_stamped_pub.publish(msg)
+        logger.debug(f"Published body target (stamped) in frame '{frame_id}': {pose}")
+
     def send_waist_lifting_relative_position(self, position: float) -> None:
         """Send target relative position for waist lifting."""
         if not self.is_connected:
@@ -1933,6 +2872,85 @@ class ROS2RobotInterface:
         msg.data = [x, z, phi]
         self.waist_lifting_pose_absolute_pub.publish(msg)
         logger.debug(f"Published waist lifting pose absolute: {[x, z, phi]}")
+
+    def execute_waist_lifting_pose_action(
+        self,
+        mode: int,
+        x: float,
+        z: float,
+        phi: float,
+        *,
+        auto_switch_fsm: bool = True,
+        feedback_callback: Optional[Callable[[Any], None]] = None,
+        timeout: float = 30.0,
+        wait_for_server_timeout: float = 5.0,
+    ) -> Any:
+        """Send a waist lifting pose action goal and wait for the result.
+
+        Args:
+            mode: WaistLiftingPose.Goal.MODE_ABSOLUTE 或 MODE_RELATIVE。
+            x, z, phi: 绝对目标或相对增量（取决于 mode）。
+
+        Returns:
+            action 的 result 对象（含 reachable/success/planned_x/z/phi/message/error_code），
+            goal 被拒绝或超时时返回 None。
+        """
+        goal_msg = WaistLiftingPose.Goal()
+        goal_msg.mode = int(mode)
+        goal_msg.x = float(x)
+        goal_msg.z = float(z)
+        goal_msg.phi = float(phi)
+        return self._send_motion_action_goal(
+            self.waist_lifting_pose_action_client,
+            goal_msg,
+            action_label="WaistLiftingPose",
+            control_type="body_joint" if auto_switch_fsm else None,
+            feedback_callback=feedback_callback,
+            timeout=timeout,
+            wait_for_server_timeout=wait_for_server_timeout,
+        )
+
+    def execute_waist_lifting_pose_absolute_action(
+        self,
+        x: float,
+        z: float,
+        phi: float,
+        *,
+        auto_switch_fsm: bool = True,
+        feedback_callback: Optional[Callable[[Any], None]] = None,
+        timeout: float = 30.0,
+        wait_for_server_timeout: float = 5.0,
+    ) -> Any:
+        """腰部绝对位姿运动（等待到位/可达结果）。x/z/phi 为 body_base 下绝对目标。"""
+        return self.execute_waist_lifting_pose_action(
+            WaistLiftingPose.Goal.MODE_ABSOLUTE,
+            x, z, phi,
+            auto_switch_fsm=auto_switch_fsm,
+            feedback_callback=feedback_callback,
+            timeout=timeout,
+            wait_for_server_timeout=wait_for_server_timeout,
+        )
+
+    def execute_waist_lifting_pose_relative_action(
+        self,
+        dx: float,
+        dz: float,
+        dphi: float,
+        *,
+        auto_switch_fsm: bool = True,
+        feedback_callback: Optional[Callable[[Any], None]] = None,
+        timeout: float = 30.0,
+        wait_for_server_timeout: float = 5.0,
+    ) -> Any:
+        """腰部相对位姿运动（等待到位/可达结果）。dx/dz/dphi 为相对增量。"""
+        return self.execute_waist_lifting_pose_action(
+            WaistLiftingPose.Goal.MODE_RELATIVE,
+            dx, dz, dphi,
+            auto_switch_fsm=auto_switch_fsm,
+            feedback_callback=feedback_callback,
+            timeout=timeout,
+            wait_for_server_timeout=wait_for_server_timeout,
+        )
 
     def send_waist_lifting_velocity_scale(self, velocity_scale: float) -> None:
         """Send target velocity for waist lifting."""
@@ -2019,6 +3037,31 @@ class ROS2RobotInterface:
         self.right_hand_joint_controller_pub.publish(msg)
         logger.debug(f"Published right hand joint positions: {positions}")
 
+    def _cache_wbc_joint_targets(
+        self,
+        joint_names: List[str],
+        explicit_positions: Optional[List[float]],
+        name_to_cmd: Dict[str, float],
+        state_name_to_pos: Dict[str, float],
+        cache_attr: str,
+    ) -> None:
+        """Cache resolved body/head targets for check_arrive after WBC unified publish."""
+        if not joint_names:
+            return
+        if explicit_positions is not None:
+            setattr(self, cache_attr, list(explicit_positions))
+            return
+        resolved: List[float] = []
+        for joint_name in joint_names:
+            if joint_name in name_to_cmd:
+                resolved.append(name_to_cmd[joint_name])
+            elif joint_name in state_name_to_pos:
+                resolved.append(state_name_to_pos[joint_name])
+            else:
+                return
+        if len(resolved) == len(joint_names):
+            setattr(self, cache_attr, resolved)
+
     def send_dual_arm_joint_positions(
         self,
         left_arm_positions: List[float],
@@ -2038,8 +3081,11 @@ class ROS2RobotInterface:
             right_arm_positions: 右臂关节位置列表（弧度）
             body_positions: 躯干关节目标位置列表（弧度），仅 WBC 控制器生效。
                 传入时直接使用该值；省略时从当前关节状态读取（保持躯干不动）。
+                非 WBC（如 ocs2_arm_controller 统一 topic）时传入会被忽略并告警。
             head_positions: 头部关节目标位置列表（弧度），仅 WBC 控制器生效。
                 传入时直接使用该值；省略时从当前关节状态读取（保持头部不动）。
+                WBC 合成发布时会同步缓存，供 check_arrive(part='head'/'body') 使用。
+                非 WBC 时传入会被忽略并告警。
 
         Raises:
             ROS2NotConnectedError: 如果接口未连接或发布器未初始化
@@ -2116,6 +3162,7 @@ class ROS2RobotInterface:
                         logger.warning("Body joint positions not available, using zeros for WBC controller")
                         resolved_body = [0.0] * 4
                     combined_positions = list(resolved_body) + combined_positions
+                    self.body_target_positions = list(resolved_body)
             else:
                 body_joint_names: List[str] = []
                 left_arm_joint_names: List[str] = []
@@ -2131,10 +3178,10 @@ class ROS2RobotInterface:
                         left_arm_joint_names.append(joint_name)
                     elif name_lower.startswith("right_"):
                         right_arm_joint_names.append(joint_name)
-                    elif "body" in name_lower or name_lower.startswith("leg_"):
-                        # Galbot 等底盘/下肢链常用 leg_joint*，在 WBC 合成里与 body 段同序位
+                    elif is_body_joint_name(joint_name):
+                        # body* / lift_joint / leg_*：与 StateMoveJ body 前缀及 _categorize_joints 一致
                         body_joint_names.append(joint_name)
-                    elif "head" in name_lower:
+                    elif is_head_joint_name(joint_name):
                         head_joint_names.append(joint_name)
                     else:
                         ignored_joint_names.append(joint_name)
@@ -2229,6 +3276,23 @@ class ROS2RobotInterface:
                         f"got {len(combined_positions)}, expected {expected_total}"
                     )
 
+                if include_body_in_unified:
+                    self._cache_wbc_joint_targets(
+                        body_joint_names,
+                        body_positions,
+                        body_name_to_cmd,
+                        state_name_to_pos,
+                        "body_target_positions",
+                    )
+                if include_head_in_unified:
+                    self._cache_wbc_joint_targets(
+                        head_joint_names,
+                        head_positions,
+                        head_name_to_cmd,
+                        state_name_to_pos,
+                        "head_target_positions",
+                    )
+
             logger.debug(
                 "WBC controller: left=%s, right=%s, body=%s, head=%s, total=%s",
                 len(left_arm_positions),
@@ -2239,6 +3303,20 @@ class ROS2RobotInterface:
             )
         else:
             # ARM 控制器只需要左臂 + 右臂
+            if body_positions is not None or head_positions is not None:
+                logger.warning(
+                    "send_dual_arm_joint_positions: body_positions/head_positions are ignored "
+                    "under non-WBC unified arm controller (%s). "
+                    "Only left+right arm joints are published. "
+                    "Use send_body_joint_positions / send_head_joint_positions "
+                    "(or send_coordinated_joint_positions) for body/head.",
+                    unified_topic,
+                )
+                print(
+                    "[warn] send_dual_arm_joint_positions: body/head targets will NOT execute "
+                    f"on non-WBC stack ({unified_topic}); only left+right arms are sent.",
+                    flush=True,
+                )
             combined_positions = left_arm_positions + right_arm_positions
             logger.debug(f"ARM controller: left={len(left_arm_positions)}, right={len(right_arm_positions)}, total={len(combined_positions)}")
 
@@ -2256,12 +3334,18 @@ class ROS2RobotInterface:
         left_arm_positions: Optional[List[float]] = None,
         right_arm_positions: Optional[List[float]] = None,
         head_positions: Optional[List[float]] = None,
+        *,
+        auto_switch_fsm: bool = True,
     ) -> None:
         """一次性下发关节空间目标（MoveJ 语义），在 WBC 合成与 split 栈之间自动选路。
 
         低层 API（``send_dual_arm_joint_positions``、``send_body_joint_positions``、
         ``ArmHandler.send_joint_positions`` 等）仍适合**并行/分时**组合（例如手臂
         MoVEL 与腰部 MoveJ 分开发）；本方法面向**单步**「能一次发就一次发」的编排。
+
+        当 ``auto_switch_fsm=True``（默认）时，在本方法入口根据本次下发的关节组
+        （臂 / 躯干 / 头）自动切换 FSM（关节空间统一进 MOVEJ），再选路发布；分体与
+        WBC 均由 ``auto_switch_fsm_for_control`` 判定，skill 层无需显式 ``send_fsm_command``。
 
         路由概要：
 
@@ -2300,6 +3384,34 @@ class ROS2RobotInterface:
                 "left_arm_positions, right_arm_positions, head_positions must be non-empty"
             )
 
+        if auto_switch_fsm:
+            self._auto_switch_fsm_for_coordinated_joint_motion(
+                has_body=body is not None,
+                has_left=left is not None,
+                has_right=right is not None,
+                has_head=head is not None,
+            )
+
+        prev_defer = self._defer_individual_joint_fsm_switch
+        self._defer_individual_joint_fsm_switch = True
+        try:
+            self._send_coordinated_joint_positions_routed(
+                body=body,
+                left=left,
+                right=right,
+                head=head,
+            )
+        finally:
+            self._defer_individual_joint_fsm_switch = prev_defer
+
+    def _send_coordinated_joint_positions_routed(
+        self,
+        *,
+        body: Optional[List[float]],
+        left: Optional[List[float]],
+        right: Optional[List[float]],
+        head: Optional[List[float]],
+    ) -> None:
         unified_topic = self.config.unified_arm_joint_controller_topic or ""
         using_wbc_controller = "ocs2_wbc_controller" in unified_topic
         using_arm_controller = "ocs2_arm_controller" in unified_topic
@@ -2563,8 +3675,143 @@ class ROS2RobotInterface:
                    f"for {len(joint_names)} joints")
         logger.debug(f"Joint names: {joint_names}")
         logger.debug(f"Waypoints: {len(waypoints)} points")
-    
-    
+
+    def send_body_joint_trajectory(self,
+                                   joint_names: List[str],
+                                   waypoints: List[List[float]],
+                                   trajectory_duration: float | None = None) -> None:
+        """发送躯干关节多路点轨迹（split 拓扑）。
+
+        控制器会把当前位置自动插到轨迹起点；``trajectory_duration`` 非空时，
+        发布前将 body 控制器节点（``body_joint_controller``）参数
+        ``movej_trajectory_duration`` 设为该值。
+
+        Args:
+            joint_names: 躯干关节名列表（须与控制器关节一致）。
+            waypoints: 多路点，每点为与 joint_names 等长的关节位置列表（弧度）。
+            trajectory_duration: 可选总轨迹时长（秒）；None 沿用控制器当前参数。
+
+        Raises:
+            ROS2NotConnectedError: 接口未连接。
+            ValueError: 路点非法。
+        """
+        if not self.is_connected:
+            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+
+        if not waypoints or len(waypoints) < 2:
+            raise ValueError("At least 2 waypoints are required (current position will be added as first waypoint)")
+
+        if len(joint_names) == 0:
+            raise ValueError("joint_names cannot be empty")
+
+        if self.body_joint_trajectory_pub is None:
+            logger.warning(
+                "Body joint trajectory publisher not initialized. Set body_joint_trajectory_topic in config."
+            )
+            return
+
+        self.auto_switch_fsm_for_control("body_joint")
+
+        for i, waypoint in enumerate(waypoints):
+            if len(waypoint) != len(joint_names):
+                raise ValueError(f"Waypoint {i} has {len(waypoint)} positions, but expected {len(joint_names)}")
+
+        if trajectory_duration is not None:
+            if trajectory_duration <= 0:
+                raise ValueError("trajectory_duration must be positive")
+            ctrl = self.body_controller
+            if not ctrl:
+                logger.warning("Body controller node unknown; cannot set movej_trajectory_duration")
+            elif not self.set_node_parameters(ctrl, {"movej_trajectory_duration": trajectory_duration}):
+                logger.warning("Failed to set movej_trajectory_duration on %s", ctrl)
+
+        trajectory_msg = JointTrajectory()
+        trajectory_msg.header.stamp = self.robot_node.get_clock().now().to_msg()
+        trajectory_msg.header.frame_id = ""
+        trajectory_msg.joint_names = joint_names
+
+        for waypoint in waypoints:
+            point = JointTrajectoryPoint()
+            point.positions = waypoint
+            trajectory_msg.points.append(point)
+
+        self.body_joint_trajectory_pub.publish(trajectory_msg)
+
+        # 缓存末路点供 check_arrive(part='body') 使用
+        self.body_target_positions = waypoints[-1].copy()
+
+        logger.info(f"Published body joint trajectory with {len(waypoints)} waypoints for {len(joint_names)} joints")
+        logger.debug(f"Joint names: {joint_names}")
+        logger.debug(f"Waypoints: {len(waypoints)} points")
+
+    def send_head_joint_trajectory(self,
+                                   joint_names: List[str],
+                                   waypoints: List[List[float]],
+                                   trajectory_duration: float | None = None) -> None:
+        """发送头部关节多路点轨迹（split 拓扑）。
+
+        控制器会把当前位置自动插到轨迹起点；``trajectory_duration`` 非空时，
+        发布前将 head 控制器节点（``head_joint_controller``）参数
+        ``movej_trajectory_duration`` 设为该值。
+
+        Args:
+            joint_names: 头部关节名列表（须与控制器关节一致）。
+            waypoints: 多路点，每点为与 joint_names 等长的关节位置列表（弧度）。
+            trajectory_duration: 可选总轨迹时长（秒）；None 沿用控制器当前参数。
+
+        Raises:
+            ROS2NotConnectedError: 接口未连接。
+            ValueError: 路点非法。
+        """
+        if not self.is_connected:
+            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+
+        if not waypoints or len(waypoints) < 2:
+            raise ValueError("At least 2 waypoints are required (current position will be added as first waypoint)")
+
+        if len(joint_names) == 0:
+            raise ValueError("joint_names cannot be empty")
+
+        if self.head_joint_trajectory_pub is None:
+            logger.warning(
+                "Head joint trajectory publisher not initialized. Set head_joint_trajectory_topic in config."
+            )
+            return
+
+        self.auto_switch_fsm_for_control("head_joint")
+
+        for i, waypoint in enumerate(waypoints):
+            if len(waypoint) != len(joint_names):
+                raise ValueError(f"Waypoint {i} has {len(waypoint)} positions, but expected {len(joint_names)}")
+
+        if trajectory_duration is not None:
+            if trajectory_duration <= 0:
+                raise ValueError("trajectory_duration must be positive")
+            ctrl = self._controller_node_from_topic(self.config.head_joint_controller_topic)
+            if not ctrl:
+                logger.warning("Head controller node unknown; cannot set movej_trajectory_duration")
+            elif not self.set_node_parameters(ctrl, {"movej_trajectory_duration": trajectory_duration}):
+                logger.warning("Failed to set movej_trajectory_duration on %s", ctrl)
+
+        trajectory_msg = JointTrajectory()
+        trajectory_msg.header.stamp = self.robot_node.get_clock().now().to_msg()
+        trajectory_msg.header.frame_id = ""
+        trajectory_msg.joint_names = joint_names
+
+        for waypoint in waypoints:
+            point = JointTrajectoryPoint()
+            point.positions = waypoint
+            trajectory_msg.points.append(point)
+
+        self.head_joint_trajectory_pub.publish(trajectory_msg)
+
+        # 缓存末路点供 check_arrive(part='head') 使用
+        self.head_target_positions = waypoints[-1].copy()
+
+        logger.info(f"Published head joint trajectory with {len(waypoints)} waypoints for {len(joint_names)} joints")
+        logger.debug(f"Joint names: {joint_names}")
+        logger.debug(f"Waypoints: {len(waypoints)} points")
+
     def _check_joint_arrival(self, part_name: str, target_positions: Optional[List[float]], 
                             current_positions: Optional[List[float]], threshold: float) -> Dict[str, Any]:
         """Check if joint positions have arrived at target."""
@@ -2592,14 +3839,14 @@ class ROS2RobotInterface:
         arm_pose_threshold: Optional[float] = None,
         arm_orient_threshold: Optional[float] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Check if head, body joints, arm poses, or grippers have arrived at target positions/poses.
+        """Check if head, body joints, body pose, arm poses, or grippers have arrived at target positions/poses.
         
         Args:
-            part: 要检查的部分，可选值：None（所有部分）、'head'、'body'、'left_arm'、'right_arm'、
+            part: 要检查的部分，可选值：None（所有部分）、'head'、'body'、'body_pose'、'left_arm'、'right_arm'、
                   'left_gripper'、'right_gripper'、'arm'（单臂模式）、'gripper'（单臂模式）
             position_threshold: 关节位置阈值（仅用于 head 和 body），如果为 None 则使用默认值
-            arm_pose_threshold: 笛卡尔末端位置容差（米），传给左右臂 ``check_arrival``；None 用 handler 默认
-            arm_orient_threshold: 笛卡尔末端姿态角度容差（度）；None 用 handler 默认
+            arm_pose_threshold: 笛卡尔末端位置容差（米），传给左右臂 ``check_arrival`` 与 body_pose；None 用 config 默认
+            arm_orient_threshold: 笛卡尔末端姿态角度容差（度）；None 用 config 默认
         
         Returns:
             包含到达状态和距离信息的字典，如果未连接则返回 None
@@ -2634,6 +3881,18 @@ class ROS2RobotInterface:
             if part == 'body':
                 return body_result
             result['body'] = body_result
+
+        if part is None or part == 'body_pose':
+            body_pose_result = check_pose_arrival(
+                'BODY_POSE',
+                self.get_body_current_pose(),
+                self.get_body_current_target_pose(),
+                arm_pose_threshold if arm_pose_threshold is not None else self.config.pose_position_threshold,
+                arm_orient_threshold if arm_orient_threshold is not None else self.config.pose_orientation_threshold,
+            )
+            if part == 'body_pose':
+                return body_pose_result
+            result['body_pose'] = body_pose_result
         
         if part is None or part == 'left_arm':
             arm_result = self.left_arm_handler.check_arrival(arm_pose_threshold, arm_orient_threshold)
@@ -2696,12 +3955,12 @@ class ROS2RobotInterface:
 
         Args:
             part: Part name accepted by ``check_arrive`` (e.g. ``arm``, ``gripper``,
-                ``left_arm``, ``left_gripper``).
+                ``left_arm``, ``left_gripper``, ``body_pose``).
             timeout: Maximum wait time in seconds.
             poll_period: Polling interval in seconds.
             position_threshold: Optional threshold forwarded to ``check_arrive`` (head/body 关节)。
-            arm_pose_threshold: 左右臂笛卡尔到位：位置阈值（米），见 ``check_arrive``。
-            arm_orient_threshold: 左右臂笛卡尔到位：姿态角度阈值（度），见 ``check_arrive``。
+            arm_pose_threshold: 笛卡尔到位位置阈值（米），用于手臂与 ``body_pose``，见 ``check_arrive``。
+            arm_orient_threshold: 笛卡尔到位姿态角度阈值（度），用于手臂与 ``body_pose``，见 ``check_arrive``。
             time_now_fn: Optional custom clock function. Use this when timeout should
                 follow simulation time instead of wall time.
             sleep_fn: Optional sleep function paired with ``time_now_fn``.
@@ -2819,9 +4078,13 @@ class ROS2RobotInterface:
         left_target_positions: Optional[List[float]] = None,
         right_target_positions: Optional[List[float]] = None,
         body_target_positions: Optional[List[float]] = None,
+        left_check_indices: Optional[Sequence[int]] = None,
+        right_check_indices: Optional[Sequence[int]] = None,
+        body_check_indices: Optional[Sequence[int]] = None,
         timeout: float = 3.0,
         poll_period: float = 0.05,
         joint_tolerance: float = 0.03,
+        angular_wrap: bool = True,
         time_now_fn: Optional[Callable[[], float]] = None,
         sleep_fn: Optional[Callable[[float], None]] = None,
         on_poll: Optional[Callable[[Dict[str, Any], float], None]] = None,
@@ -2830,6 +4093,10 @@ class ROS2RobotInterface:
 
         Checks left arm, right arm, and optionally body joints.
         All specified groups must be within ``joint_tolerance`` to be considered arrived.
+
+        When ``*_check_indices`` is set, only those 0-based joint indices are compared
+        (passive hold-current slots from partial absolute specs are skipped).
+        ``angular_wrap`` uses shortest angular distance for revolute joints.
         """
         now_fn = time_now_fn or time.monotonic
         wait_fn = sleep_fn or time.sleep
@@ -2844,12 +4111,30 @@ class ROS2RobotInterface:
                 "reason": "no_target",
             }
 
-        def _max_abs_error(current: Optional[List[float]], target: Optional[List[float]]) -> Optional[float]:
+        def _joint_error(cur: float, tgt: float) -> float:
+            diff = abs(float(cur) - float(tgt))
+            if angular_wrap:
+                return min(diff, abs(2.0 * math.pi - diff))
+            return diff
+
+        def _max_abs_error(
+            current: Optional[List[float]],
+            target: Optional[List[float]],
+            check_indices: Optional[Sequence[int]] = None,
+        ) -> tuple[Optional[float], dict[int, float]]:
             if target is None:
-                return 0.0
+                return 0.0, {}
             if current is None or len(current) != len(target) or len(target) == 0:
-                return None
-            return max(abs(float(c) - float(t)) for c, t in zip(current, target))
+                return None, {}
+            indices = list(check_indices) if check_indices is not None else list(range(len(target)))
+            per_joint: dict[int, float] = {}
+            for i in indices:
+                if i < 0 or i >= len(target):
+                    continue
+                per_joint[i] = _joint_error(current[i], target[i])
+            if not per_joint:
+                return None, {}
+            return max(per_joint.values()), per_joint
 
         def _get_body_positions() -> Optional[List[float]]:
             try:
@@ -2877,9 +4162,15 @@ class ROS2RobotInterface:
             left_current, right_current = self._get_current_arm_joint_positions()
             body_current = _get_body_positions() if body_target_positions is not None else None
 
-            left_err  = _max_abs_error(left_current,  left_target_positions)
-            right_err = _max_abs_error(right_current, right_target_positions)
-            body_err  = _max_abs_error(body_current,  body_target_positions)
+            left_err, left_per = _max_abs_error(
+                left_current, left_target_positions, left_check_indices
+            )
+            right_err, right_per = _max_abs_error(
+                right_current, right_target_positions, right_check_indices
+            )
+            body_err, body_per = _max_abs_error(
+                body_current, body_target_positions, body_check_indices
+            )
 
             left_ok  = (left_err  is not None and left_err  <= joint_tolerance) if left_target_positions  is not None else True
             right_ok = (right_err is not None and right_err <= joint_tolerance) if right_target_positions is not None else True
@@ -2893,6 +4184,9 @@ class ROS2RobotInterface:
                 "left_error_max_abs": left_err,
                 "right_error_max_abs": right_err,
                 "body_error_max_abs": body_err,
+                "left_joint_errors": left_per,
+                "right_joint_errors": right_per,
+                "body_joint_errors": body_per,
                 "left_current_len": len(left_current) if left_current is not None else 0,
                 "right_current_len": len(right_current) if right_current is not None else 0,
                 "left_target_len": len(left_target_positions) if left_target_positions is not None else 0,
@@ -3275,18 +4569,24 @@ class ROS2RobotInterface:
         if self.tf_buffer is not None:
             self.tf_buffer = None
         self._connected = False
-        
-        if self.executor:
-            self.executor.shutdown()
-            self.executor = None
-        
-        if self.executor_thread:
-            self.executor_thread.join(timeout=2.0)
-            self.executor_thread = None
+
+        # 先将节点移出 executor，再销毁高频 joint_states 订阅。这样 Zenoh
+        # 的尾部数据到达时 context 与 executor guard 仍然有效，不会在
+        # executor 已 shutdown 后触发订阅回调竞态。
+        if self.executor and self.robot_node:
+            self.executor.remove_node(self.robot_node)
         if self.joint_state_sub:
             self.joint_state_sub.destroy()
             self.joint_state_sub = None
-        
+
+        if self.executor:
+            self.executor.shutdown()
+            self.executor = None
+
+        if self.executor_thread:
+            self.executor_thread.join(timeout=2.0)
+            self.executor_thread = None
+
         if self.fsm_state_sub:
             self.fsm_state_sub.destroy()
             self.fsm_state_sub = None
@@ -3299,10 +4599,55 @@ class ROS2RobotInterface:
             self.body_current_target_sub.destroy()
             self.body_current_target_sub = None
 
+        if self.body_current_pose_sub:
+            self.body_current_pose_sub.destroy()
+            self.body_current_pose_sub = None
+
+        if self.body_current_target_pose_sub:
+            self.body_current_target_pose_sub.destroy()
+            self.body_current_target_pose_sub = None
+
+        if self.body_target_relative_pub:
+            self.body_target_relative_pub.destroy()
+            self.body_target_relative_pub = None
+
+        if self.body_target_pub:
+            self.body_target_pub.destroy()
+            self.body_target_pub = None
+
+        if self.body_target_stamped_pub:
+            self.body_target_stamped_pub.destroy()
+            self.body_target_stamped_pub = None
+
+        self.body_current_pose = None
+        self.body_current_target_pose = None
+
         if self.wbc_state_sub:
             self.wbc_state_sub.destroy()
             self.wbc_state_sub = None
-        
+
+        if self.left_ft_wrench_sub:
+            self.left_ft_wrench_sub.destroy()
+            self.left_ft_wrench_sub = None
+        if self.right_ft_wrench_sub:
+            self.right_ft_wrench_sub.destroy()
+            self.right_ft_wrench_sub = None
+        self._latest_wrench_left = None
+        self._latest_wrench_right = None
+
+        if self.left_ft_wrench_filtered_sub:
+            self.left_ft_wrench_filtered_sub.destroy()
+            self.left_ft_wrench_filtered_sub = None
+        if self.right_ft_wrench_filtered_sub:
+            self.right_ft_wrench_filtered_sub.destroy()
+            self.right_ft_wrench_filtered_sub = None
+        self._latest_wrench_filtered_left = None
+        self._latest_wrench_filtered_right = None
+
+        if self.compliance_zero_wrench_client:
+            self.compliance_zero_wrench_client.destroy()
+            self.compliance_zero_wrench_client = None
+
         # Cleanup arm handlers
         if self.left_arm_handler:
             self.left_arm_handler.cleanup()
@@ -3332,6 +4677,10 @@ class ROS2RobotInterface:
             self.movec_action_client.destroy()
             self.movec_action_client = None
 
+        if self.waist_lifting_pose_action_client:
+            self.waist_lifting_pose_action_client.destroy()
+            self.waist_lifting_pose_action_client = None
+
         if self.dual_target_stamped_pub:
             self.dual_target_stamped_pub.destroy()
             self.dual_target_stamped_pub = None
@@ -3344,6 +4693,15 @@ class ROS2RobotInterface:
         if self.right_gripper_handler:
             self.right_gripper_handler.cleanup()
             self.right_gripper_handler = None
+
+        # Cleanup hand tactile handlers
+        if self.left_hand_tactile_handler:
+            self.left_hand_tactile_handler.cleanup()
+            self.left_hand_tactile_handler = None
+
+        if self.right_hand_tactile_handler:
+            self.right_hand_tactile_handler.cleanup()
+            self.right_hand_tactile_handler = None
         
         if self.fsm_command_pub:
             self.fsm_command_pub.destroy()
@@ -3360,7 +4718,15 @@ class ROS2RobotInterface:
         if self.body_joint_controller_pub:
             self.body_joint_controller_pub.destroy()
             self.body_joint_controller_pub = None
-        
+
+        if self.head_joint_trajectory_pub:
+            self.head_joint_trajectory_pub.destroy()
+            self.head_joint_trajectory_pub = None
+
+        if self.body_joint_trajectory_pub:
+            self.body_joint_trajectory_pub.destroy()
+            self.body_joint_trajectory_pub = None
+
         if self.left_hand_joint_controller_pub:
             self.left_hand_joint_controller_pub.destroy()
             self.left_hand_joint_controller_pub = None

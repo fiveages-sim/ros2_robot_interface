@@ -6,11 +6,10 @@ Arm Handler - 单臂处理器
 """
 
 import logging
-import math
 from enum import Enum
-from typing import Optional, Dict, Any, List, Callable
+from typing import Optional, Dict, Any, List, Callable, Tuple
 
-from geometry_msgs.msg import Pose, PoseStamped
+from geometry_msgs.msg import Pose, PoseStamped, Twist, TwistStamped
 from rclpy.node import Node
 from rclpy.publisher import Publisher
 from rclpy.subscription import Subscription
@@ -18,6 +17,7 @@ from std_msgs.msg import Float64MultiArray
 
 from ..constants import FSM_MOVEJ, FSM_OCS2
 from ..utils.exceptions import ROS2NotConnectedError
+from ..utils.quat_pose import check_pose_arrival
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +89,8 @@ class ArmHandler:
         self.target_sub: Optional[Subscription] = None  # 目标位置订阅器
         self.target_pub: Optional[Publisher] = None
         self.target_stamped_pub: Optional[Publisher] = None
+        self.relative_pub: Optional[Publisher] = None
+        self.twist_pub: Optional[Publisher] = None
         self.joint_controller_pub: Optional[Publisher] = None
     
     def initialize(self) -> None:
@@ -124,6 +126,12 @@ class ArmHandler:
             )
             self.target_stamped_pub = self.node.create_publisher(
                 PoseStamped, f"{self.target_topic}/stamped", 10
+            )
+            self.relative_pub = self.node.create_publisher(
+                TwistStamped, f"{self.target_topic}/relative", 10
+            )
+            self.twist_pub = self.node.create_publisher(
+                Twist, f"{self.target_topic}/twist", 10
             )
             logger.debug(f"{self.label}: Created target publishers for {self.target_topic}")
         else:
@@ -242,7 +250,106 @@ class ArmHandler:
         logger.debug(
             f"Published {self.label.lower()} target (stamped) in frame '{resolved_frame_id}': {pose}"
         )
-    
+
+    def send_relative(
+        self,
+        dx: float,
+        dy: float,
+        dz: float,
+        droll: float = 0.0,
+        dpitch: float = 0.0,
+        dyaw: float = 0.0,
+        frame_id: str = "",
+    ) -> None:
+        """发送一次笛卡尔相对位移（米 / 弧度 RPY）并走 MoveL。
+
+        Args:
+            dx: 平移增量 X（米），表达在 ``frame_id`` 下。
+            dy: 平移增量 Y（米）。
+            dz: 平移增量 Z（米）。
+            droll: 滚转增量（弧度）。
+            dpitch: 俯仰增量（弧度）。
+            dyaw: 偏航增量（弧度）。
+            frame_id: 增量坐标系；空字符串表示控制器内部 base_frame。
+        """
+        if self.relative_pub is None:
+            raise ROS2NotConnectedError(f"{self.label} relative publisher not initialized")
+
+        if self.config.auto_switch_fsm_before_control and self.fsm_command_callback is not None:
+            try:
+                current = self.query_fsm_command()
+                if current != FSM_OCS2:
+                    self.fsm_command_callback(FSM_OCS2)
+                    logger.debug(f"{self.label}: auto-switched FSM to OCS2 for arm pose control")
+            except Exception as e:
+                logger.warning(f"{self.label}: failed to auto-switch FSM to OCS2: {e}")
+
+        self.latest_target_pose = None
+
+        msg = TwistStamped()
+        msg.header.frame_id = frame_id
+        msg.header.stamp = self.node.get_clock().now().to_msg()
+        msg.twist.linear.x = float(dx)
+        msg.twist.linear.y = float(dy)
+        msg.twist.linear.z = float(dz)
+        msg.twist.angular.x = float(droll)
+        msg.twist.angular.y = float(dpitch)
+        msg.twist.angular.z = float(dyaw)
+        self.relative_pub.publish(msg)
+        logger.debug(
+            f"Published {self.label.lower()} relative in frame '{frame_id}': "
+            f"linear=({dx}, {dy}, {dz}) angular=({droll}, {dpitch}, {dyaw})"
+        )
+
+    def send_velocity(
+        self,
+        linear: Tuple[float, float, float],
+        angular: Tuple[float, float, float],
+    ) -> None:
+        """发送连续笛卡尔速度流（OCS2 状态）。
+
+        控制器把速度按控制周期 ``dt`` 积分为目标位姿（latched 速度流）。
+        每条 Twist 被 latch 后持续积分，但 0.2s 内没有新的 Twist 消息会自动停止。
+        因此：
+          - 线速度单位为 m/s，角速度单位为 rad/s，表达在控制器 base_frame 下。
+          - 单次调用只维持约 0.2s；持续运动需要调用方以 ≥5Hz 循环发布。
+          - 显式停止可发布全零速度 (0,0,0) / (0,0,0)。
+
+        Args:
+            linear: 线速度 (vx, vy, vz)（m/s）。
+            angular: 角速度 (wx, wy, wz)（rad/s）。
+
+        Raises:
+            ROS2NotConnectedError: 如果发布器未初始化
+        """
+        if self.twist_pub is None:
+            raise ROS2NotConnectedError(f"{self.label} twist publisher not initialized")
+
+        if self.config.auto_switch_fsm_before_control and self.fsm_command_callback is not None:
+            try:
+                current = self.query_fsm_command()
+                if current != FSM_OCS2:
+                    self.fsm_command_callback(FSM_OCS2)
+                    logger.debug(f"{self.label}: auto-switched FSM to OCS2 for arm velocity control")
+            except Exception as e:
+                logger.warning(f"{self.label}: failed to auto-switch FSM to OCS2: {e}")
+
+        # 速度流期间目标位姿持续变化，清空旧的 current target，避免到位误判
+        self.latest_target_pose = None
+
+        msg = Twist()
+        msg.linear.x = float(linear[0])
+        msg.linear.y = float(linear[1])
+        msg.linear.z = float(linear[2])
+        msg.angular.x = float(angular[0])
+        msg.angular.y = float(angular[1])
+        msg.angular.z = float(angular[2])
+        self.twist_pub.publish(msg)
+        logger.debug(
+            f"Published {self.label.lower()} twist: "
+            f"linear={tuple(linear)} angular={tuple(angular)}"
+        )
+
     def get_target_pose(self) -> Optional[Pose]:
         if not self.current_target_topic:
             return None
@@ -311,7 +418,7 @@ class ArmHandler:
         msg = Float64MultiArray()
         msg.data = positions
         self.joint_controller_pub.publish(msg)
-        print(f"Published {self.label.lower()} joint positions: {positions}", flush=True)
+        logger.debug("Published %s joint positions: %s", self.label.lower(), positions)
     
     def check_arrival(self, pose_threshold: float | None = None,
                      orient_threshold: float | None = None) -> Dict[str, Any]:
@@ -324,75 +431,15 @@ class ArmHandler:
         Returns:
             包含到达状态、距离等信息的字典
         """
-        # 使用 config 中的默认值
         pose_threshold = pose_threshold if pose_threshold is not None else self.config.pose_position_threshold
         orient_threshold = orient_threshold if orient_threshold is not None else self.config.pose_orientation_threshold
-        
-        arrived = False
-        pos_dist = float('inf')
-        orient_dist = float('inf')
-        orient_angle_deg = float('inf')
-        total_dist = float('inf')
-        status_msg = None
-        
-        current_pose = self.get_pose()
-        target_pose = self.get_target_pose()
-        
-        if target_pose is not None and current_pose is not None:
-            pos_dist = ((current_pose.position.x - target_pose.position.x) ** 2 +
-                       (current_pose.position.y - target_pose.position.y) ** 2 +
-                       (current_pose.position.z - target_pose.position.z) ** 2) ** 0.5
-
-            # Normalize both quaternions so arrival checking matches the
-            # diagnostic math used by wait_for_arrival() and avoids bias from
-            # non-unit pose messages.
-            cqx = current_pose.orientation.x
-            cqy = current_pose.orientation.y
-            cqz = current_pose.orientation.z
-            cqw = current_pose.orientation.w
-            current_norm = math.sqrt(cqx * cqx + cqy * cqy + cqz * cqz + cqw * cqw)
-            if current_norm > 1e-12:
-                cqx /= current_norm
-                cqy /= current_norm
-                cqz /= current_norm
-                cqw /= current_norm
-            else:
-                cqx, cqy, cqz, cqw = 0.0, 0.0, 0.0, 1.0
-
-            tqx = target_pose.orientation.x
-            tqy = target_pose.orientation.y
-            tqz = target_pose.orientation.z
-            tqw = target_pose.orientation.w
-            target_norm = math.sqrt(tqx * tqx + tqy * tqy + tqz * tqz + tqw * tqw)
-            if target_norm > 1e-12:
-                tqx /= target_norm
-                tqy /= target_norm
-                tqz /= target_norm
-                tqw /= target_norm
-            else:
-                tqx, tqy, tqz, tqw = 0.0, 0.0, 0.0, 1.0
-
-            dot_product = (cqw * tqw +
-                          cqx * tqx +
-                          cqy * tqy +
-                          cqz * tqz)
-            dot_product = max(-1.0, min(1.0, dot_product))
-            orient_dist = 1.0 - abs(dot_product)
-            orient_angle_deg = math.degrees(2.0 * math.acos(abs(dot_product)))
-
-            total_dist = pos_dist + orient_dist * 0.1
-            arrived = (pos_dist < pose_threshold and orient_angle_deg < orient_threshold)
-
-            status_msg = f"{self.label}已到达目标位置" if arrived else f"{self.label}未到达目标位置"
-
-        return {
-            'arrived': arrived,
-            'distance': total_dist,
-            'position_distance': pos_dist,
-            'orientation_distance': orient_dist,
-            'orientation_angle_deg': orient_angle_deg,
-            'status_message': status_msg
-        }
+        return check_pose_arrival(
+            self.label,
+            self.get_pose(),
+            self.get_target_pose(),
+            pose_threshold,
+            orient_threshold,
+        )
     
     def _copy_pose(self, src: Pose, dst: Pose) -> None:
         """复制 pose 数据从 src 到 dst"""
@@ -422,7 +469,15 @@ class ArmHandler:
         if self.target_stamped_pub:
             self.target_stamped_pub.destroy()
             self.target_stamped_pub = None
-        
+
+        if self.relative_pub:
+            self.relative_pub.destroy()
+            self.relative_pub = None
+
+        if self.twist_pub:
+            self.twist_pub.destroy()
+            self.twist_pub = None
+
         if self.joint_controller_pub:
             self.joint_controller_pub.destroy()
             self.joint_controller_pub = None

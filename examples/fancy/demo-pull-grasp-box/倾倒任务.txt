@@ -1,0 +1,89 @@
+	1、机器人初始关节位置
+	【接口标注】
+	- 推荐一次性协调下发双臂和腰部：
+	  interface.send_coordinated_joint_positions(
+	      body_positions=body弧度值,
+	      left_arm_positions=left_initial_joints,
+	      right_arm_positions=right_initial_joints,
+	  )
+	- 该接口的关节输入单位是弧度，下面的“角度值”不能直接传入。
+	- 下发后可使用 interface.wait_until_joint_arrive(
+	      left_target_positions=left_initial_joints,
+	      right_target_positions=right_initial_joints,
+	      body_target_positions=body弧度值,
+	  ) 等待关节到位。
+	左手：left_initial_joints = [2.72979, -1.1976, -2.56379, -2.396, -1.1947, -0.3511, -0.2927]
+	右手：right_initial_joints = [-2.68059, -1.134, 2.59399, -2.298, 1.167, -0.3477, 0.3972]
+        腰部body所有关节弧度值：[-0.8639, -1.7582, -0.9, 0.0]
+        腰部body所有关节角度值：[-49.5, -100.74, -51.57, 0.0]
+        
+        2、抓取点的两侧pose
+	【接口标注】
+	- 将左右两个 [x, y, z, qx, qy, qz, qw] 数组分别构造成 geometry_msgs.msg.Pose，然后调用：
+	  interface.send_dual_arm_target_stamped(left_pose, right_pose, frame_id="arm_base")
+	- 本步骤是一个双臂笛卡尔单点目标，不应使用关节接口。
+	- 注意：本文件没有明确写出该点的坐标系；只有确认点位属于 arm_base 后，才能使用上述 frame_id。
+	- 下发后分别使用 interface.wait_until_arrive(part="left_arm") 和
+	  interface.wait_until_arrive(part="right_arm") 等待双臂到位。
+	左手四元数pose：[0.707604,0.412536,-0.104300,0.508490,-0.030031,0.860121,0.026981]
+	右手四元数pose[0.688860,-0.327791,-0.124593,0.547873,0.006481,0.836531,0.003056]
+
+        3、抓取点的pose
+	【接口标注】
+	- 双臂移动到抓取点：
+	  interface.send_dual_arm_target_stamped(left_pose, right_pose, frame_id="arm_base")
+	- Pose 接口不会自动控制夹爪。若此处需要真正夹住箱子，还需分别调用夹爪接口，例如：
+	  interface.left_gripper_handler.send_position_percent(0.0)
+	  interface.right_gripper_handler.send_position_percent(0.0)
+	  其中 0.0=完全关闭、1.0=完全打开；也可按实际夹爪控制方式改用 send_joint_positions(position) 或 send_target_command(0)。
+	- 注意：本文件没有明确写出 Pose 坐标系，frame_id 必须按点位的实际坐标系确认。
+	左手四元数pose：[0.707604,0.372536,-0.104300,0.508490,-0.030031,0.860121,0.026981]
+	右手四元数pose[0.688860,-0.287791,-0.124593,0.547873,0.006481,0.836531,0.003056]
+	
+        4、抓箱子抬高的pose
+	【接口标注】
+	- 将左右抬高点构造成 Pose 后调用：
+	  interface.send_dual_arm_target_stamped(left_pose, right_pose, frame_id="arm_base")
+	- 这是双臂单点运动；夹爪保持上一阶段的闭合状态，不由该接口控制。
+	- 下发后分别使用 interface.wait_until_arrive(part="left_arm") 和
+	  interface.wait_until_arrive(part="right_arm") 等待双臂到位。
+	左手四元数pose：[0.707604,0.372536,-0.054300,0.508490,-0.030031,0.860121,0.026981]
+	右手四元数pose[0.688860,-0.287791,-0.074593,0.547873,0.006481,0.836531,0.003056]	
+	
+	5、抬高准备倾倒点pose
+	【接口标注】
+	- 将左右准备倾倒点构造成 Pose 后调用：
+	  interface.send_dual_arm_target_stamped(left_pose, right_pose, frame_id="arm_base")
+	- 这是双臂单点运动；下发后分别使用 interface.wait_until_arrive(part="left_arm") 和
+	  interface.wait_until_arrive(part="right_arm") 等待到位。
+	- 注意：本文件没有明确写出 Pose 坐标系，frame_id 必须按点位的实际坐标系确认。
+	"left_arm_pose":[0.6791592,0.334456,0.416901,0.553139,0.030244,0.833914,0.023025],
+        "right_arm_pose":[0.679955,-0.334456,0.4168409,0.550124,0.030224,0.834296,-0.020011]
+
+        6、倾倒开始的腰部body数值
+	【接口标注】
+	- 仅下发腰部关节目标可调用：
+	  interface.send_coordinated_joint_positions(body_positions=body弧度值)
+	  也可使用较底层的 interface.send_body_joint_positions(body弧度值)。
+	- 两个接口都要求弧度。下面的 18.95 很像角度值；若单位确为度，应先转换为约 0.33074 rad，不能直接把 18.95 传入。
+	- 下发后可使用 interface.wait_until_joint_arrive(body_target_positions=body弧度值) 等待腰部到位。
+        "body_list":[0.0, 0.0, 18.95, 0.0],
+        
+        7、连续执行后面的三组pose实现倾倒
+	【接口标注】
+	- 将三组左右点分别构造成 Pose 列表后，使用双臂笛卡尔路径接口：
+	  interface.execute_path(
+	      left_poses=[left1_pose, left2_pose, back_left_pose],
+	      right_poses=[right1_pose, right2_pose, back_right_pose],
+	      trajectory_duration=实际轨迹时长秒数,
+	      frame_id="arm_base",
+	  )
+	- execute_path() 返回 bool，表示 ExecutePath 服务是否成功接收/生成路径；需要根据返回值判断是否继续。
+	- 旧接口 interface.send_target_path() 已被弃用，新流程应优先使用 execute_path()。
+	- 注意：本文件没有明确写出 Pose 坐标系，frame_id 必须按点位的实际坐标系确认。
+        "left1_arm_pose":[0.541105,0.336896,-0.044200,0.905963,0.012358,0.420665,0.046046],
+        "right1_arm_pose":[0.557352,-0.335782,-0.044258,0.913185,0.005028,0.404357,-0.050627],
+        "left2_arm_pose":[0.499752,0.334456,-0.104795,0.985850,0.011287,0.156928,0.057849],
+        "right2_arm_pose":[0.499823,-0.334456,-0.104719,0.985842,-0.011260,0.156970,-0.057863],
+        "back_left_arm_pose":[0.6791592,0.334456,0.416901,0.553139,0.030244,0.833914,0.023025],
+        "back_right_arm_pose":[0.679955,-0.334456,0.4168409,0.550124,0.030224,0.834296,-0.020011]      

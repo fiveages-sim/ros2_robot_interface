@@ -63,18 +63,42 @@ class ROS2RobotInterfaceConfig:
     # ============================================================================
     # 【可自动检测】系统会在 connect() 时自动检测这些话题，如果检测到会自动设置
     # 也可以手动配置
-    head_joint_controller_topic: str | None = None  # 【可自动检测】头部关节控制器话题，例如 "/head_joint_controller/target_joint_position"
-    body_joint_controller_topic: str | None = None  # 【可自动检测】身体关节控制器话题，例如 "/body_joint_controller/target_joint_position"
+    head_joint_controller_topic: str | None = None  # 【可自动检测】头部关节；WBC: /ocs2_wbc_controller/target_joint_position/head，split: /head_joint_controller/target_joint_position
+    body_joint_controller_topic: str | None = None  # 【可自动检测】躯干关节；WBC: /ocs2_wbc_controller/target_joint_position/body，split: /body_joint_controller/target_joint_position
+    head_joint_trajectory_topic: str | None = None  # 【可自动检测】split 头部多路点轨迹话题（JointTrajectory），例如 "/head_joint_controller/target_joint_trajectory"；WBC 复用统一 WBC trajectory，不检测
+    body_joint_trajectory_topic: str | None = None  # 【可自动检测】split 躯干多路点轨迹话题（JointTrajectory），例如 "/body_joint_controller/target_joint_trajectory"；WBC 复用统一 WBC trajectory，不检测
     left_hand_joint_controller_topic: str | None = None  # 【可自动检测】左灵巧手关节控制器话题，例如 "/left_hand_controller/target_joint_position"
     right_hand_joint_controller_topic: str | None = None  # 【可自动检测】右灵巧手关节控制器话题，例如 "/right_hand_controller/target_joint_position"
     waist_lifting_topic: str | None = None  # 【可自动检测】腰部升降相对位置控制话题，例如 "/body_joint_controller/waist_lifting"
-    waist_lifting_pose_relative_topic: str | None = None  # 【可自动检测】腰部局部 x/z/phi 相对移动话题，例如 "/body_joint_controller/waist_lifting_pose_relative"
-    waist_lifting_pose_absolute_topic: str | None = None  # 【可自动检测】腰部 x/z/phi 绝对目标话题，例如 "/body_joint_controller/waist_lifting_pose_absolute"
+    waist_lifting_pose_relative_topic: str | None = None  # 【可自动检测】腰部局部 x/z/phi 相对移动话题，例如 "/body_joint_controller/waist_lifting_pose_relative" 或 "/ocs2_wbc_controller/waist_lifting_pose_relative"
+    waist_lifting_pose_absolute_topic: str | None = None  # 【可自动检测】腰部 x/z/phi 绝对目标话题，例如 "/body_joint_controller/waist_lifting_pose_absolute" 或 "/ocs2_wbc_controller/waist_lifting_pose_absolute"
     waist_lifting_command_topic: str | None = None  # 【可自动检测】腰部升降速度控制话题，例如 "/body_joint_controller/waist_lifting_command"
     waist_turning_command_topic: str | None = None  # 【可自动检测】腰部旋转速度控制话题，例如 "/body_joint_controller/waist_turning_command"
     waist_phi_command_topic: str | None = None  # 【可自动检测】body_joint3 phi 速度控制话题，例如 "/body_joint_controller/waist_phi_command" 或 "/ocs2_wbc_controller/waist_phi_command"
     body_joint_current_target_topic: str | None = None  # 【可自动检测】腰部关节控制器话题，例如 "/body_joint_controller/target_joint_position"
-    
+    body_current_pose_topic: str | None = None  # 【可自动检测】body 当前笛卡尔位姿话题（PoseStamped），例如 "/body_current_pose"，用于 body pose 到位判定
+    body_current_target_pose_topic: str | None = None  # 【可自动检测】body 目标笛卡尔位姿话题（PoseStamped），例如 "/body_current_target"，用于 body pose 到位判定
+    body_target_relative_topic: str | None = None  # 【可自动检测】body 一次笛卡尔相对位移话题（TwistStamped），例如 "/body_target/relative"
+    body_target_topic: str | None = None  # 【可自动检测】body 绝对位姿目标话题（Pose），例如 "/body_target"；stamped 由 f"{body_target_topic}/stamped" 推导
+
+    # ============================================================================
+    # 六维力 FT wrench 话题（可自动检测；robot.local.yaml 中 left_ft/right_ft 为 none 时可能不存在）
+    # ============================================================================
+    # original：原始 wrench，由 ft_broadcaster 持续发布
+    left_ft_wrench_topic: str | None = None   # 【可自动检测】original，默认探测 /left_ft_broadcaster/wrench
+    right_ft_wrench_topic: str | None = None  # 【可自动检测】original，默认探测 /right_ft_broadcaster/wrench
+    # filtered：仅在 COMPLIANCE 期间由控制器发布；connect 时未必已出现在 graph 中
+    left_ft_wrench_filtered_topic: str | None = None   # 【可随 original 默认】/left_ft_broadcaster/wrench_filtered
+    right_ft_wrench_filtered_topic: str | None = None  # 【可随 original 默认】/right_ft_broadcaster/wrench_filtered
+
+    # ============================================================================
+    # 灵巧手五指触觉话题前缀（可自动检测；仅当 can-ros2-control 以 read_tactile:=true 启动时存在）
+    # ============================================================================
+    # 完整话题为 <prefix>/<finger>，finger 取 thumb / index / middle / ring / pinky
+    # 前缀中的型号段由 connect() 从 ROS 图反推（o6 / l6 / o7），无需手动区分型号
+    left_hand_tactile_topic_prefix: str | None = None   # 【可自动检测】例如 "/o7_hand/left/tactile"
+    right_hand_tactile_topic_prefix: str | None = None  # 【可自动检测】例如 "/o7_hand/right/tactile"
+
     # ============================================================================
     # 手臂关节控制器话题（自动检测，无需手动配置）
     # ============================================================================
@@ -89,6 +113,7 @@ class ROS2RobotInterfaceConfig:
     joint_trajectory_action_name: str | None = "/ocs2_arm_controller/joint_trajectory_with_para"  # 带参数/反馈的 MoveJ action
     movel_action_name: str | None = "/ocs2_arm_controller/execute_linear"  # 带参数/反馈的 MOVEL action
     movec_action_name: str | None = "/ocs2_arm_controller/execute_circle_use_ik"  # 带参数/反馈的 MOVEC action
+    waist_lifting_pose_action_name: str | None = None  # 【可自动检测】腰部位姿 action，例如 "/ocs2_wbc_controller/waist_lifting_pose" 或 "/body_joint_controller/waist_lifting_pose"
     
     # ============================================================================
     # 关节配置（未使用，预留）
