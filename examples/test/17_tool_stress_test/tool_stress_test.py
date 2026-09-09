@@ -13,19 +13,20 @@
 构型索引；``gripper`` 模式从 AdaptiveGripperController 读取 ``joint``，并按该
 控制器相同的规则从 ``/robot_description`` 计算开/关限位。也可以通过命令行
 显式给出关节和目标位置。加 ``--plot`` 进入画图模式：测试过程中记录每个
-参与关节的实际位置和每次开关指令，结束后把“指令状态 + 每个关节的位置随时间”
-绘制到一个 HTML 页面（横轴时间、纵轴关节位置，每个关节一个子图），默认写到
-报告目录的 ``joint_chart.html``。
+参与关节的实际位置和每次开关指令，结束后把左右手并成**一张** HTML 图
+（顶部为指令状态，下面把选中关节在左右侧的实测/目标叠加），用一个下拉框
+切换要查看的关节，默认写到报告目录的 ``joint_chart.html``。
 
 指令频率超过 ``--sine-threshold-hz``（默认 10 Hz）时自动进入正弦模式：
 开关切换太快、开/关到位判定不再有意义，改为向 ``/<controller>/target_joint_position``
 连续发送逐关节正弦往返位置（位置始终落在开/关限位之间），并像
 arms-ros2-control 在 compliance 控制里测关节延迟那样，用互相关估计每个
-关节“实测相对指令”的延迟(ms)，结果写入 summary.json / report.md 并画出 HTML。
-正弦模式调用 BasicJointController 时会把 ``movej_interpolation_type`` 临时设为
-``none``（不插值、直接跟随正弦采样点；StateMoveJ 每次收到目标都会重读该参数），
-测试结束或异常退出时恢复原值；可用 ``--sine-interpolation`` 调整。
-正弦模式的其它参数见 --sine-* 选项。
+关节“实测相对指令”的延迟(ms)、用同频正交投影估计相位滞后(°)，结果写入
+summary.json / report.md，并画出“左右手一张、下拉选关节”的 HTML（图例中标出
+每侧延迟与相位滞后）。正弦模式调用 BasicJointController 时会把
+``movej_interpolation_type`` 临时设为 ``none``（不插值、直接跟随正弦采样点；
+StateMoveJ 每次收到目标都会重读该参数），测试结束或异常退出时恢复原值；
+可用 ``--sine-interpolation`` 调整。正弦模式的其它参数见 --sine-* 选项。
 
 示例：
   # 先做 10 次低频验证
@@ -69,13 +70,16 @@ arms-ros2-control 在 compliance 控制里测关节延迟那样，用互相关�
 # 3) 测试左右 AdaptiveGripperController（gripper 模式，不依赖 FSM）
 #    python3 tool_stress_test.py --controller-type gripper -n 100 --yes
 #
-# 4) 画图模式：结束后把“指令状态 + 每关节位置随时间”画成一个 HTML
+# 4) 画图模式：左右手并成一张图，下拉框切换要查看的关节（顶部为指令状态）
 #    python3 tool_stress_test.py --plot -n 200 -f 1.0 --yes
 #    python3 tool_stress_test.py --hands left --plot --plot-sample-hz 10 -n 200 --yes
 #    # 默认输出到报告目录 joint_chart.html，也可用 --plot-file 指定
+#    # 说明：同一张图里叠加左右侧同名关节的实测/目标，下拉切换不同关节；
+#    #       同名是指去掉 left_/right_ 前缀后相同的关节名。
 #
 # 5) 高频正弦延迟测量：频率 > --sine-threshold-hz(默认10) 自动切换，
-#    向 /<controller>/target_joint_position 发正弦位置并互相关估计每关节延迟(ms)
+#    向 /<controller>/target_joint_position 发正弦位置并估计每关节延迟(ms)
+#    与相位滞后(°)；图表左右手一张、下拉切换关节，图例里显示延迟/相位滞后
 #    python3 tool_stress_test.py -f 20 --sine-cycles 20 --yes
 #    # 低频也想用正弦可强制（总时长 = --sine-cycles / --sine-hz）
 #    python3 tool_stress_test.py --sine-mode on -f 5 --sine-cycles 10 --yes
@@ -217,6 +221,7 @@ class JointDelayResult:
     delay_ms: Optional[float]
     correlation: Optional[float]
     samples: int
+    phase_lag_deg: Optional[float] = None
 
 
 def parse_csv_strings(value: Optional[str]) -> Optional[List[str]]:
@@ -1007,157 +1012,307 @@ def record_samples_loop(
         recorder.add_sample(time.monotonic(), filtered)
 
 
-def _axis_id(base: str, number: int) -> str:
-    """Plotly 子图轴 id：第 1 个子图为 'x'/'y'，第 n 个为 'xn'/'yn'。"""
-    return base if number == 1 else f"{base}{number}"
+def _strip_side_prefix(name: str, sides: Sequence[str]) -> str:
+    """去掉关节名前面的 '<side>_' 前缀，用于把左右侧同名关节配对成下拉选项。"""
+    for side in sides:
+        prefix = f"{side}_"
+        if name.startswith(prefix):
+            return name[len(prefix):]
+    return name
 
 
-def _axis_layout_key(base: str, number: int) -> str:
-    """layout 中的轴键：'xaxis'/'yaxis'（第 1 个）或 'xaxisN'/'yaxisN'。"""
-    return base if number == 1 else f"{base}{number}"
+def _collect_selector_options(
+    configs: Sequence[SideConfig],
+) -> List[Tuple[str, List[Tuple[SideConfig, str]]]]:
+    """把所有侧的关节按“去掉侧前缀后的名字”分组，作为下拉框的一个选项。
 
-
-def _stack_subplots(
-    config: SideConfig,
-    charts: Sequence[Dict[str, object]],
-    x_end: float,
-) -> Dict[str, object]:
-    """把多个子图纵向堆叠为一张 Plotly figure，所有子图共享同一时间轴。"""
-    count = len(charts)
-    layout: Dict[str, object] = {
-        "title": {
-            "text": (
-                f"{config.side} 侧 / {config.controller}"
-                f"（{config.controller_type}）—— 指令状态与关节位置随时间"
-            ),
-            "x": 0.0,
-            "xref": "paper",
-            "font": {"size": 14},
-        },
-        "margin": {"t": 46, "b": 56, "l": 74, "r": 20},
-        "hovermode": "closest",
-        "showlegend": False,
-        "paper_bgcolor": "#ffffff",
-        "plot_bgcolor": "#ffffff",
-    }
-    if count == 0:
-        return {"data": [], "layout": layout}
-
-    spacing = 0.06 if count > 1 else 0.0
-    row_height = (1.0 - spacing * (count - 1)) / count
-    data: List[Dict[str, object]] = []
-    top = 1.0
-    for index, chart in enumerate(charts):
-        number = count - index  # 最下方子图编号为 1，负责显示时间刻度
-        x_id = _axis_id("x", number)
-        y_id = _axis_id("y", number)
-        x_key = _axis_layout_key("xaxis", number)
-        y_key = _axis_layout_key("yaxis", number)
-        y1 = top
-        y0 = top - row_height
-        top = y0 - spacing
-        layout[x_key] = {
-            "domain": [0.0, 1.0],
-            "anchor": y_id,
-            "range": [0.0, x_end],
-            "zeroline": False,
-            "showticklabels": number == 1,
-            "tickformat": ".2f",
-            "gridcolor": "#e6e6e6",
-            "title": {"text": "时间 (s，相对开始)" if number == 1 else ""},
-        }
-        yaxis: Dict[str, object] = {
-            "domain": [y0, y1],
-            "anchor": x_id,
-            "title": {"text": str(chart["title"])},
-            "zeroline": False,
-            "gridcolor": "#e6e6e6",
-        }
-        yrange = chart.get("yrange")
-        if yrange is not None:
-            yaxis["range"] = yrange
-        layout[y_key] = yaxis
-        for trace in chart["traces"]:
-            data.append({**trace, "xaxis": x_id, "yaxis": y_id})
-    return {"data": data, "layout": layout}
-
-
-def _build_side_figure(
-    config: SideConfig,
-    samples: Sequence[Tuple[float, Dict[str, float]]],
-    commands: Sequence[Tuple[float, str, int]],
-) -> Dict[str, object]:
-    """为一个侧/控制器生成一张 figure：顶部为指令状态，下面每个关节一个子图。
-
-    samples/commands 里的时间都来自同一台机器的 time.monotonic()，这里统一
-    减掉最小值，让横轴从 0 秒开始。
+    例如 left_hand_thumb_joint1 与 right_hand_thumb_joint1 归到同一个 key
+    'hand_thumb_joint1'，选中后在同一张图里叠加左右两条实测/目标曲线，方便
+    左右对照。若某关节只有一侧存在，则该选项只含那一侧。
     """
-    events = sorted(
-        (timestamp, command)
-        for (timestamp, side, command) in commands
-        if side == config.side
-    )
-    all_times = [t for t, _ in samples] + [t for t, _ in events]
-    if not all_times:
-        return {"data": [], "layout": {}}
-    t0 = min(all_times)
-    t_max = max(all_times) - t0
-    x_end = t_max + max(0.05, t_max * 0.02)
+    side_names = [config.side for config in configs]
+    groups: Dict[str, List[Tuple[SideConfig, str]]] = {}
+    order: List[str] = []
+    for config in configs:
+        for joint in config.joints:
+            key = _strip_side_prefix(joint, side_names)
+            if key not in groups:
+                groups[key] = []
+                order.append(key)
+            groups[key].append((config, joint))
+    return [(key, groups[key]) for key in order]
 
-    charts: List[Dict[str, object]] = []
-    if events:
-        charts.append({
-            "title": "指令状态 (0=关，1=开)",
-            "yrange": [-0.1, 1.1],
-            "traces": [{
-                "name": "指令状态",
-                "type": "scatter",
-                "mode": "lines",
-                "x": [t - t0 for t, _ in events],
-                "y": [command for _, command in events],
-                "line": {"shape": "hv", "color": "#444444", "width": 1.5},
-                "hovertemplate": "%{y} @ %{x:.3f}s<extra>指令状态</extra>",
-            }],
-        })
-    for index, joint in enumerate(config.joints):
-        actual_x: List[float] = []
-        actual_y: List[float] = []
-        for timestamp, positions in samples:
-            value = positions.get(joint)
-            if value is None:
-                continue
-            actual_x.append(timestamp - t0)
-            actual_y.append(value)
-        traces: List[Dict[str, object]] = [{
-            "name": f"{joint} 实际",
-            "type": "scatter",
-            "mode": "lines",
-            "x": actual_x,
-            "y": actual_y,
-            "line": {"color": "#1f77b4", "width": 1.2},
-            "hovertemplate": "%{y:.5f} @ %{x:.3f}s<extra>实际位置</extra>",
-        }]
-        if events:
-            target_x = [t - t0 for t, _ in events]
-            target_y = [
-                config.target_for(command)[index] for _, command in events]
-            traces.append({
-                "name": f"{joint} 指令目标",
-                "type": "scatter",
-                "mode": "lines",
-                "x": target_x,
-                "y": target_y,
-                "line": {
-                    "shape": "hv",
-                    "color": "#d62728",
-                    "dash": "dot",
-                    "width": 1.2,
+
+def _series_meta(
+    config: SideConfig,
+    joint: str,
+    delays_by_side: Optional[Dict[str, Sequence[JointDelayResult]]],
+) -> str:
+    """构造该侧该关节在正弦模式下测得的延迟/相位滞后文字（显示在图例里）。"""
+    if not delays_by_side:
+        return ""
+    for delay in delays_by_side.get(config.side, []):
+        if delay.joint != joint:
+            continue
+        parts: List[str] = []
+        if delay.delay_ms is not None:
+            parts.append(f"延迟 {delay.delay_ms:.1f}ms")
+        if delay.phase_lag_deg is not None:
+            parts.append(f"相位滞后 {delay.phase_lag_deg:.1f}°")
+        return "，".join(parts)
+    return ""
+
+
+def _selector_page_data(
+    configs: Sequence[SideConfig],
+    recorder: ChartRecorder,
+    mode: str,
+    delays_by_side: Optional[Dict[str, Sequence[JointDelayResult]]],
+) -> Dict[str, object]:
+    """把两侧数据整理成“一张图 + 下拉选关节”所需的页面数据。
+
+    mode='onoff'：顶部为开关指令状态(0/1)；mode='sine'：顶部为归一化指令相位
+    u(t)。所有时间减到相对 0 秒。每个下拉选项对应一组“去侧前缀同名”的左右
+    关节，含各自的实测与目标序列（正弦模式另带延迟/相位滞后的图例说明）。
+    """
+    samples, commands = recorder.items()
+    references = recorder.reference_items()
+    times = [t for t, _ in samples]
+    if mode == "sine":
+        times += [t for (t, _side, _u, _values) in references]
+    else:
+        times += [t for (t, _side, _cmd) in commands]
+    if not times:
+        return {}
+    t0 = min(times)
+    x_end = max(times) - t0
+    x_end += max(0.05, x_end * 0.02)
+
+    if mode == "sine":
+        # 所有侧在同一拍发送同一个 u(t)，取第一侧即可。
+        first_side = references[0][1] if references else None
+        top_pairs = sorted(
+            (t, u) for (t, side, u, _v) in references if side == first_side)
+        top = {
+            "name": "指令相位 u(t)（0=关，1=开）",
+            "x": [t - t0 for t, _ in top_pairs],
+            "y": [u for _, u in top_pairs],
+        }
+    else:
+        # 开/关模式下所有侧在同一拍收到同一条指令，画一条即可。
+        first_side = commands[0][1] if commands else None
+        top_pairs = sorted(
+            (t, c) for (t, side, c) in commands if side == first_side)
+        top = {
+            "name": "指令状态（0=关，1=开）",
+            "x": [t - t0 for t, _ in top_pairs],
+            "y": [c for _, c in top_pairs],
+        }
+
+    options: List[Dict[str, object]] = []
+    for key, members in _collect_selector_options(configs):
+        only_label = (
+            "" if len(members) > 1 else f"（仅 {members[0][0].side}）")
+        entry: Dict[str, object] = {
+            "key": key,
+            "label": f"{key}{only_label}",
+            "sides": [],
+        }
+        sides_out: List[Dict[str, object]] = []
+        for config, joint in members:
+            joint_index = config.joints.index(joint)
+            actual = [
+                (t - t0, positions[joint])
+                for (t, positions) in samples if joint in positions]
+            if mode == "sine":
+                side_refs = sorted(
+                    (t, values)
+                    for (t, side, _u, values) in references
+                    if side == config.side)
+                target = [
+                    (t - t0, values[joint_index]) for (t, values) in side_refs]
+                target_shape = "linear"
+            else:
+                side_cmds = sorted(
+                    (t, c) for (t, side, c) in commands
+                    if side == config.side)
+                target = [
+                    (t - t0, config.target_for(c)[joint_index])
+                    for (t, c) in side_cmds]
+                target_shape = "hv"
+            sides_out.append({
+                "side": config.side,
+                "joint": joint,
+                "meta": _series_meta(config, joint, delays_by_side),
+                "target_shape": target_shape,
+                "actual": {
+                    "x": [x for x, _ in actual],
+                    "y": [y for _, y in actual],
                 },
-                "hovertemplate": "%{y:.5f} @ %{x:.3f}s<extra>指令目标</extra>",
+                "target": {
+                    "x": [x for x, _ in target],
+                    "y": [y for _, y in target],
+                },
             })
-        charts.append({"title": joint, "traces": traces})
+        entry["sides"] = sides_out
+        options.append(entry)
+    return {
+        "mode": mode,
+        "x_end": x_end,
+        "top": top,
+        "options": options,
+    }
 
-    return _stack_subplots(config, charts, x_end)
+
+def _write_joint_selector_chart(
+    target: Path,
+    configs: Sequence[SideConfig],
+    recorder: ChartRecorder,
+    mode: str,
+    started_at: str,
+    interrupted: bool,
+    delays_by_side: Optional[Dict[str, Sequence[JointDelayResult]]] = None,
+) -> Path:
+    """生成“左右手一张图 + 下拉选择关节”的 HTML 图表页。
+
+    顶部子图为开关指令状态(onoff)或指令相位 u(t)(sine)；下方把选中关节在各侧
+    的实测(实线)与目标(虚线)叠加到同一张图，便于左右对照。正弦模式把每侧该
+    关节互相关估计的延迟与相位滞后写进图例。
+    """
+    page = _selector_page_data(configs, recorder, mode, delays_by_side)
+    if not page or not page["options"]:
+        raise RuntimeError("画图：没有可用关节数据，无法生成图表")
+    page_json = json.dumps(page, ensure_ascii=False)
+
+    if mode == "sine":
+        title = "正弦关节位置延迟测量 —— 实测与目标（左右一张图）"
+        detail = (
+            "顶部为归一化指令相位 u(t)。下方把选中关节在左右侧的实测(实线)与"
+            "指令目标(虚线)叠在同一张图；图例括号里为该侧该关节互相关估计的"
+            "延迟与相位滞后（相位滞后 ≈ 360°×频率×延迟，正=实测滞后于指令）。")
+    else:
+        title = "开关指令压力测试 —— 指令状态与关节位置随时间（左右一张图）"
+        detail = (
+            "顶部为开关指令状态(0=关、1=开)。下方把选中关节在左右侧的实测"
+            "(实线)与指令目标(虚线阶梯)叠在同一张图，方便左右对照。")
+
+    option_tags = "\n".join(
+        f'<option value="{opt["key"]}">{opt["label"]}</option>'
+        for opt in page["options"])
+
+    lines: List[str] = [
+        "<!DOCTYPE html>",
+        '<html lang="zh-CN">',
+        "<head>",
+        '<meta charset="utf-8">',
+        f"<title>{title}</title>",
+        '<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>',
+        "<style>",
+        'body { font-family: "Segoe UI", "Microsoft YaHei", Arial, sans-serif;',
+        "  margin: 16px; color: #222; }",
+        "h1 { font-size: 20px; }",
+        ".note { color: #888; font-size: 12px; margin: 4px 0 8px; }",
+        ".controls { margin: 10px 0 8px; }",
+        "#joint_selector { min-width: 280px; padding: 4px; font-size: 14px; }",
+        ".chart { width: 100%; height: 520px; }",
+        "</style>",
+        "</head>",
+        "<body>",
+        f"<h1>{title}</h1>",
+        (
+            '<div class="note">开始时间：' + started_at
+            + "；中断：" + ("是" if interrupted else "否")
+            + "。左/右手共用一张图，横轴为相对开始的时间(s)，纵轴为关节位置。"
+            + detail + "</div>"
+        ),
+        '<div class="controls">',
+        '<label for="joint_selector">选择关节：</label>',
+        '<select id="joint_selector" onchange="renderChart(this.value)">',
+        option_tags,
+        "</select>",
+        "</div>",
+        '<div class="chart" id="main_chart"></div>',
+        '<div class="note">缩放/平移请用右上角工具或框选，双击恢复。</div>',
+        "<script>",
+        "const PAGE = " + page_json + ";",
+        "const PALETTE = ['#1f77b4', '#d62728', '#2ca02c', '#9467bd', '#ff7f0e'];",
+        """
+function baseLayout() {
+  return {
+    margin: {t: 46, b: 56, l: 74, r: 24},
+    hovermode: 'closest',
+    showlegend: true,
+    paper_bgcolor: '#ffffff',
+    plot_bgcolor: '#ffffff',
+    xaxis: {
+      domain: [0, 1], range: [0, PAGE.x_end], anchor: 'y',
+      zeroline: false, gridcolor: '#e6e6e6', tickformat: '.2f',
+      title: {text: '时间 (s，相对开始)'},
+    },
+    yaxis: {
+      domain: [0.0, 0.70], anchor: 'x', zeroline: false,
+      gridcolor: '#e6e6e6', title: {text: '关节位置（单位随控制器）'},
+    },
+    xaxis2: {
+      domain: [0, 1], range: [0, PAGE.x_end], anchor: 'y2',
+      zeroline: false, showticklabels: false, gridcolor: '#e6e6e6',
+      title: {text: ''},
+    },
+    yaxis2: {
+      domain: [0.80, 1.0], anchor: 'x2', zeroline: false,
+      range: [-0.1, 1.1], gridcolor: '#e6e6e6',
+      title: {text: PAGE.top.name},
+    },
+  };
+}
+function renderChart(key) {
+  const opt = PAGE.options.find(function (o) { return o.key === key; });
+  if (!opt) { return; }
+  const layout = baseLayout();
+  const topShape = PAGE.mode === 'onoff' ? 'hv' : 'linear';
+  const data = [{
+    x: PAGE.top.x, y: PAGE.top.y, type: 'scatter', mode: 'lines',
+    xaxis: 'x2', yaxis: 'y2',
+    line: {color: '#444444', width: 1.5, shape: topShape},
+    name: PAGE.top.name,
+    hovertemplate: '%{y:.3f} @ %{x:.3f}s<extra>' + PAGE.top.name + '</extra>',
+  }];
+  opt.sides.forEach(function (s, i) {
+    const c = PALETTE[i % PALETTE.length];
+    const actualName = s.side + ' 实际' + (s.meta ? '（' + s.meta + '）' : '');
+    data.push({
+      x: s.actual.x, y: s.actual.y, type: 'scatter', mode: 'lines',
+      xaxis: 'x', yaxis: 'y', line: {color: c, width: 1.3}, name: actualName,
+      hovertemplate: s.side + ' ' + s.joint +
+        ' 实际 %{y:.5f} @ %{x:.3f}s<extra></extra>',
+    });
+    data.push({
+      x: s.target.x, y: s.target.y, type: 'scatter', mode: 'lines',
+      xaxis: 'x', yaxis: 'y',
+      line: {color: c, dash: 'dot', width: 1.2, shape: s.target_shape},
+      name: s.side + ' 目标',
+      hovertemplate: s.side + ' ' + s.joint +
+        ' 目标 %{y:.5f} @ %{x:.3f}s<extra></extra>',
+    });
+  });
+  layout.title = {
+    text: opt.label + ' —— 左右手实测与目标对比',
+    x: 0.0, xref: 'paper', font: {size: 14},
+  };
+  Plotly.react('main_chart', data, layout,
+               {responsive: true, displaylogo: false});
+}
+""",
+        "renderChart(PAGE.options[0].key);",
+        "</script>",
+        '<div class="note">若图表未显示，请确认可访问 cdn.plot.ly，'
+        "或把 plotly.min.js 下载到本地后替换 <script> 的 src。</div>",
+        "</body>",
+        "</html>",
+    ]
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("\n".join(lines), encoding="utf-8")
+    return target
 
 
 def write_chart_html(
@@ -1167,69 +1322,10 @@ def write_chart_html(
     started_at: str,
     interrupted: bool,
 ) -> Path:
-    """画图模式：把指令状态与每个关节的位置随时间输出为一个独立 HTML 页面。"""
-    samples, commands = recorder.items()
-    if not samples and not commands:
-        raise RuntimeError("画图模式：没有记录到关节采样或指令事件，无法生成图表")
-
-    lines: List[str] = [
-        "<!DOCTYPE html>",
-        '<html lang="zh-CN">',
-        "<head>",
-        '<meta charset="utf-8">',
-        "<title>开关指令压力测试 —— 指令状态与关节位置随时间</title>",
-        '<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>',
-        "<style>",
-        'body { font-family: "Segoe UI", "Microsoft YaHei", Arial, sans-serif;',
-        "  margin: 16px; color: #222; }",
-        "h1 { font-size: 20px; }",
-        "h2 { font-size: 16px; margin-top: 26px; }",
-        ".note { color: #888; font-size: 12px; margin: 4px 0 8px; }",
-        ".chart { width: 100%; }",
-        "</style>",
-        "</head>",
-        "<body>",
-        "<h1>开关指令压力测试 —— 指令状态与关节位置随时间</h1>",
-        (
-            '<div class="note">开始时间：' + started_at
-            + "；中断：" + ("是" if interrupted else "否")
-            + "。每个侧/控制器是一张图：顶部子图为开关指令状态（0=关、1=开），"
-            + "下面每个关节一个子图。蓝线 = 实际关节位置，红色虚线(阶梯) = 当前"
-            + "指令对应的目标位置。横轴为相对开始的时间(s)。</div>"
-        ),
-    ]
-
-    for index, config in enumerate(configs):
-        figure = _build_side_figure(config, samples, commands)
-        data = figure["data"]
-        layout = figure["layout"]
-        yaxis_keys = [key for key in layout if key.startswith("yaxis")]
-        if not data or not yaxis_keys:
-            continue
-        height = max(240, len(yaxis_keys) * 190 + 70)
-        div_id = f"chart_{index}"
-        lines.append(
-            f"<h2>{config.side} 侧：/{config.controller}（{config.controller_type}）"
-            " —— 指令与每个关节位置随时间</h2>")
-        lines.append(
-            '<div class="note">缩放/平移请用右上角工具或框选，双击恢复。</div>')
-        lines.append(
-            f'<div class="chart" id="{div_id}" style="height:{height}px"></div>')
-        data_json = json.dumps(data, ensure_ascii=False)
-        layout_json = json.dumps(layout, ensure_ascii=False)
-        lines.append(
-            f"<script>Plotly.newPlot('{div_id}', {data_json}, {layout_json}, "
-            "{responsive: true, displaylogo: false});</script>")
-
-    lines.append(
-        '<div class="note">若图表未显示，请确认可访问 cdn.plot.ly，'
-        "或把 plotly.min.js 下载到本地后替换 <script> 的 src。</div>")
-    lines.append("</body>")
-    lines.append("</html>")
-
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text("\n".join(lines), encoding="utf-8")
-    return target
+    """画图模式：把左右手并成一张图，用下拉框切换要查看的关节。"""
+    return _write_joint_selector_chart(
+        target, configs, recorder, mode="onoff",
+        started_at=started_at, interrupted=interrupted)
 
 
 def _unique_report_dir(base_dir: Path) -> Path:
@@ -1389,6 +1485,58 @@ def estimate_delay_correlation(
     return (best_shift + offset) * dt, correlation
 
 
+def estimate_phase_lag_deg(
+    measured_times: Sequence[float],
+    measured: Sequence[float],
+    ref_times: Sequence[float],
+    reference: Sequence[float],
+    sine_hz: float,
+    sample_hz: float,
+) -> Optional[float]:
+    """用同频正交投影估计“实测相对正弦指令”的相位滞后(度)。
+
+    在稳态窗口内把实测与指令都去掉均值，再对 cos(ωt)/sin(ωt) 做投影求各自
+    相位；角度差即相位滞后，正=实测滞后于指令，范围归一化到 (-180, 180]。
+    """
+    if (
+        len(measured_times) < 4 or len(ref_times) < 4
+        or measured_times[0] > ref_times[-1]
+        or ref_times[0] > measured_times[-1]
+    ):
+        return None
+    t0 = max(measured_times[0], ref_times[0])
+    t1 = min(measured_times[-1], ref_times[-1])
+    if t1 <= t0:
+        return None
+    dt = 1.0 / sample_hz
+    count = int((t1 - t0) // dt) + 1
+    if count < 20:
+        return None
+    grid = [t0 + k * dt for k in range(count)]
+    r = _resample_on_grid(ref_times, reference, grid)
+    y = _resample_on_grid(measured_times, measured, grid)
+    r_mean = sum(r) / len(r)
+    y_mean = sum(y) / len(y)
+    r = [value - r_mean for value in r]
+    y = [value - y_mean for value in y]
+    omega = 2.0 * math.pi * sine_hz
+    cy = sy = cr = sr = 0.0
+    for n in range(count):
+        c = math.cos(omega * grid[n])
+        s = math.sin(omega * grid[n])
+        cy += y[n] * c
+        sy += y[n] * s
+        cr += r[n] * c
+        sr += r[n] * s
+    # Σ s·e^{-iωt} = (Σs·cos) - i(Σs·sin)，angle = -φ（共同幅度符号会抵消）
+    angle_y = math.atan2(-sy, cy)
+    angle_r = math.atan2(-sr, cr)
+    # 相位滞后 = φ_r - φ_y，实测滞后为正。
+    lag_deg = math.degrees(angle_r - angle_y)
+    lag_deg = (lag_deg + 180.0) % 360.0 - 180.0
+    return lag_deg
+
+
 def compute_side_delays(
     config: SideConfig,
     recorder: ChartRecorder,
@@ -1431,82 +1579,17 @@ def compute_side_delays(
         delay_s, correlation = estimate_delay_correlation(
             measured_times, measured, ref_times, ref_values,
             sample_hz, max_delay)
+        phase_lag_deg = estimate_phase_lag_deg(
+            measured_times, measured, ref_times, ref_values,
+            sine_hz, sample_hz)
         results.append(JointDelayResult(
-            joint,
-            None if delay_s is None else delay_s * 1000.0,
-            correlation,
-            len(measured_times),
+            joint=joint,
+            delay_ms=None if delay_s is None else delay_s * 1000.0,
+            correlation=correlation,
+            samples=len(measured_times),
+            phase_lag_deg=phase_lag_deg,
         ))
     return results
-
-
-def _build_sine_figure(
-    config: SideConfig,
-    samples: Sequence[Tuple[float, Dict[str, float]]],
-    references: Sequence[Tuple[float, str, float, Sequence[float]]],
-    delays: Sequence[JointDelayResult],
-) -> Dict[str, object]:
-    """正弦模式图表：顶部为指令相位 u(t)，下面每个关节一个子图。"""
-    refs = sorted(
-        (t, u, values)
-        for (t, side, u, values) in references
-        if side == config.side
-    )
-    all_times = [t for t, _ in samples] + [t for t, _, _ in refs]
-    if not all_times:
-        return {"data": [], "layout": {}}
-    t0 = min(all_times)
-    t_max = max(all_times) - t0
-    x_end = t_max + max(0.05, t_max * 0.02)
-    delay_by_joint = {delay.joint: delay for delay in delays}
-
-    charts: List[Dict[str, object]] = []
-    if refs:
-        charts.append({
-            "title": "指令相位 u(t)（0=关，1=开）",
-            "yrange": [-0.1, 1.1],
-            "traces": [{
-                "name": "u(t)",
-                "type": "scatter",
-                "mode": "lines",
-                "x": [t - t0 for t, _, _ in refs],
-                "y": [u for _, u, _ in refs],
-                "line": {"color": "#444444", "width": 1.5},
-                "hovertemplate": "%{y:.3f} @ %{x:.3f}s<extra>u(t)</extra>",
-            }],
-        })
-    for joint_index, joint in enumerate(config.joints):
-        actual_x = [t - t0 for (t, positions) in samples if joint in positions]
-        actual_y = [
-            positions[joint] for (t, positions) in samples if joint in positions]
-        traces: List[Dict[str, object]] = [{
-            "name": f"{joint} 实际",
-            "type": "scatter",
-            "mode": "lines",
-            "x": actual_x,
-            "y": actual_y,
-            "line": {"color": "#1f77b4", "width": 1.2},
-            "hovertemplate": "%{y:.5f} @ %{x:.3f}s<extra>实际位置</extra>",
-        }]
-        if refs:
-            target_x = [t - t0 for t, _, _ in refs]
-            target_y = [values[joint_index] for _, _, values in refs]
-            traces.append({
-                "name": f"{joint} 指令目标",
-                "type": "scatter",
-                "mode": "lines",
-                "x": target_x,
-                "y": target_y,
-                "line": {
-                    "color": "#d62728", "dash": "dot", "width": 1.2},
-                "hovertemplate": "%{y:.5f} @ %{x:.3f}s<extra>指令目标</extra>",
-            })
-        label = joint
-        delay = delay_by_joint.get(joint)
-        if delay is not None and delay.delay_ms is not None:
-            label += f"（延迟 {delay.delay_ms:.1f} ms）"
-        charts.append({"title": label, "traces": traces})
-    return _stack_subplots(config, charts, x_end)
 
 
 def write_sine_chart_html(
@@ -1517,71 +1600,15 @@ def write_sine_chart_html(
     started_at: str,
     interrupted: bool,
 ) -> Path:
-    """正弦模式：把指令相位与每个关节实测/目标位置输出为一个 HTML 页面。"""
-    samples, _ = recorder.items()
-    references = recorder.reference_items()
-    if not samples and not references:
-        raise RuntimeError("正弦模式：没有记录到关节采样或指令事件，无法生成图表")
+    """正弦模式：把左右手并成一张图，用下拉框切换要查看的关节。
 
-    lines: List[str] = [
-        "<!DOCTYPE html>",
-        '<html lang="zh-CN">',
-        "<head>",
-        '<meta charset="utf-8">',
-        "<title>正弦关节位置延迟测量</title>",
-        '<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>',
-        "<style>",
-        'body { font-family: "Segoe UI", "Microsoft YaHei", Arial, sans-serif;',
-        "  margin: 16px; color: #222; }",
-        "h1 { font-size: 20px; }",
-        "h2 { font-size: 16px; margin-top: 26px; }",
-        ".note { color: #888; font-size: 12px; margin: 4px 0 8px; }",
-        ".chart { width: 100%; }",
-        "</style>",
-        "</head>",
-        "<body>",
-        "<h1>正弦关节位置指令 —— 延迟测量</h1>",
-        (
-            '<div class="note">开始时间：' + started_at
-            + "；中断：" + ("是" if interrupted else "否")
-            + "。顶部子图为归一化指令相位 u(t)（0=关、1=开），下面每个关节一个"
-            + "子图：蓝线 = 实测位置，红色虚线 = 指令目标位置。关节标题中的延迟"
-            + "为该关节实测滞后指令的估计值(ms)。横轴为相对开始的时间(s)。</div>"
-        ),
-    ]
-
-    for index, config in enumerate(configs):
-        delays = delays_by_side.get(config.side, [])
-        figure = _build_sine_figure(config, samples, references, delays)
-        data = figure["data"]
-        layout = figure["layout"]
-        yaxis_keys = [key for key in layout if key.startswith("yaxis")]
-        if not data or not yaxis_keys:
-            continue
-        height = max(240, len(yaxis_keys) * 190 + 70)
-        div_id = f"chart_{index}"
-        lines.append(
-            f"<h2>{config.side} 侧：/{config.controller}（{config.controller_type}）"
-            " —— 正弦指令与实测位置随时间</h2>")
-        lines.append(
-            '<div class="note">缩放/平移请用右上角工具或框选，双击恢复。</div>')
-        lines.append(
-            f'<div class="chart" id="{div_id}" style="height:{height}px"></div>')
-        data_json = json.dumps(data, ensure_ascii=False)
-        layout_json = json.dumps(layout, ensure_ascii=False)
-        lines.append(
-            f"<script>Plotly.newPlot('{div_id}', {data_json}, {layout_json}, "
-            "{responsive: true, displaylogo: false});</script>")
-
-    lines.append(
-        '<div class="note">若图表未显示，请确认可访问 cdn.plot.ly，'
-        "或把 plotly.min.js 下载到本地后替换 <script> 的 src。</div>")
-    lines.append("</body>")
-    lines.append("</html>")
-
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text("\n".join(lines), encoding="utf-8")
-    return target
+    每个下拉选项对应左右侧同名的一对关节，实测与目标叠加在同一张图；
+    图例里同时标出该侧该关节互相关估计的延迟(ms)与相位滞后(°)。
+    """
+    return _write_joint_selector_chart(
+        target, configs, recorder, mode="sine",
+        started_at=started_at, interrupted=interrupted,
+        delays_by_side=delays_by_side)
 
 
 def build_sine_summary(
@@ -1603,6 +1630,7 @@ def build_sine_summary(
                 "delay_ms": delay.delay_ms,
                 "correlation": delay.correlation,
                 "samples": delay.samples,
+                "phase_lag_deg": delay.phase_lag_deg,
             }
             for delay in side_delays
         ]
@@ -1676,14 +1704,15 @@ def write_sine_reports(
         "",
         "## 每关节延迟",
         "",
-        "| 侧 | 关节 | 延迟(ms) | 相关 | 采样数 |",
-        "|---|---|---:|---:|---:|",
+        "| 侧 | 关节 | 延迟(ms) | 相位滞后(deg) | 相关 | 采样数 |",
+        "|---|---|---:|---:|---:|---:|",
     ]
     for config in configs:
         for delay in delays_by_side[config.side]:
             lines.append(
                 f"| {config.side} | {delay.joint} | "
                 f"{'-' if delay.delay_ms is None else f'{delay.delay_ms:.2f}'} | "
+                f"{'-' if delay.phase_lag_deg is None else f'{delay.phase_lag_deg:.2f}'} | "
                 f"{'-' if delay.correlation is None else f'{delay.correlation:.3f}'} | "
                 f"{delay.samples} |")
     lines.extend([
@@ -2230,9 +2259,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                             f"{config.side} {delay.joint}: 延迟不可估计"
                             f"（相关={corr_text}）", flush=True)
                     else:
+                        lag_text = (
+                            "n/a" if delay.phase_lag_deg is None
+                            else f"{delay.phase_lag_deg:.1f}°")
                         print(
                             f"{config.side} {delay.joint}: 延迟="
-                            f"{delay.delay_ms:.1f} ms"
+                            f"{delay.delay_ms:.1f} ms，相位滞后={lag_text}"
                             f"（相关={delay.correlation:.3f}）", flush=True)
             summary = build_sine_summary(
                 args, configs, delays_by_side, started_at,
