@@ -59,6 +59,7 @@ from .utils.discovery import (
     list_node_parameters as _list_node_parameters,
     set_node_parameters as _set_node_parameters,
 )
+from .dynamics import ComEstimate, ComEstimator, ComEstimatorError
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +142,7 @@ class ROS2RobotInterface:
         self.waist_lifting_pose_absolute_pub: Publisher | None = None
         self.waist_lifting_command_pub: Publisher | None = None
         self.waist_turning_command_pub: Publisher | None = None
+        self.waist_phi_command_pub: Publisher | None = None
 
         self.latest_joint_state: Dict[str, Any] | None = None
         self.latest_categorized_joint_state: Dict[str, Any] | None = None  # Cached categorized state
@@ -160,6 +162,8 @@ class ROS2RobotInterface:
         # Robot description tracking
         self.latest_robot_description: Optional[str] = None
         self._robot_description_received = False
+        self._com_estimator: Optional[ComEstimator] = None
+        self._com_estimator_urdf: Optional[str] = None
         self._connected = False
         
         self.last_joint_state_time = 0.0
@@ -927,6 +931,11 @@ class ROS2RobotInterface:
             if self.config.waist_turning_command_topic:
                 self.waist_turning_command_pub = self.robot_node.create_publisher(
                     Float64, self.config.waist_turning_command_topic, 10
+                )
+
+            if self.config.waist_phi_command_topic:
+                self.waist_phi_command_pub = self.robot_node.create_publisher(
+                    Float64, self.config.waist_phi_command_topic, 10
                 )
             
             if self.config.left_hand_joint_controller_topic:
@@ -2599,6 +2608,53 @@ class ROS2RobotInterface:
             True if robot description has been received, False otherwise.
         """
         return self._robot_description_received
+
+    def _latest_joint_positions_by_name(self) -> Dict[str, float]:
+        """Return latest joint positions keyed by joint name."""
+        if not self.latest_joint_state:
+            return {}
+        names = self.latest_joint_state.get("names") or []
+        positions = self.latest_joint_state.get("positions") or []
+        return {
+            str(name): float(position)
+            for name, position in zip(names, positions)
+        }
+
+    def get_center_of_mass(
+        self,
+        *,
+        frame_id: str = "base_footprint",
+        allow_missing_with_neutral: bool = False,
+    ) -> Optional[ComEstimate]:
+        """Compute robot center of mass from cached robot_description and joint_states.
+
+        Returns:
+            `ComEstimate` if URDF and joint states are available, otherwise `None`.
+
+        Raises:
+            ComEstimatorError: if Pinocchio is unavailable or required q joints are missing.
+        """
+        if not self.latest_robot_description:
+            logger.warning("Cannot compute CoM: /robot_description has not been received")
+            return None
+
+        joint_positions = self._latest_joint_positions_by_name()
+        if not joint_positions:
+            logger.warning("Cannot compute CoM: /joint_states has not been received")
+            return None
+
+        if (
+            self._com_estimator is None
+            or self._com_estimator_urdf != self.latest_robot_description
+            or self._com_estimator.frame_id != frame_id
+        ):
+            self._com_estimator = ComEstimator(self.latest_robot_description, frame_id=frame_id)
+            self._com_estimator_urdf = self.latest_robot_description
+
+        return self._com_estimator.compute(
+            joint_positions,
+            allow_missing_with_neutral=allow_missing_with_neutral,
+        )
     
     def send_head_joint_positions(self, positions: List[float]) -> None:
         """Send target joint positions for head joints."""
@@ -2901,8 +2957,8 @@ class ROS2RobotInterface:
         if not self.is_connected:
             raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
         
-        if self.waist_lifting_pub is None:
-            logger.warning("Waist lifting publisher not initialized. Set waist_lifting_command_topic in config.")
+        if self.waist_lifting_command_pub is None:
+            logger.warning("Waist lifting command publisher not initialized. Set waist_lifting_command_topic in config.")
             return
 
         self.auto_switch_fsm_for_control("body_joint")
@@ -2919,8 +2975,8 @@ class ROS2RobotInterface:
         if not self.is_connected:
             raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
         
-        if self.waist_lifting_pub is None:
-            logger.warning("Waist turning publisher not initialized. Set waist_turning_command_topic in config.")
+        if self.waist_turning_command_pub is None:
+            logger.warning("Waist turning command publisher not initialized. Set waist_turning_command_topic in config.")
             return
 
         self.auto_switch_fsm_for_control("body_joint")
@@ -2931,6 +2987,27 @@ class ROS2RobotInterface:
         msg.data = velocity_scale
         self.waist_turning_command_pub.publish(msg)
         logger.debug(f"Published waist turning velocity_scale: {velocity_scale}")
+
+    def send_waist_phi_velocity_scale(self, velocity_scale: float) -> None:
+        """Send target velocity scale for body_joint3 phi control.
+
+        Non-zero values start continuous speed control. Send 0.0 to stop.
+        """
+        if not self.is_connected:
+            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+
+        if self.waist_phi_command_pub is None:
+            logger.warning("Waist phi command publisher not initialized. Set waist_phi_command_topic in config.")
+            return
+
+        self.auto_switch_fsm_for_control("body_joint")
+
+        velocity_scale = max(min(velocity_scale, 1), -1)
+
+        msg = Float64()
+        msg.data = velocity_scale
+        self.waist_phi_command_pub.publish(msg)
+        logger.debug(f"Published waist phi velocity_scale: {velocity_scale}")
     
     def send_left_hand_joint_positions(self, positions: List[float]) -> None:
         """Send target joint positions for left hand joints."""
@@ -4677,6 +4754,10 @@ class ROS2RobotInterface:
         if self.waist_turning_command_pub:
             self.waist_turning_command_pub.destroy()
             self.waist_turning_command_pub = None
+
+        if self.waist_phi_command_pub:
+            self.waist_phi_command_pub.destroy()
+            self.waist_phi_command_pub = None
 
         if self._nav_action_client is not None:
             self._nav_action_client.destroy()
