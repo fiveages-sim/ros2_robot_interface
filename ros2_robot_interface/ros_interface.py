@@ -73,7 +73,6 @@ class ROS2RobotInterface:
         "BODY_VERTICAL": WbcCurrentState.BODY_VERTICAL,  # backward-compatible alias
         "BODY_TRACKING": WbcCurrentState.BODY_TRACKING,
         "BODY_LOCK": WbcCurrentState.BODY_LOCKED,
-        "BODY_HEAD_COUPLED": WbcCurrentState.BODY_HEAD_COUPLED,
     }
     BODY_MODE_TO_COMMAND: Dict[str, str] = {
         "BODY_FREE": "BODY_FREE",
@@ -81,7 +80,6 @@ class ROS2RobotInterface:
         "BODY_VERTICAL": "BODY_RELATIVE",  # backward-compatible alias
         "BODY_TRACKING": "BODY_TRACKING",
         "BODY_LOCK": "BODY_LOCK",
-        "BODY_HEAD_COUPLED": "BODY_HEAD_COUPLED",
     }
     # /mode_command 字符串 → (WbcCurrentState 字段名, 期望常量值)
     # BODY_* 由 BODY_MODE_TO_STATE 派生，避免双份维护
@@ -89,6 +87,10 @@ class ROS2RobotInterface:
         **{k: ("body_state", v) for k, v in BODY_MODE_TO_STATE.items()},
         "ARMS_COUPLED": ("bimanual_state", WbcCurrentState.BIMANUAL_COUPLED),
         "ARMS_INDEPENDENT": ("bimanual_state", WbcCurrentState.BIMANUAL_INDEPENDENT),
+        "HEAD_DISABLE": ("head_state", WbcCurrentState.HEAD_DISABLED),
+        "HEAD_TRACKING": ("head_state", WbcCurrentState.HEAD_TRACKING),
+        "HEAD_GAZE": ("head_state", WbcCurrentState.HEAD_GAZE),
+        "HEAD_FORWARD": ("head_state", WbcCurrentState.HEAD_FORWARD),
         "BASE_LOCK": ("base_state", WbcCurrentState.BASE_LOCKED),
         "BASE_UNLOCK": ("base_state", WbcCurrentState.BASE_UNLOCKED),
     }
