@@ -58,7 +58,7 @@ send_mode_command() 行为（本脚本依次调用该接口）:
     BODY_LOCK           身体锁定
     BODY_RELATIVE       身体相对控制（别名 BODY_VERTICAL）
     BODY_TRACKING       身体跟踪
-    BODY_HEAD_COUPLED   身体-头耦合
+    HEAD_FORWARD   头腰耦合
     BASE_LOCK           底盘锁定
     BASE_UNLOCK         底盘解锁
     ARMS_INDEPENDENT    双臂独立（解除耦合；左右臂使能切换前提）
@@ -100,7 +100,7 @@ BASE_SEQUENCE = [
     ("身体锁定", "BODY_LOCK", 3.0),
     ("身体相对控制", "BODY_RELATIVE", 3.0),
     ("身体跟踪", "BODY_TRACKING", 3.0),
-    ("身体-头耦合", "BODY_HEAD_COUPLED", 3.0),
+    ("头腰耦合", "HEAD_FORWARD", 3.0),
     ("底盘锁定", "BASE_LOCK", 3.0),
     ("底盘解锁", "BASE_UNLOCK", 3.0),
 ]
