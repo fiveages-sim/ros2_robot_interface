@@ -16,6 +16,13 @@
     - ARMS_COUPLED 要求左右臂均已启用，且机器人具备双臂耦合能力（has_bimanual_coupling）。
     - 本脚本在臂使能序列开头会先发 ARMS_INDEPENDENT，末尾再发 ARMS_INDEPENDENT 恢复。
 
+头部模式专用前置条件:
+    - 须为 WBC 栈（interface.is_wbc=True）。
+    - HEAD_TRACKING 要求 task 文件启用 headTrackingEE，并配置有效的 headFrame。
+    - HEAD_GAZE 要求 task 文件启用 headMidpointGaze；该模式让头部注视双臂末端中点。
+    - HEAD_FORWARD 要求 task 文件启用 headCoupling；该模式暂时覆盖身体约束，退出后恢复。
+    - 切到 HEAD_TRACKING 后，还需向 head_target 或 head_target/stamped 发布目标，头部才会运动。
+
 HOME_JOINT_ON / HOME_JOINT_OFF 专用前置条件:
     - 须为 WBC 栈（interface.is_wbc=True），且 task 文件已启用 HOME 关节参考能力
       （homeJointReference.activate=true，参见 fa-w2-description/config/ocs2/*.info）。
@@ -58,7 +65,10 @@ send_mode_command() 行为（本脚本依次调用该接口）:
     BODY_LOCK           身体锁定
     BODY_RELATIVE       身体相对控制（别名 BODY_VERTICAL）
     BODY_TRACKING       身体跟踪
-    HEAD_FORWARD   头腰耦合
+    HEAD_DISABLE        禁用头部控制
+    HEAD_TRACKING       头部追踪（需 headTrackingEE）
+    HEAD_GAZE           注视双臂末端中点（需 headMidpointGaze）
+    HEAD_FORWARD        头腰耦合（需 headCoupling）
     BASE_LOCK           底盘锁定
     BASE_UNLOCK         底盘解锁
     ARMS_INDEPENDENT    双臂独立（解除耦合；左右臂使能切换前提）
@@ -100,9 +110,17 @@ BASE_SEQUENCE = [
     ("身体锁定", "BODY_LOCK", 3.0),
     ("身体相对控制", "BODY_RELATIVE", 3.0),
     ("身体跟踪", "BODY_TRACKING", 3.0),
-    ("头腰耦合", "HEAD_FORWARD", 3.0),
     ("底盘锁定", "BASE_LOCK", 3.0),
     ("底盘解锁", "BASE_UNLOCK", 3.0),
+]
+
+# 头部模式彼此互斥，但独立于 BODY_* 模式；末尾恢复为禁用状态。
+HEAD_SEQUENCE = [
+    ("禁用头部控制", "HEAD_DISABLE", 2.0),
+    ("头部追踪", "HEAD_TRACKING", 3.0),
+    ("头部注视双臂末端中点", "HEAD_GAZE", 3.0),
+    ("头腰耦合朝前", "HEAD_FORWARD", 3.0),
+    ("禁用头部控制（恢复）", "HEAD_DISABLE", 2.0),
 ]
 
 # 须先 ARMS_INDEPENDENT，再测单臂使能；ARMS_COUPLED 放在两臂均 enable 之后。
@@ -187,13 +205,13 @@ def main() -> int:
         time.sleep(1.0)
         print_state(interface, "after OCS2")
 
-        run_sequence(interface, BASE_SEQUENCE, "body / base mode commands")
-
         if not interface.is_wbc:
             print("-" * 70)
-            print("skip arm mode commands: WBC controller not detected (is_wbc=False)")
-            print("  LEFT_ARM_* / RIGHT_ARM_* / ARMS_* require ocs2_wbc_controller")
+            print("skip WBC mode commands: WBC controller not detected (is_wbc=False)")
+            print("  BODY_* / HEAD_* / BASE_* / LEFT_ARM_* / RIGHT_ARM_* / ARMS_* require ocs2_wbc_controller")
         else:
+            run_sequence(interface, BASE_SEQUENCE, "body / base mode commands")
+            run_sequence(interface, HEAD_SEQUENCE, "head mode commands")
             run_sequence(
                 interface,
                 ARM_SEQUENCE,
