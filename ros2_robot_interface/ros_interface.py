@@ -11,7 +11,7 @@ import re
 import sys
 import threading
 import time
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import rclpy
@@ -59,7 +59,9 @@ from .utils.discovery import (
     list_node_parameters as _list_node_parameters,
     set_node_parameters as _set_node_parameters,
 )
-from .dynamics import ComEstimate, ComEstimator, ComEstimatorError
+
+if TYPE_CHECKING:
+    from .dynamics.com_estimator import ComEstimate, ComEstimator
 
 logger = logging.getLogger(__name__)
 
@@ -164,7 +166,7 @@ class ROS2RobotInterface:
         # Robot description tracking
         self.latest_robot_description: Optional[str] = None
         self._robot_description_received = False
-        self._com_estimator: Optional[ComEstimator] = None
+        self._com_estimator: Optional["ComEstimator"] = None
         self._com_estimator_urdf: Optional[str] = None
         self._connected = False
         
@@ -2627,7 +2629,7 @@ class ROS2RobotInterface:
         *,
         frame_id: str = "base_footprint",
         allow_missing_with_neutral: bool = False,
-    ) -> Optional[ComEstimate]:
+    ) -> Optional["ComEstimate"]:
         """Compute robot center of mass from cached robot_description and joint_states.
 
         Returns:
@@ -2636,6 +2638,8 @@ class ROS2RobotInterface:
         Raises:
             ComEstimatorError: if Pinocchio is unavailable or required q joints are missing.
         """
+        from .dynamics.com_estimator import ComEstimator
+
         if not self.latest_robot_description:
             logger.warning("Cannot compute CoM: /robot_description has not been received")
             return None

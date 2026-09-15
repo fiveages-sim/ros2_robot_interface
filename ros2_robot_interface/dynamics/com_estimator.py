@@ -4,18 +4,58 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Mapping
+from typing import Any, Mapping
 import xml.etree.ElementTree as ET
 
 import numpy as np
 
-try:
-    import pinocchio as pin
-except ImportError as exc:  # pragma: no cover - depends on ROS/Pinocchio environment
-    pin = None
-    _PINOCCHIO_IMPORT_ERROR = exc
-else:
-    _PINOCCHIO_IMPORT_ERROR = None
+pin: Any = None
+_PINOCCHIO_IMPORT_ERROR: BaseException | None = None
+
+
+def _numpy_major_version() -> int:
+    return int(str(np.__version__).split(".", 1)[0])
+
+
+def _load_pinocchio() -> Any:
+    """Import Pinocchio only when CoM estimation is actually used.
+
+    ROS distro Pinocchio is typically compiled against NumPy 1.x. Importing it
+    under NumPy 2.x can abort the interpreter (segfault), so refuse first.
+    """
+    global pin, _PINOCCHIO_IMPORT_ERROR
+    if pin is not None:
+        return pin
+    if _PINOCCHIO_IMPORT_ERROR is not None:
+        return None
+
+    if _numpy_major_version() >= 2:
+        _PINOCCHIO_IMPORT_ERROR = ComEstimatorError(
+            "Pinocchio from ROS is typically built against NumPy 1.x and can "
+            f"crash under NumPy {np.__version__}. CoM estimation is disabled "
+            "in this environment."
+        )
+        return None
+
+    try:
+        import pinocchio as pinocchio_mod
+    except ImportError as exc:  # pragma: no cover - depends on ROS/Pinocchio environment
+        _PINOCCHIO_IMPORT_ERROR = exc
+        return None
+
+    pin = pinocchio_mod
+    return pin
+
+
+def _require_pinocchio() -> Any:
+    pinocchio = _load_pinocchio()
+    if pinocchio is not None:
+        return pinocchio
+    if isinstance(_PINOCCHIO_IMPORT_ERROR, ComEstimatorError):
+        raise _PINOCCHIO_IMPORT_ERROR
+    raise ComEstimatorError(
+        "Pinocchio Python is not importable. Source the ROS environment or install Pinocchio Python."
+    ) from _PINOCCHIO_IMPORT_ERROR
 
 
 class ComEstimatorError(RuntimeError):
@@ -162,15 +202,12 @@ class ComEstimator:
     """Build a Pinocchio model from URDF XML and compute CoM from joint positions."""
 
     def __init__(self, urdf_xml: str, frame_id: str = "base_footprint") -> None:
-        if pin is None:
-            raise ComEstimatorError(
-                "Pinocchio Python is not importable. Source the ROS environment or install Pinocchio Python."
-            ) from _PINOCCHIO_IMPORT_ERROR
+        pinocchio = _require_pinocchio()
         if not urdf_xml or not urdf_xml.strip():
             raise ComEstimatorError("URDF XML is empty; cannot build Pinocchio model.")
 
         self.frame_id = frame_id
-        self.model = pin.buildModelFromXML(urdf_xml)
+        self.model = pinocchio.buildModelFromXML(urdf_xml)
         self.root_link = self._collect_urdf_root_link(urdf_xml)
         universe_name = str(self.model.names[0]) if len(self.model.names) else "universe"
         frame_id_matches_root_link = self.frame_id == self.root_link
@@ -192,7 +229,7 @@ class ComEstimator:
             frame_id_matches_root_link=frame_id_matches_root_link,
         )
         self.data = self.model.createData()
-        self.q_neutral = pin.neutral(self.model)
+        self.q_neutral = pinocchio.neutral(self.model)
         self.single_dof_joint_names: tuple[str, ...] = self._collect_single_dof_joint_names()
         self.unsupported_joint_names: tuple[str, ...] = self._collect_unsupported_joint_names()
         self.mimic_joints: dict[str, MimicJoint] = self._collect_mimic_joints(urdf_xml)
@@ -228,7 +265,8 @@ class ComEstimator:
                 "Missing joint positions required by Pinocchio q: " + ", ".join(sorted(missing))
             )
 
-        com = pin.centerOfMass(self.model, self.data, q)
+        pinocchio = _require_pinocchio()
+        com = pinocchio.centerOfMass(self.model, self.data, q)
         return ComEstimate(
             xyz=(float(com[0]), float(com[1]), float(com[2])),
             frame_id=self.frame_id,
