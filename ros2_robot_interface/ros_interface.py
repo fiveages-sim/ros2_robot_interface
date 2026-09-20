@@ -66,13 +66,19 @@ logger = logging.getLogger(__name__)
 class ROS2RobotInterface:
     """Interface for communicating with ROS 2 robots."""
 
+    # BODY_HEAD_COUPLED exists on some stacks (ros2_ws / S2); fa_w2_ws uses
+    # separate head_state instead and omits that body constant — keep optional.
     BODY_MODE_TO_STATE: Dict[str, int] = {
         "BODY_FREE": WbcCurrentState.BODY_FREE,
         "BODY_RELATIVE": WbcCurrentState.BODY_VERTICAL,
         "BODY_VERTICAL": WbcCurrentState.BODY_VERTICAL,  # backward-compatible alias
         "BODY_TRACKING": WbcCurrentState.BODY_TRACKING,
         "BODY_LOCK": WbcCurrentState.BODY_LOCKED,
-        "BODY_HEAD_COUPLED": WbcCurrentState.BODY_HEAD_COUPLED,
+        **(
+            {"BODY_HEAD_COUPLED": WbcCurrentState.BODY_HEAD_COUPLED}
+            if hasattr(WbcCurrentState, "BODY_HEAD_COUPLED")
+            else {}
+        ),
     }
     BODY_MODE_TO_COMMAND: Dict[str, str] = {
         "BODY_FREE": "BODY_FREE",
@@ -80,7 +86,11 @@ class ROS2RobotInterface:
         "BODY_VERTICAL": "BODY_RELATIVE",  # backward-compatible alias
         "BODY_TRACKING": "BODY_TRACKING",
         "BODY_LOCK": "BODY_LOCK",
-        "BODY_HEAD_COUPLED": "BODY_HEAD_COUPLED",
+        **(
+            {"BODY_HEAD_COUPLED": "BODY_HEAD_COUPLED"}
+            if hasattr(WbcCurrentState, "BODY_HEAD_COUPLED")
+            else {}
+        ),
     }
     # /mode_command 字符串 → (WbcCurrentState 字段名, 期望常量值)
     # BODY_* 由 BODY_MODE_TO_STATE 派生，避免双份维护
