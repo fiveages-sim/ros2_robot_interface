@@ -420,12 +420,6 @@ class ROS2RobotInterface:
             self.config.body_target_topic = "/body_target"
             logger.info("Detected body target topic: /body_target")
 
-        if "/body_joint_controller/waist_lifting" in topic_names:
-            self.config.waist_lifting_topic = "/body_joint_controller/waist_lifting"
-        elif "/ocs2_wbc_controller/waist_lifting" in topic_names:
-            self.config.waist_lifting_topic = "/ocs2_wbc_controller/waist_lifting"
-            logger.info("Detected WBC waist lifting topic")
-
         if "/body_joint_controller/waist_lifting_pose_relative" in topic_names:
             self.config.waist_lifting_pose_relative_topic = "/body_joint_controller/waist_lifting_pose_relative"
         elif "/ocs2_wbc_controller/waist_lifting_pose_relative" in topic_names:
@@ -911,11 +905,6 @@ class ROS2RobotInterface:
                     JointTrajectory, self.config.head_joint_trajectory_topic, 10
                 )
                 logger.info(f"Created head joint trajectory publisher: {self.config.head_joint_trajectory_topic}")
-
-            if self.config.waist_lifting_topic:
-                self.waist_lifting_pub = self.robot_node.create_publisher(
-                    Float64, self.config.waist_lifting_topic, 10
-                )
 
             if self.config.waist_lifting_pose_relative_topic:
                 self.waist_lifting_pose_relative_pub = self.robot_node.create_publisher(
@@ -2812,22 +2801,6 @@ class ROS2RobotInterface:
         msg.pose = pose
         self.body_target_stamped_pub.publish(msg)
         logger.debug(f"Published body target (stamped) in frame '{frame_id}': {pose}")
-
-    def send_waist_lifting_relative_position(self, position: float) -> None:
-        """Send target relative position for waist lifting."""
-        if not self.is_connected:
-            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
-        
-        if self.waist_lifting_pub is None:
-            logger.warning("Waist lifting publisher not initialized. Set waist_lifting_topic in config.")
-            return
-
-        self.auto_switch_fsm_for_control("body_joint")
-        
-        msg = Float64()
-        msg.data = position
-        self.waist_lifting_pub.publish(msg)
-        logger.debug(f"Published waist lifting relative position: {position}")
 
     def send_waist_lifting_pose_relative(self, dx: float, dz: float, dphi: float) -> None:
         """Send local relative waist x/z/phi delta.
