@@ -2913,3 +2913,10 @@ interface.send_fsm_command(FSM_OCS2)
 | `check_pose_arrival(...)` | 笛卡尔到位判定（手臂 / body_pose 共用） |
 
 与 LeRobot 扁平 action/观测键相关的 `action_from_pose` / `obs_to_pose` 仍见 **`lerobot_robot_ros2.utils.pose_utils`**。
+
+
+### 腰部俯仰速度控制
+
+`send_waist_phi_velocity_scale(velocity_scale)` 发布俯仰速度比例；正值前倾，负值后仰，零值请求停止。非零命令会持续执行，停止发布不会自动停止控制器运动。
+
+腰部升降、旋转、俯仰速度话题在连接时按控制模式自动检测：识别到 WBC 统一关节话题时使用 `/ocs2_wbc_controller/` 前缀，否则使用 `/body_joint_controller/` 前缀；不跨模式回退。显式配置的话题优先保留。需要控制器提供相应能力。

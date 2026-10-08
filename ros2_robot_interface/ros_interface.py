@@ -302,7 +302,7 @@ class ROS2RobotInterface:
     ) -> bool:
         """Auto-detect robot configuration from topics. Returns True if dual-arm detected."""
         is_dual_arm = False
-        self.is_wbc = False
+        self.is_wbc = "/ocs2_wbc_controller/target_joint_position" in topic_names
         self._wbc_has_body_joint_topic = False
         self._wbc_has_head_joint_topic = False
         
@@ -448,18 +448,20 @@ class ROS2RobotInterface:
                     logger.info(f"Detected waist lifting pose action: {candidate}")
                     break
 
-        if "/body_joint_controller/waist_lifting_command" in topic_names:
-            self.config.waist_lifting_command_topic = "/body_joint_controller/waist_lifting_command"
-        elif "/ocs2_wbc_controller/waist_lifting_command" in topic_names:
-            self.config.waist_lifting_command_topic = "/ocs2_wbc_controller/waist_lifting_command"
-            logger.info("Detected WBC waist lifting command topic")
+        # Follow the detected controller mode; publisher-only split topics may
+        # remain visible in a WBC deployment and must not win discovery.
+        waist_prefix = "/ocs2_wbc_controller" if self.is_wbc else "/body_joint_controller"
+        for field, suffix in (
+            ("waist_lifting_command_topic", "waist_lifting_command"),
+            ("waist_turning_command_topic", "waist_turning_command"),
+            ("waist_phi_command_topic", "waist_phi_command"),
+        ):
+            if getattr(self.config, field) is None:
+                candidate = f"{waist_prefix}/{suffix}"
+                if candidate in topic_names:
+                    setattr(self.config, field, candidate)
+                    logger.info(f"Detected waist command topic: {candidate}")
 
-        if "/body_joint_controller/waist_turning_command" in topic_names:
-            self.config.waist_turning_command_topic = "/body_joint_controller/waist_turning_command"
-        elif "/ocs2_wbc_controller/waist_turning_command" in topic_names:
-            self.config.waist_turning_command_topic = "/ocs2_wbc_controller/waist_turning_command"
-            logger.info("Detected WBC waist turning command topic")
-        
         # 检测灵巧手关节控制器 topic
         if "/left_hand_controller/target_joint_position" in topic_names:
             self.config.left_hand_joint_controller_topic = "/left_hand_controller/target_joint_position"
@@ -2940,7 +2942,6 @@ class ROS2RobotInterface:
             logger.warning("Waist lifting command publisher not initialized. Set waist_lifting_command_topic in config.")
             return
 
-        self.auto_switch_fsm_for_control("body_joint")
         
         velocity_scale = max(min(velocity_scale, 1),-1)
         
@@ -2958,7 +2959,6 @@ class ROS2RobotInterface:
             logger.warning("Waist turning command publisher not initialized. Set waist_turning_command_topic in config.")
             return
 
-        self.auto_switch_fsm_for_control("body_joint")
         
         velocity_scale = max(min(velocity_scale, 1),-1)
         
@@ -2979,7 +2979,6 @@ class ROS2RobotInterface:
             logger.warning("Waist phi command publisher not initialized. Set waist_phi_command_topic in config.")
             return
 
-        self.auto_switch_fsm_for_control("body_joint")
 
         velocity_scale = max(min(velocity_scale, 1), -1)
 
