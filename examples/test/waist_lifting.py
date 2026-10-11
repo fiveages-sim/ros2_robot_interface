@@ -1,5 +1,5 @@
 """
-测试 send_waist_lifting_relative_position() send_waist_lifting_velocity_scale() send_waist_turning_velocity_scale()
+测试 send_waist_lifting_pose_relative() send_waist_lifting_velocity_scale() send_waist_turning_velocity_scale()
 """
 
 import time
@@ -44,7 +44,7 @@ def main():
     print("-" * 70)
     
     # 提取左臂和右臂关节位置
-    waist_control_available = interface.config.waist_lifting_topic is not None
+    waist_control_available = interface.config.waist_lifting_pose_relative_topic is not None
     
     if waist_control_available:
         print("腰部控制功能成功启用")
@@ -108,7 +108,7 @@ def main():
         else:
             print("  ⚠ 参数设置失败")
         print()
-        interface.send_waist_lifting_relative_position(0.1)  # 发送相对当前位置上升0.1m
+        interface.send_waist_lifting_pose_relative(0.0, 0.1, 0.0)  # 发送相对当前位置上升0.1m
         print("  ✓ 命令已发送: 腰部开始上升")
         time.sleep(12.0)  # 等待腰部运动完成
         print("  ✓ 腰部到达目标位置\n")
@@ -129,7 +129,7 @@ def main():
         else:
             print("  ⚠ 参数设置失败")
         print()
-        interface.send_waist_lifting_relative_position(-0.1)  # 发送相对当前位置下降0.1m
+        interface.send_waist_lifting_pose_relative(0.0, -0.1, 0.0)  # 发送相对当前位置下降0.1m
         print("  ✓ 命令已发送: 腰部开始下降")
         time.sleep(5.0)  # 等待腰部运动完成
         print("  ✓ 腰部到达目标位置\n")

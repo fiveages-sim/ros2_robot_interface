@@ -1439,26 +1439,6 @@ target.orientation.w = 1.0
 interface.send_body_target_stamped("base_link", target)
 ```
 
-#### `send_waist_lifting_relative_position(position: float) -> None`
-
-> ⚠️ **兼容旧接口：** 新代码统一使用对应的 `execute_waist_lifting_pose_*_action`；本 Topic 仅用于兼容既有调用，不提供执行结果与可达性信息。它只兼容单一 `dz`，推荐替换为 `execute_waist_lifting_pose_relative_action(0.0, dz, 0.0)`。
-
-**功能：** 发送腰部升降相对位置命令（单标量）。
-
-**原理：**
-- 类型：Topic 发布
-- 名称：`config.waist_lifting_topic`
-  - split：`/body_joint_controller/waist_lifting`
-  - WBC：`/ocs2_wbc_controller/waist_lifting`
-- 消息：`std_msgs/msg/Float64`
-- 隐式 FSM：切到 MOVEJ
-- 执行参数：`body_controller` 上的 `waist_lifting_duration`（默认 3 s）
-
-**示例：**
-```python
-interface.send_waist_lifting_relative_position(0.05)
-```
-
 #### `send_waist_lifting_pose_relative(dx: float, dz: float, dphi: float) -> None`
 
 > ⚠️ **兼容旧接口：** 新代码统一使用对应的 `execute_waist_lifting_pose_*_action`；本 Topic 仅用于兼容既有调用，不提供执行结果与可达性信息。推荐替换为 `execute_waist_lifting_pose_relative_action(dx, dz, dphi)`。
@@ -2757,7 +2737,7 @@ interface.set_node_parameters(interface.body_controller, {"waist_lifting_duratio
 | `send_head_joint_trajectory` | `head_joint_controller` | 同上 |
 | `send_target_command`（离散开合） / `send_position_percent`（百分比） | 对应左/右 `hand_controller`（BasicJointController） | `target_command_enabled`（是否订阅离散/百分比 topic）、`target_command_close_config` / `target_command_open_config`（选择 `home_<index>` 配置，默认 1 / 0，YAML 可覆盖）、`target_command_hold_joints`（执行离散/百分比时保持当前值的关节） |
 | `send_target_command` / `send_position_percent`（开合/百分比） | 对应左/右 `gripper_controller`（AdaptiveGripperController） | `use_effort_interface`、`force_threshold`、`force_feedback_ratio`（`0` 触发阈值后停在当前位置，`1` 继续到原目标）；`send_joint_positions` 为 direct position mode，不使用力反馈 |
-| `send_waist_lifting_relative_position`、`send_waist_lifting_pose_*`、`execute_waist_lifting_pose_*_action` | `body_controller` | `waist_lifting_duration`（默认 3 s） |
+| `send_waist_lifting_pose_*`、`execute_waist_lifting_pose_*_action` | `body_controller` | `waist_lifting_duration`（默认 3 s） |
 | `send_waist_lifting_velocity_scale` / `send_waist_turning_velocity_scale` | `body_controller` | `waist_lifting_default_parameter` / `waist_turning_default_parameter` = `[目标速度, 最大加速度, 最大加加速度]`；实际速度 = `scale × 第一项` |
 
 MoveL / MoveC Action 的时长写在 goal 里；六个笛卡尔 `max_*` 省略时回退 `cartesian_defaults.*`。MoveJ Action（`joint_trajectory_with_para`）的 `max_velocity` / `max_acceleration` / `max_jerk` 省略时回退控制器节点参数 `movej_max_velocity` / `movej_max_acceleration` / `movej_max_jerk`（默认 2.0 / 4.0 / 20.0），时长仍可写在 goal 的 `total_time` 里（时间模式未写时控制器回退 3 s）。力控见 `set_compliance_force`。
@@ -2933,3 +2913,10 @@ interface.send_fsm_command(FSM_OCS2)
 | `check_pose_arrival(...)` | 笛卡尔到位判定（手臂 / body_pose 共用） |
 
 与 LeRobot 扁平 action/观测键相关的 `action_from_pose` / `obs_to_pose` 仍见 **`lerobot_robot_ros2.utils.pose_utils`**。
+
+
+### 腰部俯仰速度控制
+
+`send_waist_phi_velocity_scale(velocity_scale)` 发布俯仰速度比例；正值前倾，负值后仰，零值请求停止。非零命令会持续执行，停止发布不会自动停止控制器运动。
+
+腰部升降、旋转、俯仰速度话题在连接时按控制模式自动检测：识别到 WBC 统一关节话题时使用 `/ocs2_wbc_controller/` 前缀，否则使用 `/body_joint_controller/` 前缀；不跨模式回退。显式配置的话题优先保留。需要控制器提供相应能力。
