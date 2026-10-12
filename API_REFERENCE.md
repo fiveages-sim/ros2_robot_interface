@@ -1826,6 +1826,35 @@ interface.send_fsm_command(5)
 
 **异常：** 同 `get_original_wrench`。
 
+#### `set_surface_tracking(enable: bool, max_bias_angle_deg: float = 15.0, timeout_sec: float = 5.0) -> None`
+
+**功能：** 开启/关闭曲面追踪并配置最大偏置角；角度输入使用 **度（°）**，内部转换为弧度。
+
+**原理：** 调用 `/set_surface_tracking`，类型为 `arms_ros2_control_msgs/srv/SetSurfaceTracking`。
+`connect()` 创建客户端；旧消息包缺少该类型时不影响原有功能，但调用此方法会报错。
+
+**参数：**
+- `enable`: 是否开启追踪，必须为 bool。
+- `max_bias_angle_deg`: 最大偏置角（度），默认 `15.0`，必须有限且非负；关闭时也会发送此值。
+- `timeout_sec`: 等待服务可用及等待服务响应各自的超时（秒），默认 `5.0`，必须有限且正。参数查询/写入沿用已有方法的超时，不受此值控制。
+
+**开启顺序：** 检查当前 FSM 为 COMPLIANCE → 等待服务可用 → 读取控制器的
+`compliance_task_selection`，保留前三轴并将后三轴设为 `[0.0, 0.0, 0.0]`（Rx/Ry/Rz 位控）
+→ 确认参数写入成功 → 调用曲面追踪服务。关闭不检查 FSM，也不修改轴控制选择。
+不会自动切换状态或发起 FT 校准；实际追踪仍要求 FT 有效且完成校准。
+
+**返回/异常：** `success=True` 时正常返回 `None`；未连接抛 `ROS2NotConnectedError`；
+参数非法抛 `ValueError`；状态不符、参数读取/写入失败、服务不可用、响应超时或拒绝抛 `ROS2InterfaceError`。
+服务失败不会回滚已写入的位控设置；响应超时表示结果未知，控制器仍可能执行请求。
+本方法为阻塞调用，请在用户线程调用，不要在 executor 回调中调用。
+
+**示例：**
+```python
+interface.set_surface_tracking(True, 15.0)  # 需已在 COMPLIANCE，开启并设置旋转轴位控
+interface.set_surface_tracking(True, 30.0)  # 最大偏置角改为 30°
+interface.set_surface_tracking(False)       # 关闭，保留当前轴控制选择
+```
+
 #### `call_compliance_zero_wrench(timeout_sec: float = 5.0) -> None`
 
 **功能：** 发起零力校准。**只请求，不等待校准完成**；结束请自行观察 `/compliance_force_status.zero_cal_done`。

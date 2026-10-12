@@ -121,6 +121,7 @@ class ROS2RobotInterface:
         self._latest_wrench_filtered_left: Dict[str, Any] | None = None
         self._latest_wrench_filtered_right: Dict[str, Any] | None = None
         self.compliance_zero_wrench_client: Client | None = None
+        self.surface_tracking_client: Client | None = None
         self.target_path_pub: Publisher | None = None
         self.execute_path_client: Client | None = None
         self.joint_trajectory_action_client: ActionClient | None = None
@@ -794,6 +795,15 @@ class ROS2RobotInterface:
             self.compliance_zero_wrench_client = self.robot_node.create_client(
                 Trigger, "/compliance_zero_wrench"
             )
+            try:
+                from arms_ros2_control_msgs.srv import SetSurfaceTracking
+            except ImportError:
+                logger.info("SetSurfaceTracking is unavailable; surface tracking interface disabled")
+            else:
+                self.surface_tracking_client = self.robot_node.create_client(
+                    SetSurfaceTracking, "/set_surface_tracking"
+                )
+                logger.info("Created service client for /set_surface_tracking")
 
             # Initialize TF buffer first (needed by ArmHandler)
             self.tf_buffer = tf2_ros.Buffer()
@@ -2363,6 +2373,83 @@ class ROS2RobotInterface:
         ok = self.set_node_parameters(ctrl, params)
         if not ok:
             raise ROS2InterfaceError(f"Failed to set compliance force parameters on {ctrl}")
+
+    def set_surface_tracking(
+        self,
+        enable: bool,
+        max_bias_angle_deg: float = 15.0,
+        timeout_sec: float = 5.0,
+    ) -> None:
+        """配置曲面追踪，最大偏置角以度输入。
+
+        开启时要求当前为 COMPLIANCE，并保留前三轴控制选择，将后三轴设为位控。
+        关闭时不检查 FSM、不修改控制选择。不会自动切换状态或执行 FT 校准。
+
+        Args:
+            enable: 是否开启追踪。
+            max_bias_angle_deg: 最大偏置角（度），必须有限且非负。
+            timeout_sec: 等待服务可用及等待响应各自的超时（秒），必须有限且正。
+
+        Raises:
+            ROS2NotConnectedError: 接口未连接。
+            ValueError: 输入参数非法。
+            ROS2InterfaceError: 状态不符、参数读取/设置失败或服务调用失败。
+
+        服务调用失败时，已写入的旋转轴位控设置不会回滚。
+        成功仅表示配置完成；实际追踪还要求 FT 有效且完成校准。
+        请在用户线程调用，不要在 executor 回调内调用。
+        """
+        if not self.is_connected:
+            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+        if not isinstance(enable, bool):
+            raise ValueError("enable must be a bool")
+        angle = float(max_bias_angle_deg)
+        if not math.isfinite(angle) or angle < 0.0:
+            raise ValueError("max_bias_angle_deg must be finite and >= 0 (degrees)")
+        timeout = float(timeout_sec)
+        if not math.isfinite(timeout) or timeout <= 0.0:
+            raise ValueError("timeout_sec must be finite and > 0")
+        client = self.surface_tracking_client
+        if client is None:
+            raise ROS2InterfaceError(
+                "SetSurfaceTracking client not initialized; install/source an updated arms_ros2_control_msgs"
+            )
+        if enable and self.get_fsm_state() != FSM_COMPLIANCE:
+            raise ROS2InterfaceError("Surface tracking requires COMPLIANCE; enter COMPLIANCE first")
+        if not client.wait_for_service(timeout_sec=timeout):
+            raise ROS2InterfaceError("/set_surface_tracking service not available")
+        if enable:
+            ctrl = self.arm_controller
+            if not ctrl:
+                raise ROS2InterfaceError("Cannot resolve arm_controller node for surface tracking")
+            selection = next(
+                (p["value"] for p in self.list_node_parameters(ctrl)
+                 if p["name"] == "compliance_task_selection"),
+                None,
+            )
+            if not isinstance(selection, (list, tuple)) or len(selection) != 6:
+                raise ROS2InterfaceError("Cannot read six-axis compliance_task_selection")
+            position_selection = [float(x) for x in selection[:3]] + [0.0, 0.0, 0.0]
+            if not self.set_node_parameters(ctrl, {"compliance_task_selection": position_selection}):
+                raise ROS2InterfaceError("Failed to set rotation axes to position control")
+        from arms_ros2_control_msgs.srv import SetSurfaceTracking
+
+        request = SetSurfaceTracking.Request()
+        request.enable = enable
+        request.max_bias_angle = math.radians(angle)
+        future = client.call_async(request)
+        if not self._wait_for_future_done(future, timeout):
+            raise ROS2InterfaceError("set_surface_tracking service call timed out; outcome unknown")
+        try:
+            response = future.result()
+        except Exception as exc:
+            raise ROS2InterfaceError("set_surface_tracking service call failed") from exc
+        if response is None:
+            raise ROS2InterfaceError("set_surface_tracking service call failed")
+        if not response.success:
+            raise ROS2InterfaceError(
+                f"set_surface_tracking rejected: {getattr(response, 'message', '')}"
+            )
 
     def call_compliance_zero_wrench(self, timeout_sec: float = 5.0) -> None:
         """Request FT zero calibration (Trigger). Does not wait for zero_cal_done."""
@@ -4625,6 +4712,9 @@ class ROS2RobotInterface:
         if self.compliance_zero_wrench_client:
             self.compliance_zero_wrench_client.destroy()
             self.compliance_zero_wrench_client = None
+        if self.surface_tracking_client:
+            self.surface_tracking_client.destroy()
+            self.surface_tracking_client = None
 
         # Cleanup arm handlers
         if self.left_arm_handler:
