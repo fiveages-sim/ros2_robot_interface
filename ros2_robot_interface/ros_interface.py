@@ -4366,9 +4366,13 @@ class ROS2RobotInterface:
         from geometry_msgs.msg import PoseStamped
         import math
 
+        from builtin_interfaces.msg import Time as TimeMsg
+
         goal_pose = PoseStamped()
         goal_pose.header.frame_id = frame_id
-        goal_pose.header.stamp = self.robot_node.get_clock().now().to_msg()
+        # Time(0) = "latest TF". Wall-clock stamps break Isaac GT (sim TF at t≈19s vs
+        # wall t≈1.7e9) → Nav2 ABORT status=6 when transforming base_footprint→map.
+        goal_pose.header.stamp = TimeMsg(sec=0, nanosec=0)
         goal_pose.pose.position.x = float(x)
         goal_pose.pose.position.y = float(y)
         goal_pose.pose.position.z = 0.0
