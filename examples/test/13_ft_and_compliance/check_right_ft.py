@@ -22,14 +22,19 @@ def main():
         interface.connect()
         print(f"右手 FT topic: {interface.config.right_ft_wrench_topic}", flush=True)
         print("每秒打印一次，按 Ctrl+C 停止。", flush=True)
+        start_time = time.monotonic()
         while True:
             time.sleep(1.0)
             try:
                 wrench = interface.get_original_wrench("right")
+                fx, fy, fz = wrench["force"]
+                tx, ty, tz = wrench["torque"]
                 print(
-                    f"force [N] (x, y, z)={wrench['force']} "
-                    f"torque [N·m] (x, y, z)={wrench['torque']} "
-                    f"frame_id={wrench['frame_id']!r} stamp={wrench['stamp']}",
+                    f"\n[{time.monotonic() - start_time:7.1f} s] "
+                    f"坐标系: {wrench['frame_id']} | "
+                    f"消息时间戳: {wrench['stamp']:.3f}\n"
+                    f"  力   [N]   Fx={fx:+9.3f}  Fy={fy:+9.3f}  Fz={fz:+9.3f}\n"
+                    f"  力矩 [N·m] Tx={tx:+9.3f}  Ty={ty:+9.3f}  Tz={tz:+9.3f}",
                     flush=True,
                 )
             except ROS2InterfaceError as exc:
