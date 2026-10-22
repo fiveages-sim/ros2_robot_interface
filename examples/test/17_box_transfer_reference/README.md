@@ -2,7 +2,7 @@
 
 测试脚本：`run_box_transfer.py`。只执行机器人头、腰、双臂动作，不移动底盘、不接入视觉、不操作夹爪。
 使用 2026-10-22 日志去重后的平均目标替代视觉，测试动作编排和目标到位；不等同原业务流程回放。
-原配置和日志位于工作区 `shunfeng/`；脚本内嵌平均目标，运行时只读取 `task_config.json`。
+配置 `task_config.json` 位于脚本同目录，原日志位于工作区 `shunfeng/`；脚本内嵌平均目标，运行时只读取配置。
 
 ## 默认执行
 
@@ -41,7 +41,7 @@ python3 run_box_transfer.py --level high --dry-run
 ```
 
 预览打印每一步的目标；pose 单位为米，关节目标打印为度，执行时转换为弧度。
-默认读取工作区 `shunfeng/task_config.json`，也可用 `--config /absolute/path/task_config.json`。
+默认读取脚本同目录的 `task_config.json`，也可用 `--config /absolute/path/task_config.json`。
 默认取箱点 A、放箱点 G；可用 `--station` / `--place` 修改配置来源。
 平均视觉目标仍来自整份历史日志，修改站点不会重新计算平均值。
 `--body-layers` 和 `--quaternion-order` 仍可覆盖默认值。

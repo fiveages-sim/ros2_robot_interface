@@ -162,7 +162,7 @@ def execute(steps, args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--config', type=Path, default=Path(__file__).resolve().parents[5]/'shunfeng/task_config.json')
+    parser.add_argument('--config', type=Path, default=Path(__file__).resolve().with_name('task_config.json'))
     parser.add_argument('--level', choices=['low','middle','high','all'], default='all')
     parser.add_argument('--station', default='A')
     parser.add_argument('--place', default='G')
