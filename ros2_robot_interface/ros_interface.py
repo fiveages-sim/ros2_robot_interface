@@ -11,7 +11,7 @@ import re
 import sys
 import threading
 import time
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import rclpy
@@ -60,25 +60,21 @@ from .utils.discovery import (
     set_node_parameters as _set_node_parameters,
 )
 
+if TYPE_CHECKING:
+    from .dynamics.com_estimator import ComEstimate, ComEstimator
+
 logger = logging.getLogger(__name__)
 
 
 class ROS2RobotInterface:
     """Interface for communicating with ROS 2 robots."""
 
-    # BODY_HEAD_COUPLED exists on some stacks (ros2_ws / S2); fa_w2_ws uses
-    # separate head_state instead and omits that body constant — keep optional.
     BODY_MODE_TO_STATE: Dict[str, int] = {
         "BODY_FREE": WbcCurrentState.BODY_FREE,
         "BODY_RELATIVE": WbcCurrentState.BODY_VERTICAL,
         "BODY_VERTICAL": WbcCurrentState.BODY_VERTICAL,  # backward-compatible alias
         "BODY_TRACKING": WbcCurrentState.BODY_TRACKING,
         "BODY_LOCK": WbcCurrentState.BODY_LOCKED,
-        **(
-            {"BODY_HEAD_COUPLED": WbcCurrentState.BODY_HEAD_COUPLED}
-            if hasattr(WbcCurrentState, "BODY_HEAD_COUPLED")
-            else {}
-        ),
     }
     BODY_MODE_TO_COMMAND: Dict[str, str] = {
         "BODY_FREE": "BODY_FREE",
@@ -86,11 +82,6 @@ class ROS2RobotInterface:
         "BODY_VERTICAL": "BODY_RELATIVE",  # backward-compatible alias
         "BODY_TRACKING": "BODY_TRACKING",
         "BODY_LOCK": "BODY_LOCK",
-        **(
-            {"BODY_HEAD_COUPLED": "BODY_HEAD_COUPLED"}
-            if hasattr(WbcCurrentState, "BODY_HEAD_COUPLED")
-            else {}
-        ),
     }
     # /mode_command 字符串 → (WbcCurrentState 字段名, 期望常量值)
     # BODY_* 由 BODY_MODE_TO_STATE 派生，避免双份维护
@@ -98,6 +89,10 @@ class ROS2RobotInterface:
         **{k: ("body_state", v) for k, v in BODY_MODE_TO_STATE.items()},
         "ARMS_COUPLED": ("bimanual_state", WbcCurrentState.BIMANUAL_COUPLED),
         "ARMS_INDEPENDENT": ("bimanual_state", WbcCurrentState.BIMANUAL_INDEPENDENT),
+        "HEAD_DISABLE": ("head_state", WbcCurrentState.HEAD_DISABLED),
+        "HEAD_TRACKING": ("head_state", WbcCurrentState.HEAD_TRACKING),
+        "HEAD_GAZE": ("head_state", WbcCurrentState.HEAD_GAZE),
+        "HEAD_FORWARD": ("head_state", WbcCurrentState.HEAD_FORWARD),
         "BASE_LOCK": ("base_state", WbcCurrentState.BASE_LOCKED),
         "BASE_UNLOCK": ("base_state", WbcCurrentState.BASE_UNLOCKED),
     }
@@ -151,6 +146,7 @@ class ROS2RobotInterface:
         self.waist_lifting_pose_absolute_pub: Publisher | None = None
         self.waist_lifting_command_pub: Publisher | None = None
         self.waist_turning_command_pub: Publisher | None = None
+        self.waist_phi_command_pub: Publisher | None = None
 
         self.latest_joint_state: Dict[str, Any] | None = None
         self.latest_categorized_joint_state: Dict[str, Any] | None = None  # Cached categorized state
@@ -170,6 +166,8 @@ class ROS2RobotInterface:
         # Robot description tracking
         self.latest_robot_description: Optional[str] = None
         self._robot_description_received = False
+        self._com_estimator: Optional["ComEstimator"] = None
+        self._com_estimator_urdf: Optional[str] = None
         self._connected = False
         
         self.last_joint_state_time = 0.0
@@ -304,7 +302,7 @@ class ROS2RobotInterface:
     ) -> bool:
         """Auto-detect robot configuration from topics. Returns True if dual-arm detected."""
         is_dual_arm = False
-        self.is_wbc = False
+        self.is_wbc = "/ocs2_wbc_controller/target_joint_position" in topic_names
         self._wbc_has_body_joint_topic = False
         self._wbc_has_head_joint_topic = False
         
@@ -422,12 +420,6 @@ class ROS2RobotInterface:
             self.config.body_target_topic = "/body_target"
             logger.info("Detected body target topic: /body_target")
 
-        if "/body_joint_controller/waist_lifting" in topic_names:
-            self.config.waist_lifting_topic = "/body_joint_controller/waist_lifting"
-        elif "/ocs2_wbc_controller/waist_lifting" in topic_names:
-            self.config.waist_lifting_topic = "/ocs2_wbc_controller/waist_lifting"
-            logger.info("Detected WBC waist lifting topic")
-
         if "/body_joint_controller/waist_lifting_pose_relative" in topic_names:
             self.config.waist_lifting_pose_relative_topic = "/body_joint_controller/waist_lifting_pose_relative"
         elif "/ocs2_wbc_controller/waist_lifting_pose_relative" in topic_names:
@@ -456,18 +448,20 @@ class ROS2RobotInterface:
                     logger.info(f"Detected waist lifting pose action: {candidate}")
                     break
 
-        if "/body_joint_controller/waist_lifting_command" in topic_names:
-            self.config.waist_lifting_command_topic = "/body_joint_controller/waist_lifting_command"
-        elif "/ocs2_wbc_controller/waist_lifting_command" in topic_names:
-            self.config.waist_lifting_command_topic = "/ocs2_wbc_controller/waist_lifting_command"
-            logger.info("Detected WBC waist lifting command topic")
+        # Follow the detected controller mode; publisher-only split topics may
+        # remain visible in a WBC deployment and must not win discovery.
+        waist_prefix = "/ocs2_wbc_controller" if self.is_wbc else "/body_joint_controller"
+        for field, suffix in (
+            ("waist_lifting_command_topic", "waist_lifting_command"),
+            ("waist_turning_command_topic", "waist_turning_command"),
+            ("waist_phi_command_topic", "waist_phi_command"),
+        ):
+            if getattr(self.config, field) is None:
+                candidate = f"{waist_prefix}/{suffix}"
+                if candidate in topic_names:
+                    setattr(self.config, field, candidate)
+                    logger.info(f"Detected waist command topic: {candidate}")
 
-        if "/body_joint_controller/waist_turning_command" in topic_names:
-            self.config.waist_turning_command_topic = "/body_joint_controller/waist_turning_command"
-        elif "/ocs2_wbc_controller/waist_turning_command" in topic_names:
-            self.config.waist_turning_command_topic = "/ocs2_wbc_controller/waist_turning_command"
-            logger.info("Detected WBC waist turning command topic")
-        
         # 检测灵巧手关节控制器 topic
         if "/left_hand_controller/target_joint_position" in topic_names:
             self.config.left_hand_joint_controller_topic = "/left_hand_controller/target_joint_position"
@@ -914,11 +908,6 @@ class ROS2RobotInterface:
                 )
                 logger.info(f"Created head joint trajectory publisher: {self.config.head_joint_trajectory_topic}")
 
-            if self.config.waist_lifting_topic:
-                self.waist_lifting_pub = self.robot_node.create_publisher(
-                    Float64, self.config.waist_lifting_topic, 10
-                )
-
             if self.config.waist_lifting_pose_relative_topic:
                 self.waist_lifting_pose_relative_pub = self.robot_node.create_publisher(
                     Float64MultiArray, self.config.waist_lifting_pose_relative_topic, 10
@@ -937,6 +926,11 @@ class ROS2RobotInterface:
             if self.config.waist_turning_command_topic:
                 self.waist_turning_command_pub = self.robot_node.create_publisher(
                     Float64, self.config.waist_turning_command_topic, 10
+                )
+
+            if self.config.waist_phi_command_topic:
+                self.waist_phi_command_pub = self.robot_node.create_publisher(
+                    Float64, self.config.waist_phi_command_topic, 10
                 )
             
             if self.config.left_hand_joint_controller_topic:
@@ -2609,6 +2603,55 @@ class ROS2RobotInterface:
             True if robot description has been received, False otherwise.
         """
         return self._robot_description_received
+
+    def _latest_joint_positions_by_name(self) -> Dict[str, float]:
+        """Return latest joint positions keyed by joint name."""
+        if not self.latest_joint_state:
+            return {}
+        names = self.latest_joint_state.get("names") or []
+        positions = self.latest_joint_state.get("positions") or []
+        return {
+            str(name): float(position)
+            for name, position in zip(names, positions)
+        }
+
+    def get_center_of_mass(
+        self,
+        *,
+        frame_id: str = "base_footprint",
+        allow_missing_with_neutral: bool = False,
+    ) -> Optional["ComEstimate"]:
+        """Compute robot center of mass from cached robot_description and joint_states.
+
+        Returns:
+            `ComEstimate` if URDF and joint states are available, otherwise `None`.
+
+        Raises:
+            ComEstimatorError: if Pinocchio is unavailable or required q joints are missing.
+        """
+        from .dynamics.com_estimator import ComEstimator
+
+        if not self.latest_robot_description:
+            logger.warning("Cannot compute CoM: /robot_description has not been received")
+            return None
+
+        joint_positions = self._latest_joint_positions_by_name()
+        if not joint_positions:
+            logger.warning("Cannot compute CoM: /joint_states has not been received")
+            return None
+
+        if (
+            self._com_estimator is None
+            or self._com_estimator_urdf != self.latest_robot_description
+            or self._com_estimator.frame_id != frame_id
+        ):
+            self._com_estimator = ComEstimator(self.latest_robot_description, frame_id=frame_id)
+            self._com_estimator_urdf = self.latest_robot_description
+
+        return self._com_estimator.compute(
+            joint_positions,
+            allow_missing_with_neutral=allow_missing_with_neutral,
+        )
     
     def send_head_joint_positions(self, positions: List[float]) -> None:
         """Send target joint positions for head joints."""
@@ -2761,22 +2804,6 @@ class ROS2RobotInterface:
         self.body_target_stamped_pub.publish(msg)
         logger.debug(f"Published body target (stamped) in frame '{frame_id}': {pose}")
 
-    def send_waist_lifting_relative_position(self, position: float) -> None:
-        """Send target relative position for waist lifting."""
-        if not self.is_connected:
-            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
-        
-        if self.waist_lifting_pub is None:
-            logger.warning("Waist lifting publisher not initialized. Set waist_lifting_topic in config.")
-            return
-
-        self.auto_switch_fsm_for_control("body_joint")
-        
-        msg = Float64()
-        msg.data = position
-        self.waist_lifting_pub.publish(msg)
-        logger.debug(f"Published waist lifting relative position: {position}")
-
     def send_waist_lifting_pose_relative(self, dx: float, dz: float, dphi: float) -> None:
         """Send local relative waist x/z/phi delta.
 
@@ -2911,11 +2938,10 @@ class ROS2RobotInterface:
         if not self.is_connected:
             raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
         
-        if self.waist_lifting_pub is None:
-            logger.warning("Waist lifting publisher not initialized. Set waist_lifting_command_topic in config.")
+        if self.waist_lifting_command_pub is None:
+            logger.warning("Waist lifting command publisher not initialized. Set waist_lifting_command_topic in config.")
             return
 
-        self.auto_switch_fsm_for_control("body_joint")
         
         velocity_scale = max(min(velocity_scale, 1),-1)
         
@@ -2929,11 +2955,10 @@ class ROS2RobotInterface:
         if not self.is_connected:
             raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
         
-        if self.waist_lifting_pub is None:
-            logger.warning("Waist turning publisher not initialized. Set waist_turning_command_topic in config.")
+        if self.waist_turning_command_pub is None:
+            logger.warning("Waist turning command publisher not initialized. Set waist_turning_command_topic in config.")
             return
 
-        self.auto_switch_fsm_for_control("body_joint")
         
         velocity_scale = max(min(velocity_scale, 1),-1)
         
@@ -2941,6 +2966,26 @@ class ROS2RobotInterface:
         msg.data = velocity_scale
         self.waist_turning_command_pub.publish(msg)
         logger.debug(f"Published waist turning velocity_scale: {velocity_scale}")
+
+    def send_waist_phi_velocity_scale(self, velocity_scale: float) -> None:
+        """Send target velocity scale for body_joint3 phi control.
+
+        Non-zero values start continuous speed control. Send 0.0 to stop.
+        """
+        if not self.is_connected:
+            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+
+        if self.waist_phi_command_pub is None:
+            logger.warning("Waist phi command publisher not initialized. Set waist_phi_command_topic in config.")
+            return
+
+
+        velocity_scale = max(min(velocity_scale, 1), -1)
+
+        msg = Float64()
+        msg.data = velocity_scale
+        self.waist_phi_command_pub.publish(msg)
+        logger.debug(f"Published waist phi velocity_scale: {velocity_scale}")
     
     def send_left_hand_joint_positions(self, positions: List[float]) -> None:
         """Send target joint positions for left hand joints."""
@@ -4691,6 +4736,10 @@ class ROS2RobotInterface:
         if self.waist_turning_command_pub:
             self.waist_turning_command_pub.destroy()
             self.waist_turning_command_pub = None
+
+        if self.waist_phi_command_pub:
+            self.waist_phi_command_pub.destroy()
+            self.waist_phi_command_pub = None
 
         if self._nav_action_client is not None:
             self._nav_action_client.destroy()

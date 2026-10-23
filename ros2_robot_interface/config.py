@@ -69,11 +69,11 @@ class ROS2RobotInterfaceConfig:
     body_joint_trajectory_topic: str | None = None  # 【可自动检测】split 躯干多路点轨迹话题（JointTrajectory），例如 "/body_joint_controller/target_joint_trajectory"；WBC 复用统一 WBC trajectory，不检测
     left_hand_joint_controller_topic: str | None = None  # 【可自动检测】左灵巧手关节控制器话题，例如 "/left_hand_controller/target_joint_position"
     right_hand_joint_controller_topic: str | None = None  # 【可自动检测】右灵巧手关节控制器话题，例如 "/right_hand_controller/target_joint_position"
-    waist_lifting_topic: str | None = None  # 【可自动检测】腰部升降相对位置控制话题，例如 "/body_joint_controller/waist_lifting"
     waist_lifting_pose_relative_topic: str | None = None  # 【可自动检测】腰部局部 x/z/phi 相对移动话题，例如 "/body_joint_controller/waist_lifting_pose_relative" 或 "/ocs2_wbc_controller/waist_lifting_pose_relative"
     waist_lifting_pose_absolute_topic: str | None = None  # 【可自动检测】腰部 x/z/phi 绝对目标话题，例如 "/body_joint_controller/waist_lifting_pose_absolute" 或 "/ocs2_wbc_controller/waist_lifting_pose_absolute"
     waist_lifting_command_topic: str | None = None  # 【可自动检测】腰部升降速度控制话题，例如 "/body_joint_controller/waist_lifting_command"
     waist_turning_command_topic: str | None = None  # 【可自动检测】腰部旋转速度控制话题，例如 "/body_joint_controller/waist_turning_command"
+    waist_phi_command_topic: str | None = None  # 【可自动检测】body_joint3 phi 速度控制话题，例如 "/body_joint_controller/waist_phi_command" 或 "/ocs2_wbc_controller/waist_phi_command"
     body_joint_current_target_topic: str | None = None  # 【可自动检测】腰部关节控制器话题，例如 "/body_joint_controller/target_joint_position"
     body_current_pose_topic: str | None = None  # 【可自动检测】body 当前笛卡尔位姿话题（PoseStamped），例如 "/body_current_pose"，用于 body pose 到位判定
     body_current_target_pose_topic: str | None = None  # 【可自动检测】body 目标笛卡尔位姿话题（PoseStamped），例如 "/body_current_target"，用于 body pose 到位判定

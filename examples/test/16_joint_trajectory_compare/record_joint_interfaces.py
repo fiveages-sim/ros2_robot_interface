@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""记录 controller_manager introspection 中手臂关节空间的接口数值。
+"""记录 controller_manager introspection 中手臂与腰部关节空间的接口数值。
 
 数据源：/controller_manager/introspection_data/full
   (pal_statistics_msgs/msg/Statistics，controller_manager 每个周期发布)
   其中以 state_interface.<joint>/<field> / command_interface.<joint>/<field>
-  的形式携带所有硬件接口的实时数值。本脚本过滤出手臂关节
-  (left_jointN / right_jointN，随分体/双臂/全身模式自动变化)。
+  的形式携带所有硬件接口的实时数值。本脚本过滤出手臂与腰部关节
+  (left_jointN / right_jointN，随分体/双臂/全身模式自动变化；body_jointN
+  为腰部，机器人没有 body 系统时自动为空)。
 
 默认只记录 position（状态角 + 指令角）；需要 effort/velocity 时用
 --fields 指定，如 --fields position,velocity,effort。
@@ -38,10 +39,10 @@ from rclpy.signals import SignalHandlerOptions
 
 from pal_statistics_msgs.msg import Statistics
 
-# state_interface.left_joint3/velocity、command_interface.right_joint1/position 等；
+# state_interface.left_joint3/velocity、command_interface.body_joint1/position 等；
 # 排除 xxx.is_limited 附加项。字段再由 --fields 过滤。
 IFACE_RE = re.compile(
-    r"^(state|command)_interface\.((?:left|right)_joint\d+)"
+    r"^(state|command)_interface\.((?:left|right|body)_joint\d+)"
     r"/(position|velocity|effort)$")
 
 VALID_FIELDS = ("position", "velocity", "effort")
@@ -99,14 +100,20 @@ class IfaceRecorder(Node):
                 row.extend([float("nan")] * len(new_cols))
             self.w.writerow(["stamp", "elapsed_s"] + self.columns)
             self.f.flush()
-            # 手臂关节数校验：分体=7、双臂/全身=14（body/head/工具关节均不应匹配）。
-            # 不符说明命名约定变了，此时 CSV 内容未必是手臂，需人工核对。
+            # 关节数校验：手臂分体=7、双臂/全身=14；腰部 body_joint1~4，机器人
+            # 没有 body 系统时为 0（head/工具关节均不应匹配）。不符说明命名约定
+            # 变了，此时 CSV 内容未必是手臂/腰部，需人工核对。
             joints = sorted({c.split(".")[1].rsplit("/", 1)[0] for c in self.columns})
-            if len(joints) not in (7, 14):
+            arm = [j for j in joints if j.startswith(("left_", "right_"))]
+            waist = [j for j in joints if j.startswith("body_")]
+            if len(arm) not in (7, 14) or len(waist) not in (0, 4):
                 self.get_logger().warn(
-                    f"匹配到 {len(joints)} 个关节，与预期(分体7/双臂14)不符: {joints}")
+                    f"匹配到手臂 {len(arm)} 个(预期 分体7/双臂14)、"
+                    f"腰部 {len(waist)} 个(预期 0/4)，与预期不符: {joints}")
             else:
-                self.get_logger().info(f"记录手臂关节 {len(joints)} 个: {joints}")
+                self.get_logger().info(
+                    f"记录手臂关节 {len(arm)} 个: {arm}；"
+                    f"腰部关节 {len(waist)} 个: {waist}")
         elapsed = time.time() - self.t0
         self.w.writerow(
             [f"{msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9:.9f}",
@@ -196,7 +203,7 @@ const cv = document.getElementById('chart'), ctx = cv.getContext('2d');
 const tip = document.getElementById('tip');
 const COLORS = ['#1f77b4','#ff7f0e','#2ca02c','#d62728','#9467bd','#8c564b',
                 '#e377c2','#bcbd22','#17becf','#f39c12','#7f8c8d','#e74c3c',
-                '#00b894','#fd79a8'];
+                '#00b894','#fd79a8','#6c5ce7','#00cec9','#dfe6e9','#a29bfe'];
 let x0 = D.t[0], x1 = D.t[D.t.length-1] || 1;
 let metric = 'state';
 let visible = new Set(D.joints);
@@ -345,7 +352,8 @@ layout();
 
 
 def main():
-    parser = argparse.ArgumentParser(description="记录手臂关节接口数值(controller_manager introspection)")
+    parser = argparse.ArgumentParser(
+        description="记录手臂与腰部关节接口数值(controller_manager introspection)")
     record_root = os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "record_data")
     parser.add_argument(

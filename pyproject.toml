@@ -30,6 +30,7 @@ dependencies = [
     "rclpy",
     "sensor-msgs",
     "geometry-msgs",
+    "visualization-msgs",
     "std-msgs",
     "nav-msgs",
     "numpy",
