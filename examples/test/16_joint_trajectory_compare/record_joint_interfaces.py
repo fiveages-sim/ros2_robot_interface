@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""记录 controller_manager introspection 中手臂与腰部关节空间的接口数值。
+"""记录 controller_manager introspection 中手臂、腰部与头部关节空间的接口数值。
 
 数据源：/controller_manager/introspection_data/full
   (pal_statistics_msgs/msg/Statistics，controller_manager 每个周期发布)
   其中以 state_interface.<joint>/<field> / command_interface.<joint>/<field>
-  的形式携带所有硬件接口的实时数值。本脚本过滤出手臂与腰部关节
+  的形式携带所有硬件接口的实时数值。本脚本过滤出手臂、腰部与头部关节
   (left_jointN / right_jointN，随分体/双臂/全身模式自动变化；body_jointN
-  为腰部，机器人没有 body 系统时自动为空)。
+  为腰部，head_jointN 为头部；不存在的部位自动为空)。
 
 默认只记录 position（状态角 + 指令角）；需要 effort/velocity 时用
 --fields 指定，如 --fields position,velocity,effort。
@@ -42,7 +42,7 @@ from pal_statistics_msgs.msg import Statistics
 # state_interface.left_joint3/velocity、command_interface.body_joint1/position 等；
 # 排除 xxx.is_limited 附加项。字段再由 --fields 过滤。
 IFACE_RE = re.compile(
-    r"^(state|command)_interface\.((?:left|right|body)_joint\d+)"
+    r"^(state|command)_interface\.((?:left|right|body|head)_joint\d+)"
     r"/(position|velocity|effort)$")
 
 VALID_FIELDS = ("position", "velocity", "effort")
@@ -101,19 +101,22 @@ class IfaceRecorder(Node):
             self.w.writerow(["stamp", "elapsed_s"] + self.columns)
             self.f.flush()
             # 关节数校验：手臂分体=7、双臂/全身=14；腰部 body_joint1~4，机器人
-            # 没有 body 系统时为 0（head/工具关节均不应匹配）。不符说明命名约定
+            # 没有 body 系统时为 0；头部 head_joint1~2，不存在时为 0。不符说明命名约定
             # 变了，此时 CSV 内容未必是手臂/腰部，需人工核对。
             joints = sorted({c.split(".")[1].rsplit("/", 1)[0] for c in self.columns})
             arm = [j for j in joints if j.startswith(("left_", "right_"))]
             waist = [j for j in joints if j.startswith("body_")]
-            if len(arm) not in (7, 14) or len(waist) not in (0, 4):
+            head = [j for j in joints if j.startswith("head_")]
+            if len(arm) not in (7, 14) or len(waist) not in (0, 4) or len(head) not in (0, 2):
                 self.get_logger().warn(
                     f"匹配到手臂 {len(arm)} 个(预期 分体7/双臂14)、"
-                    f"腰部 {len(waist)} 个(预期 0/4)，与预期不符: {joints}")
+                    f"腰部 {len(waist)} 个(预期 0/4)、"
+                    f"头部 {len(head)} 个(预期 0/2)，与预期不符: {joints}")
             else:
                 self.get_logger().info(
                     f"记录手臂关节 {len(arm)} 个: {arm}；"
-                    f"腰部关节 {len(waist)} 个: {waist}")
+                    f"腰部关节 {len(waist)} 个: {waist}；"
+                    f"头部关节 {len(head)} 个: {head}")
         elapsed = time.time() - self.t0
         self.w.writerow(
             [f"{msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9:.9f}",
@@ -353,7 +356,7 @@ layout();
 
 def main():
     parser = argparse.ArgumentParser(
-        description="记录手臂与腰部关节接口数值(controller_manager introspection)")
+        description="记录手臂、腰部与头部关节接口数值(controller_manager introspection)")
     record_root = os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "record_data")
     parser.add_argument(
