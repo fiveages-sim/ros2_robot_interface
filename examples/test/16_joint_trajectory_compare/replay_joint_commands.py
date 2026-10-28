@@ -1,27 +1,32 @@
 #!/usr/bin/env python3
-"""按原始采样频率回放录制的左臂、右臂或双臂 position command interface。
+"""按原始采样频率回放录制的左臂、右臂、双臂或全身 position command interface。
 
 脚本启动后扫描同目录 ``record_data/*/joint_interfaces.csv``，按修改时间倒序
-列出所有录制会话并询问要回放哪一个，再选择双臂（默认）、左臂或右臂。
+列出所有录制会话并询问要回放哪一个，再选择双臂（默认）、左臂、右臂或全身。
+启动时根据目标话题的实际订阅者识别 WBC 或手臂控制器。
+WBC 双臂/全身模式通过统一话题发布 20 关节（body、left、right、head）；
+双臂模式的腰部/头部，以及全身模式缺失的指令，固定为 HOLD 后的位置。
+WBC 单臂使用 left/right 分话题；分体控制仅提供手臂回放。
+已有指令列中的空值或非有限值会报错。
 双臂优先通过统一话题一次发布 14 个关节；统一话题不存在时回退到左右分话题。
 发布频率由 CSV ``stamp`` 的相邻正时间差中位数推算，失败时回退到
 ``elapsed_s``，不再固定假设为 500 Hz。
 
 本脚本流程：
-    1. 选择模式并完整校验 CSV，同时推算整数发布频率。
+    1. 检测控制器，选择可用模式并完整校验 CSV，同时推算整数发布频率。
     2. 连接 ROS 2 并确认 HOLD；无条件使用 5 秒 linear MoveJ 发送录制首点，
-       随后固定等待 5 秒，不读取当前位置或判断是否实际到位。
+       随后固定等待 5 秒，不判断是否实际到位；WBC 双臂或全身缺列时先读取保持位置。
     3. 在 HOLD 中将插值设为 ``none`` 并完成安全倒计时，然后切换 MOVEJ。
     4. 以 ``--plot`` 启动 recorder，按原始采样频率从 CSV 第一行逐行发布。
     5. 最后一行发布后等待实际关节到位，再停止 recorder。
     6. finally 中切换 HOLD，恢复原有插值参数和 MoveJ 时长并销毁节点。
 
 前置条件：
-    - ROS 2 已 source，``ocs2_arm_controller`` 与真实机器人/仿真正在运行。
+    - ROS 2 已 source，所选模式的 ``ocs2_arm_controller`` 或 ``ocs2_wbc_controller`` 正在运行。
     - ``record_data`` 的会话子目录中存在 ``joint_interfaces.csv``。
     - CSV 包含所选手臂的 position command interface 列，单位为弧度。
     - 脚本不检查目标话题是否存在多个 publisher；使用者必须自行避免 teleop、
-      RViz 或其他节点与回放脚本同时发送手臂控制指令。
+      RViz 或其他节点与回放脚本同时发送关节控制指令。
     - 回放期间不得从其他节点修改控制器的 MoveJ 插值或时长参数。
     - 仿真环境必须追加 ``--ros-args -p use_sim_time:=true``，确保本节点与
       ``/joint_states`` 使用同一个 ROS 时钟。
@@ -30,7 +35,7 @@
     python replay_joint_commands.py
 
 安全说明：
-    本脚本会让所选手臂高速回放录制动作。运行前确认机器人工作空间无人、
+    本脚本会让所选关节高速回放录制动作。运行前确认机器人工作空间无人、
     无障碍物，并准备好急停。脚本保证逐行发布，但不能保证控制器或硬件
     执行每一条 DDS 消息。
 """
@@ -45,7 +50,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Sequence, cast
 
 import rclpy
 from rclpy.node import Node
@@ -73,6 +78,8 @@ RIGHT_TARGET_TOPIC = f"{UNIFIED_TARGET_TOPIC}/right"
 FSM_COMMAND_TOPIC = "/fsm_command"
 FSM_STATE_TOPIC = "/fsm_state"
 CONTROLLER_NODE = "/ocs2_arm_controller"
+WBC_CONTROLLER_NODE = "/ocs2_wbc_controller"
+WBC_TARGET_TOPIC = f"{WBC_CONTROLLER_NODE}/target_joint_position"
 INTERPOLATION_PARAMETER = "movej_interpolation_type"
 DURATION_PARAMETER = "movej_duration"
 PASSTHROUGH_INTERPOLATION = "none"
@@ -93,10 +100,12 @@ JOINT_TARGET_CONSECUTIVE_SAMPLES = 5
 JOINT_STATE_MAX_CLOCK_LEAD_SEC = 0.005
 JOINT_STATE_MAX_CLOCK_LAG_SEC = 1.0
 
+MODE_WHOLE = "whole"
 MODE_DUAL = "dual"
 MODE_LEFT = "left"
 MODE_RIGHT = "right"
 MODE_LABELS = {
+    MODE_WHOLE: "全身",
     MODE_DUAL: "双臂",
     MODE_LEFT: "左臂",
     MODE_RIGHT: "右臂",
@@ -115,13 +124,17 @@ RIGHT_COMMAND_COLUMNS = tuple(
 LEFT_JOINT_NAMES = tuple(f"left_joint{i}" for i in range(1, 8))
 RIGHT_JOINT_NAMES = tuple(f"right_joint{i}" for i in range(1, 8))
 
+BODY_JOINT_NAMES = tuple(f"body_joint{i}" for i in range(1, 5))
+HEAD_JOINT_NAMES = tuple(f"head_joint{i}" for i in range(1, 3))
+
 
 @dataclass(frozen=True)
 class ReplayData:
-    commands: list[tuple[float, ...]]
+    commands: list[tuple[float | None, ...]]
     publish_rate_hz: int
     median_period_sec: float
     time_source: str
+    missing_joint_names: tuple[str, ...] = ()
 
 
 def discover_recordings(record_data_dir: Path = RECORD_DATA_DIR) -> list[Path]:
@@ -164,23 +177,33 @@ def choose_recording(recordings: Sequence[Path]) -> Path:
         print(f"请输入 1 到 {len(recordings)}。")
 
 
-def choose_replay_mode() -> str:
-    """交互选择双臂、左臂或右臂；直接回车默认双臂。"""
+def choose_replay_mode(whole_controller: bool = False) -> str:
+    """交互选择双臂、左臂、右臂或全身；直接回车默认双臂。"""
     print("回放模式：")
     print("  [1] 双臂（默认）")
     print("  [2] 左臂")
     print("  [3] 右臂")
     choices = {"1": MODE_DUAL, "2": MODE_LEFT, "3": MODE_RIGHT}
+    if whole_controller:
+        print("  [4] 全身（双臂 + 腰部 + 头部，WBC）")
+        choices["4"] = MODE_WHOLE
+    maximum_choice = len(choices)
     while True:
-        answer = input("请选择回放模式 [1-3]（回车选择 1）: ").strip()
+        answer = input(f"请选择回放模式 [1-{maximum_choice}]（回车选择 1）: ").strip()
         if not answer:
             return MODE_DUAL
         if answer in choices:
             return choices[answer]
-        print("请输入 1、2 或 3。")
+        print(f"请输入 1 到 {maximum_choice}。")
 
 
-def command_columns_for_mode(mode: str) -> tuple[str, ...]:
+def command_columns_for_mode(
+    mode: str, whole_controller: bool = False,
+) -> tuple[str, ...]:
+    if mode == MODE_WHOLE or (whole_controller and mode == MODE_DUAL):
+        return tuple(
+            f"command_interface.{name}/position" for name in joint_names_for_mode(mode, whole_controller)
+        )
     if mode == MODE_LEFT:
         return LEFT_COMMAND_COLUMNS
     if mode == MODE_RIGHT:
@@ -190,7 +213,12 @@ def command_columns_for_mode(mode: str) -> tuple[str, ...]:
     raise ValueError(f"未知回放模式: {mode}")
 
 
-def joint_names_for_mode(mode: str) -> tuple[str, ...]:
+def joint_names_for_mode(
+    mode: str, whole_controller: bool = False,
+) -> tuple[str, ...]:
+    if mode == MODE_WHOLE or (whole_controller and mode == MODE_DUAL):
+        return (BODY_JOINT_NAMES + LEFT_JOINT_NAMES
+                + RIGHT_JOINT_NAMES + HEAD_JOINT_NAMES)
     if mode == MODE_LEFT:
         return LEFT_JOINT_NAMES
     if mode == MODE_RIGHT:
@@ -217,6 +245,30 @@ def select_target_route(
     if mode == MODE_DUAL and left_subscribers > 0 and right_subscribers > 0:
         return (LEFT_TARGET_TOPIC, RIGHT_TARGET_TOPIC), "左右分话题回退（7+7关节）"
     return None
+
+
+def detect_controller(node: Node) -> str:
+    """按实际订阅者识别控制器；两个控制器同时存在时拒绝猜测。"""
+    settle_deadline = time.monotonic() + GRAPH_SETTLE_SEC
+    while rclpy.ok() and time.monotonic() < settle_deadline:
+        rclpy.spin_once(node, timeout_sec=0.05)
+    deadline = time.monotonic() + DISCOVERY_TIMEOUT_SEC
+    while rclpy.ok() and time.monotonic() < deadline:
+        topics = dict(node.get_topic_names_and_types())
+        active = []
+        for controller in (WBC_CONTROLLER_NODE, CONTROLLER_NODE):
+            base = f"{controller}/target_joint_position"
+            if any("std_msgs/msg/Float64MultiArray" in topics.get(topic, [])
+                   and node.count_subscribers(topic) > 0
+                   for topic in (base, f"{base}/left", f"{base}/right")):
+                active.append(controller)
+        if len(active) > 1:
+            raise RuntimeError("同时发现 WBC 和手臂控制器目标订阅者，无法唯一确定回放控制器")
+        if active:
+            print(f"检测到控制器: {active[0]}")
+            return active[0]
+        rclpy.spin_once(node, timeout_sec=0.05)
+    raise RuntimeError("未发现 WBC 或手臂控制器的有效目标话题订阅者")
 
 
 def _positive_adjacent_intervals(values: Sequence[float]) -> list[float]:
@@ -260,41 +312,70 @@ def _parse_optional_time(row: dict[str, str], column: str) -> float:
     return value if math.isfinite(value) else math.nan
 
 
-def load_replay_data(csv_path: Path, mode: str) -> ReplayData:
+def load_replay_data(
+    csv_path: Path, mode: str, whole_controller: bool = False,
+) -> ReplayData:
     """在运动前读取所选关节指令并从 CSV 时间列推算发布频率。"""
-    command_columns = command_columns_for_mode(mode)
-    commands: list[tuple[float, ...]] = []
+    if mode == MODE_WHOLE and not whole_controller:
+        raise ValueError("分体控制暂不支持全身回放")
+    command_columns = command_columns_for_mode(mode, whole_controller)
+    commands: list[tuple[float | None, ...]] = []
     stamp_values: list[float] = []
     elapsed_values: list[float] = []
+    # 动态扩展表头时按各段表头解析，不能用首个 DictReader 表头解析所有行。
+    rows = []
+    all_columns: set[str] = set()
     with csv_path.open("r", encoding="utf-8-sig", newline="") as stream:
-        reader = csv.DictReader(stream)
-        fieldnames = reader.fieldnames or []
-        missing = [name for name in command_columns if name not in fieldnames]
-        if missing:
-            raise ValueError(f"CSV 缺少{MODE_LABELS[mode]}指令列: {missing}")
-
-        for line_number, row in enumerate(reader, start=2):
-            # recorder 在接口集合动态增加时可能再次写入表头，该行不是数据。
-            extra_columns = row.get(None) or []
-            if (
-                all(row.get(name) == name for name in fieldnames)
-                and all(
-                    isinstance(value, str) and INTERFACE_COLUMN_RE.fullmatch(value)
-                    for value in extra_columns
-                )
-            ):
+        header = None
+        for line_number, values in enumerate(csv.reader(stream), start=1):
+            if not values:
                 continue
-            try:
-                command = tuple(float(row[name]) for name in command_columns)
-            except (KeyError, TypeError, ValueError) as exc:
-                raise ValueError(
-                    f"CSV 第 {line_number} 行{MODE_LABELS[mode]}指令无效: {exc}"
-                ) from exc
-            if not all(math.isfinite(value) for value in command):
-                raise ValueError(f"CSV 第 {line_number} 行包含 NaN 或 Inf: {command}")
-            commands.append(command)
-            stamp_values.append(_parse_optional_time(row, "stamp"))
-            elapsed_values.append(_parse_optional_time(row, "elapsed_s"))
+            if values[0] in ("stamp", "elapsed_s"):
+                if not all(name in ("stamp", "elapsed_s")
+                           or INTERFACE_COLUMN_RE.fullmatch(name) for name in values):
+                    raise ValueError(f"CSV 第 {line_number} 行表头无效")
+                if len(set(values)) != len(values):
+                    raise ValueError(f"CSV 第 {line_number} 行存在重复列")
+                header = values
+                all_columns.update(header)
+                continue
+            if header is None or len(values) != len(header):
+                raise ValueError(f"CSV 第 {line_number} 行表头或列数无效")
+            rows.append((line_number, dict(zip(header, values))))
+
+    held_names = BODY_JOINT_NAMES + HEAD_JOINT_NAMES if whole_controller and mode == MODE_DUAL else ()
+    held_columns = {f"command_interface.{name}/position" for name in held_names}
+    missing = [name for name in command_columns
+               if name not in all_columns or name in held_columns]
+    optional_names = BODY_JOINT_NAMES + HEAD_JOINT_NAMES if whole_controller and mode in (MODE_WHOLE, MODE_DUAL) else ()
+    optional_columns = {f"command_interface.{name}/position" for name in optional_names}
+    required_missing = [name for name in missing if name not in optional_columns]
+    if required_missing:
+        raise ValueError(f"CSV 缺少{MODE_LABELS[mode]}指令列: {required_missing}")
+    missing_joint_names = tuple(
+        name for name in optional_names
+        if f"command_interface.{name}/position" in missing
+    )
+    for label, names in (("腰部", BODY_JOINT_NAMES), ("头部", HEAD_JOINT_NAMES)):
+        absent = [name for name in names if name in missing_joint_names]
+        if absent:
+            reason = "双臂模式不回放" if held_names else "录制文件缺少"
+            print(f"{reason}{label}指令：{'、'.join(absent)}；保持回放前位置。")
+
+    for line_number, row in rows:
+        try:
+            # None 表示缺列或双臂模式明确保持的关节，运动前必须替换为实际保持位置。
+            command = tuple(None if name in missing else float(row[name])
+                            for name in command_columns)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f"CSV 第 {line_number} 行{MODE_LABELS[mode]}指令无效: {exc}"
+            ) from exc
+        if not all(value is None or math.isfinite(value) for value in command):
+            raise ValueError(f"CSV 第 {line_number} 行包含 NaN 或 Inf: {command}")
+        commands.append(command)
+        stamp_values.append(_parse_optional_time(row, "stamp"))
+        elapsed_values.append(_parse_optional_time(row, "elapsed_s"))
 
     if not commands:
         raise ValueError(f"CSV 中没有可回放的{MODE_LABELS[mode]}关节指令")
@@ -307,17 +388,21 @@ def load_replay_data(csv_path: Path, mode: str) -> ReplayData:
         publish_rate_hz=publish_rate_hz,
         median_period_sec=median_period_sec,
         time_source=time_source,
+        missing_joint_names=missing_joint_names,
     )
 
 
 class ReplayNode(Node):
     """回放所需的 publisher、FSM 状态订阅与参数客户端。"""
 
-    def __init__(self, mode: str) -> None:
+    def __init__(self, mode: str, controller_node: str = CONTROLLER_NODE) -> None:
+        if mode == MODE_WHOLE and controller_node != WBC_CONTROLLER_NODE:
+            raise ValueError("分体控制暂不支持全身回放")
         super().__init__("joint_command_replayer")
         self.mode = mode
         self.mode_label = MODE_LABELS[mode]
-        self.joint_names = joint_names_for_mode(mode)
+        self.whole_controller = controller_node == WBC_CONTROLLER_NODE
+        self.joint_names = joint_names_for_mode(mode, self.whole_controller)
         self.latest_fsm_state: int | None = None
         self.latest_joint_positions: tuple[float, ...] | None = None
         self.latest_joint_received_at: float | None = None
@@ -339,7 +424,8 @@ class ReplayNode(Node):
         self.joint_state_sub = self.create_subscription(
             JointState, "/joint_states", self._joint_state_callback, 10
         )
-        self.parameter_client = AsyncParameterClient(self, CONTROLLER_NODE)
+        self.controller_node = controller_node
+        self.parameter_client = AsyncParameterClient(self, self.controller_node)
 
     def _fsm_state_callback(self, msg: Int32) -> None:
         self.latest_fsm_state = int(msg.data)
@@ -363,32 +449,35 @@ class ReplayNode(Node):
         while rclpy.ok() and time.monotonic() < settle_deadline:
             rclpy.spin_once(node=self, timeout_sec=0.05)
 
-        deadline = time.monotonic() + DISCOVERY_TIMEOUT_SEC
-        split_fallback: tuple[tuple[str, ...], str] | None = None
-        while rclpy.ok() and time.monotonic() < deadline:
-            unified_subscribers = self.count_subscribers(UNIFIED_TARGET_TOPIC)
-            left_subscribers = self.count_subscribers(LEFT_TARGET_TOPIC)
-            right_subscribers = self.count_subscribers(RIGHT_TARGET_TOPIC)
-            route = select_target_route(
-                self.mode,
-                unified_subscribers=unified_subscribers,
-                left_subscribers=left_subscribers,
-                right_subscribers=right_subscribers,
-            )
-            if self.mode != MODE_DUAL and route is not None:
-                self.target_topics, self.target_route = route
-                break
-            if self.mode == MODE_DUAL and unified_subscribers > 0:
-                self.target_topics, self.target_route = route
-                break
-            if self.mode == MODE_DUAL and route is not None:
-                split_fallback = route
-            rclpy.spin_once(node=self, timeout_sec=0.05)
+        if self.whole_controller:
+            if self.mode in (MODE_DUAL, MODE_WHOLE):
+                self.target_topics = (WBC_TARGET_TOPIC,)
+                self.target_route = "WBC 统一话题（body4 + left7 + right7 + head2）"
+            else:
+                self.target_topics = (f"{WBC_TARGET_TOPIC}/{self.mode}",)
+                self.target_route = f"WBC {self.mode_label}分话题"
+        else:
+            deadline = time.monotonic() + DISCOVERY_TIMEOUT_SEC
+            split_fallback = None
+            while rclpy.ok() and time.monotonic() < deadline:
+                unified_subscribers = self.count_subscribers(UNIFIED_TARGET_TOPIC)
+                route = select_target_route(
+                    self.mode,
+                    unified_subscribers=unified_subscribers,
+                    left_subscribers=self.count_subscribers(LEFT_TARGET_TOPIC),
+                    right_subscribers=self.count_subscribers(RIGHT_TARGET_TOPIC),
+                )
+                if route is not None:
+                    if self.mode != MODE_DUAL or unified_subscribers > 0:
+                        self.target_topics, self.target_route = route
+                        break
+                    split_fallback = route
+                rclpy.spin_once(node=self, timeout_sec=0.05)
+            if not self.target_topics and split_fallback is not None:
+                self.target_topics, self.target_route = split_fallback
 
         if not rclpy.ok():
             raise RuntimeError("ROS 2 已停止，无法配置回放目标话题")
-        if not self.target_topics and split_fallback is not None:
-            self.target_topics, self.target_route = split_fallback
         if not self.target_topics:
             raise RuntimeError(
                 "未发现所选模式需要的目标订阅者: "
@@ -453,12 +542,12 @@ def wait_for_future(node: Node, future, timeout_sec: float, operation: str):
 
 def get_interpolation_parameter(node: ReplayNode) -> str:
     if not node.parameter_client.wait_for_services(timeout_sec=DISCOVERY_TIMEOUT_SEC):
-        raise RuntimeError(f"参数服务不可用: {CONTROLLER_NODE}")
+        raise RuntimeError(f"参数服务不可用: {node.controller_node}")
     response = wait_for_future(
         node,
         node.parameter_client.get_parameters([INTERPOLATION_PARAMETER]),
         DISCOVERY_TIMEOUT_SEC,
-        f"读取 {CONTROLLER_NODE}.{INTERPOLATION_PARAMETER}",
+        f"读取 {node.controller_node}.{INTERPOLATION_PARAMETER}",
     )
     if not response.values:
         raise RuntimeError(f"控制器未返回参数: {INTERPOLATION_PARAMETER}")
@@ -477,7 +566,7 @@ def set_interpolation_parameter(node: ReplayNode, value: str) -> None:
             [Parameter(INTERPOLATION_PARAMETER, value=value)]
         ),
         DISCOVERY_TIMEOUT_SEC,
-        f"设置 {CONTROLLER_NODE}.{INTERPOLATION_PARAMETER}={value}",
+        f"设置 {node.controller_node}.{INTERPOLATION_PARAMETER}={value}",
     )
     if not response.results or not response.results[0].successful:
         reason = response.results[0].reason if response.results else "无返回结果"
@@ -489,7 +578,7 @@ def get_duration_parameter(node: ReplayNode) -> float:
         node,
         node.parameter_client.get_parameters([DURATION_PARAMETER]),
         DISCOVERY_TIMEOUT_SEC,
-        f"读取 {CONTROLLER_NODE}.{DURATION_PARAMETER}",
+        f"读取 {node.controller_node}.{DURATION_PARAMETER}",
     )
     if not response.values:
         raise RuntimeError(f"控制器未返回参数: {DURATION_PARAMETER}")
@@ -508,7 +597,7 @@ def set_duration_parameter(node: ReplayNode, value: float) -> None:
             [Parameter(DURATION_PARAMETER, value=float(value))]
         ),
         DISCOVERY_TIMEOUT_SEC,
-        f"设置 {CONTROLLER_NODE}.{DURATION_PARAMETER}={value}",
+        f"设置 {node.controller_node}.{DURATION_PARAMETER}={value}",
     )
     if not response.results or not response.results[0].successful:
         reason = response.results[0].reason if response.results else "无返回结果"
@@ -599,6 +688,41 @@ def validate_joint_state_clock(
             "仿真请使用 --ros-args -p use_sim_time:=true，"
             "真机请检查消息源时钟同步"
         )
+
+
+def resolve_hold_positions(
+    node: ReplayNode, data: ReplayData, hold_at: float, hold_stamp_ns: int,
+) -> list[tuple[float, ...]]:
+    """需保持的关节用 HOLD 后的新鲜完整反馈补齐，并固定用于整个回放。"""
+    if not data.missing_joint_names:
+        return cast(list[tuple[float, ...]], data.commands)
+    deadline = time.monotonic() + DISCOVERY_TIMEOUT_SEC
+    sequence = node.latest_joint_sequence
+    while rclpy.ok() and time.monotonic() < deadline:
+        rclpy.spin_once(node, timeout_sec=0.05)
+        if node.latest_fsm_state != FSM_HOLD:
+            raise RuntimeError("读取保持位置期间 FSM 离开 HOLD")
+        current = node.latest_joint_positions
+        stamp_ns = node.latest_joint_stamp_ns
+        received_at = node.latest_joint_received_at
+        if (current is None or stamp_ns is None or received_at is None
+                or node.latest_joint_sequence <= sequence
+                or received_at < hold_at):
+            continue
+        sequence = node.latest_joint_sequence
+        validate_joint_state_clock(node, stamp_ns, label="读取保持位置")
+        if stamp_ns <= hold_stamp_ns:
+            continue
+        if not all(math.isfinite(value) for value in current):
+            raise RuntimeError("读取保持位置时 /joint_states 包含 NaN 或 Inf")
+        for name in data.missing_joint_names:
+            print(f"保持 {name} = {current[node.joint_names.index(name)]:.6f} rad")
+        return [tuple(current[i] if value is None else value
+                      for i, value in enumerate(command)) for command in data.commands]
+    raise RuntimeError(
+        "无法获取 HOLD 后的新鲜完整关节位置，取消回放；需保持关节："
+        + "、".join(data.missing_joint_names)
+    )
 
 
 def maximum_joint_error(
@@ -894,33 +1018,37 @@ def main() -> int:
     selected_csv = choose_recording(recordings)
     print(f"已选择: {selected_csv}")
 
-    mode = choose_replay_mode()
-    replay_data = load_replay_data(selected_csv, mode)
-    commands = replay_data.commands
-    expected_duration = (len(commands) - 1) / replay_data.publish_rate_hz
-    print(f"已选择回放模式: {MODE_LABELS[mode]}")
-    print(
-        f"频率检测: source={replay_data.time_source}, "
-        f"median_dt={replay_data.median_period_sec:.9f}s, "
-        f"publish_rate={replay_data.publish_rate_hz}Hz"
-    )
-    print(
-        f"已加载 {len(commands)} 行{MODE_LABELS[mode]}指令，"
-        f"预计回放 {expected_duration:.3f}s"
-    )
-    print(f"首点: {[f'{value:.6f}' for value in commands[0]]}")
-    print(f"末点: {[f'{value:.6f}' for value in commands[-1]]}")
-
     node: ReplayNode | None = None
     recorder: RecorderProcess | None = None
     original_interpolation: str | None = None
     original_duration: float | None = None
     rclpy.init()
     try:
-        node = ReplayNode(mode)
+        discovery_node = Node("joint_replay_discovery")
+        try:
+            controller_node = detect_controller(discovery_node)
+        finally:
+            discovery_node.destroy_node()
+        whole_controller = controller_node == WBC_CONTROLLER_NODE
+        mode = choose_replay_mode(whole_controller)
+        replay_data = load_replay_data(selected_csv, mode, whole_controller)
+        commands = replay_data.commands
+        expected_duration = (len(commands) - 1) / replay_data.publish_rate_hz
+        print(f"已选择回放模式: {MODE_LABELS[mode]}")
+        print(
+            f"频率检测: source={replay_data.time_source}, "
+            f"median_dt={replay_data.median_period_sec:.9f}s, "
+            f"publish_rate={replay_data.publish_rate_hz}Hz"
+        )
+        print(f"已加载 {len(commands)} 行指令，预计回放 {expected_duration:.3f}s")
+        print(f"首点（保持项待读取当前位置）: {commands[0]}")
+        print(f"末点（保持项待读取当前位置）: {commands[-1]}")
+
+        node = ReplayNode(mode, controller_node)
         node.configure_target_publishers()
         wait_for_required_subscribers(node)
-        enter_hold(node)
+        hold_at, hold_stamp_ns = enter_hold(node)
+        commands = resolve_hold_positions(node, replay_data, hold_at, hold_stamp_ns)
 
         original_interpolation = get_interpolation_parameter(node)
         original_duration = get_duration_parameter(node)
