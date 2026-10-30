@@ -79,6 +79,9 @@ class ROS2RobotInterfaceConfig:
     body_current_target_pose_topic: str | None = None  # 【可自动检测】body 目标笛卡尔位姿话题（PoseStamped），例如 "/body_current_target"，用于 body pose 到位判定
     body_target_relative_topic: str | None = None  # 【可自动检测】body 一次笛卡尔相对位移话题（TwistStamped），例如 "/body_target/relative"
     body_target_topic: str | None = None  # 【可自动检测】body 绝对位姿目标话题（Pose），例如 "/body_target"；stamped 由 f"{body_target_topic}/stamped" 推导
+    head_target_topic: str | None = None  # 【可自动检测】head 绝对位姿目标话题（Pose），例如 "/head_target"；stamped 由 f"{head_target_topic}/stamped" 推导
+    head_current_target_pose_topic: str | None = None  # 【可自动检测】head 目标笛卡尔位姿反馈（PoseStamped），例如 "/head_current_target"
+    head_marker_link_name: str | None = "head_link2"  # WBC 头部 marker 初始化用的 TF link（与 ATM 默认一致）
 
     # ============================================================================
     # 六维力 FT wrench 话题（可自动检测；robot.local.yaml 中 left_ft/right_ft 为 none 时可能不存在）
@@ -200,6 +203,11 @@ class ROS2RobotInterfaceConfig:
     # ============================================================================
     namespace: str = ""  # 【可选】ROS 2 节点命名空间，默认为空字符串
     node_name: str | None = None  # 【可选】ROS 2 节点名称，未配置时根据单臂/双臂模式自动生成
+    # 【可选】话题命名空间前缀（与节点 namespace 独立）。例如 "/cr5" 使自动发现与
+    # /robot_description、/fsm_* 等订阅限定在 /cr5/... 下；空字符串保持全局行为。
+    topic_prefix: str = ""
+    # 选定机器人的 robot_description 全名；空则使用 topic_prefix + "/robot_description"
+    robot_description_topic: str = "/robot_description"
     
     # ============================================================================
     # Nav2 导航配置（可选，自动检测）

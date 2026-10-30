@@ -36,7 +36,7 @@ from tf2_geometry_msgs import do_transform_pose
 
 from arms_ros2_control_msgs.action import ExecuteLinear, JointTrajectory as JointTrajectoryAction, MovecUseIK, WaistLiftingPose
 from arms_ros2_control_msgs.msg import CircleMessage, JointWaypoint, LinearMessage
-from arms_ros2_control_msgs.msg import WbcCurrentState
+from arms_ros2_control_msgs.msg import WbcCapability, WbcCurrentState
 from arms_ros2_control_msgs.srv import ExecutePath
 
 from .config import ControlType, ROS2RobotInterfaceConfig
@@ -59,6 +59,15 @@ from .utils.discovery import (
     list_node_parameters as _list_node_parameters,
     set_node_parameters as _set_node_parameters,
 )
+from .utils.topic_namespace import (
+    apply_prefix_to_config_paths,
+    relativize_config_topics_for_namespace,
+    resolve_core_topic,
+    resolve_scoped_or_global,
+    robot_description_topic_for_prefix,
+    scope_names,
+    to_node_relative_topic,
+)
 
 if TYPE_CHECKING:
     from .dynamics.com_estimator import ComEstimate, ComEstimator
@@ -75,6 +84,7 @@ class ROS2RobotInterface:
         "BODY_VERTICAL": WbcCurrentState.BODY_VERTICAL,  # backward-compatible alias
         "BODY_TRACKING": WbcCurrentState.BODY_TRACKING,
         "BODY_LOCK": WbcCurrentState.BODY_LOCKED,
+        "BODY_CUSTOM_LOCK": WbcCurrentState.BODY_CUSTOM_LOCKED,
     }
     BODY_MODE_TO_COMMAND: Dict[str, str] = {
         "BODY_FREE": "BODY_FREE",
@@ -82,6 +92,7 @@ class ROS2RobotInterface:
         "BODY_VERTICAL": "BODY_RELATIVE",  # backward-compatible alias
         "BODY_TRACKING": "BODY_TRACKING",
         "BODY_LOCK": "BODY_LOCK",
+        "BODY_CUSTOM_LOCK": "BODY_CUSTOM_LOCK",
     }
     # /mode_command 字符串 → (WbcCurrentState 字段名, 期望常量值)
     # BODY_* 由 BODY_MODE_TO_STATE 派生，避免双份维护
@@ -95,6 +106,12 @@ class ROS2RobotInterface:
         "HEAD_FORWARD": ("head_state", WbcCurrentState.HEAD_FORWARD),
         "BASE_LOCK": ("base_state", WbcCurrentState.BASE_LOCKED),
         "BASE_UNLOCK": ("base_state", WbcCurrentState.BASE_UNLOCKED),
+        "LEFT_ARM_ENABLE": ("left_arm_state", WbcCurrentState.ARM_ENABLED),
+        "LEFT_ARM_DISABLE": ("left_arm_state", WbcCurrentState.ARM_DISABLED),
+        "RIGHT_ARM_ENABLE": ("right_arm_state", WbcCurrentState.ARM_ENABLED),
+        "RIGHT_ARM_DISABLE": ("right_arm_state", WbcCurrentState.ARM_DISABLED),
+        "HOME_JOINT_ON": ("home_joint_reference_enabled", 1),
+        "HOME_JOINT_OFF": ("home_joint_reference_enabled", 0),
     }
     MODE_SWITCH_SETTLE_TIME_SEC: float = 0.1
     
@@ -111,7 +128,9 @@ class ROS2RobotInterface:
         self.body_current_target_sub: Subscription | None = None
         self.body_current_pose_sub: Subscription | None = None
         self.body_current_target_pose_sub: Subscription | None = None
+        self.head_current_target_pose_sub: Subscription | None = None
         self.wbc_state_sub: Subscription | None = None
+        self.wbc_capability_sub: Subscription | None = None
         self.left_ft_wrench_sub: Subscription | None = None
         self.right_ft_wrench_sub: Subscription | None = None
         self._latest_wrench_left: Dict[str, Any] | None = None
@@ -131,6 +150,8 @@ class ROS2RobotInterface:
         self.body_target_relative_pub: Publisher | None = None
         self.body_target_pub: Publisher | None = None
         self.body_target_stamped_pub: Publisher | None = None
+        self.head_target_pub: Publisher | None = None
+        self.head_target_stamped_pub: Publisher | None = None
         self.fsm_command_pub: Publisher | None = None
         self.mode_command_pub: Publisher | None = None
         self.head_joint_controller_pub: Publisher | None = None
@@ -178,8 +199,13 @@ class ROS2RobotInterface:
         self.body_target_positions: Optional[List[float]] = None
         self.body_current_target: Optional[List[float]] = None
         self.body_current_pose: Optional[Pose] = None
+        self.body_current_pose_frame_id: Optional[str] = None
         self.body_current_target_pose: Optional[Pose] = None
+        self.body_current_target_pose_frame_id: Optional[str] = None
+        self.head_current_target_pose: Optional[Pose] = None
+        self.head_current_target_pose_frame_id: Optional[str] = None
         self.wbc_state: Optional[WbcCurrentState] = None
+        self.wbc_capability: Optional[WbcCapability] = None
         
         self.tf_buffer: Optional[tf2_ros.Buffer] = None
         self.tf_listener: Optional[tf2_ros.TransformListener] = None
@@ -266,12 +292,16 @@ class ROS2RobotInterface:
                 return n
         return ""
 
-    def list_nodes(self) -> List[Dict[str, str]]:
-        """查询当前运行的 ROS 2 节点列表。详见 utils.discovery.list_nodes() 的文档。"""
+    def list_nodes(self, include_hidden_nodes: bool = False) -> List[Dict[str, str]]:
+        """查询当前运行的 ROS 2 节点列表。详见 utils.discovery.list_nodes() 的文档。
+
+        默认与 ``ros2 node list`` 一致，不返回隐藏节点。``include_hidden_nodes=True``
+        等价于 ``ros2 node list -a``。
+        """
         # 如果已连接，使用现有节点；否则传递 None 让函数创建临时节点
         node = self.robot_node if self.is_connected else None
         # 不传 namespace，保持使用空命名空间创建临时节点
-        return _list_nodes(node=node)
+        return _list_nodes(node=node, include_hidden_nodes=include_hidden_nodes)
     
     def list_node_parameters(self, full_node_name: str) -> List[Dict[str, Any]]:
         """查询指定节点的可动态配置参数。详见 utils.discovery.list_node_parameters() 的文档。"""
@@ -419,6 +449,17 @@ class ROS2RobotInterface:
         if self.config.body_target_topic is None and "/body_target" in topic_names:
             self.config.body_target_topic = "/body_target"
             logger.info("Detected body target topic: /body_target")
+
+        if self.config.head_target_topic is None and "/head_target" in topic_names:
+            self.config.head_target_topic = "/head_target"
+            logger.info("Detected head target topic: /head_target")
+
+        if (
+            self.config.head_current_target_pose_topic is None
+            and "/head_current_target" in topic_names
+        ):
+            self.config.head_current_target_pose_topic = "/head_current_target"
+            logger.info("Detected head current target pose topic: /head_current_target")
 
         if "/body_joint_controller/waist_lifting_pose_relative" in topic_names:
             self.config.waist_lifting_pose_relative_topic = "/body_joint_controller/waist_lifting_pose_relative"
@@ -586,19 +627,75 @@ class ROS2RobotInterface:
                 rclpy.init()
             
             is_dual_arm_detected = False
+            topic_prefix = self.config.topic_prefix or ""
+            topic_names_full: list[str] = []
+            action_names_full: list[str] = []
             try:
-                topic_names = _discover_topics()
+                topic_names_full = _discover_topics()
                 try:
-                    action_names = _discover_actions()
+                    action_names_full = _discover_actions()
                 except Exception as action_exc:
                     logger.warning(f"Failed to discover actions: {action_exc}")
-                    action_names = []
+                    action_names_full = []
+                detect_topics = scope_names(topic_names_full, topic_prefix)
+                detect_actions = scope_names(action_names_full, topic_prefix)
+                if topic_prefix:
+                    logger.info(
+                        f"Auto-detect scoped to topic_prefix={topic_prefix!r} "
+                        f"({len(detect_topics)} topics, {len(detect_actions)} actions)"
+                    )
                 is_dual_arm_detected = self._auto_detect_configuration(
-                    topic_names, action_names
+                    detect_topics, detect_actions
                 )
+                available_paths = set(topic_names_full) | set(action_names_full)
+                apply_prefix_to_config_paths(self.config, topic_prefix, available_paths)
             except Exception as e:
                 logger.warning(f"Failed to auto-detect configuration: {e}")
                 is_dual_arm_detected = False
+
+            # When the interface lives in a robot namespace (multi-robot TF remap),
+            # do NOT fall back to global /joint_states — that would mix robots or
+            # miss /{ns}/joint_states entirely.
+            node_namespace = self.config.namespace if self.config.namespace else ""
+            allow_global_core = not bool(node_namespace)
+
+            # Core topics: prefer prefixed names; global fallback only without namespace.
+            self.config.joint_states_topic = resolve_core_topic(
+                self.config.joint_states_topic or "/joint_states",
+                topic_prefix,
+                topic_names_full,
+                allow_global_fallback=allow_global_core,
+            )
+            if (
+                self.config.robot_description_topic
+                and self.config.robot_description_topic != "/robot_description"
+            ):
+                robot_description_topic = self.config.robot_description_topic
+            else:
+                robot_description_topic = robot_description_topic_for_prefix(topic_prefix)
+            self.config.robot_description_topic = robot_description_topic
+            fsm_state_topic = resolve_core_topic(
+                "/fsm_state", topic_prefix, topic_names_full,
+                allow_global_fallback=allow_global_core,
+            )
+            fsm_command_topic = resolve_core_topic(
+                "/fsm_command", topic_prefix, topic_names_full,
+                allow_global_fallback=allow_global_core,
+            )
+            mode_command_topic = resolve_core_topic(
+                "/mode_command", topic_prefix, topic_names_full,
+                allow_global_fallback=allow_global_core,
+            )
+
+            # Node already in /{ns}: use relative names so subscriptions resolve to
+            # /{ns}/joint_states (same pattern as /tf:=tf remapping). Absolute
+            # /{ns}/foo still works, but relative avoids accidental global roots.
+            if node_namespace:
+                relativize_config_topics_for_namespace(self.config, node_namespace)
+                fsm_state_topic = to_node_relative_topic(fsm_state_topic, node_namespace)
+                fsm_command_topic = to_node_relative_topic(fsm_command_topic, node_namespace)
+                mode_command_topic = to_node_relative_topic(mode_command_topic, node_namespace)
+                robot_description_topic = self.config.robot_description_topic
             
             logger.info(f"{'DUAL-ARM' if is_dual_arm_detected else 'SINGLE-ARM'} MODE DETECTED")
             
@@ -609,20 +706,61 @@ class ROS2RobotInterface:
             else:
                 node_name = "ros2_robot_interface"
             
+            # When the interface lives in a robot namespace, remap absolute /tf and
+            # /tf_static to relative names so TransformListener reads
+            # /{namespace}/tf instead of the global /tf tree (multi-robot stacks).
+            node_cli_args = None
+            if node_namespace:
+                node_cli_args = [
+                    "--ros-args",
+                    "-r",
+                    "/tf:=tf",
+                    "-r",
+                    "/tf_static:=tf_static",
+                ]
             self.robot_node = Node(
                 node_name,
-                namespace=self.config.namespace if self.config.namespace else ""
+                namespace=node_namespace,
+                cli_args=node_cli_args,
             )
+            if node_namespace:
+                ns = node_namespace.strip("/")
+                logger.info(
+                    f"TF remapped into namespace '{node_namespace}' "
+                    f"(/tf -> /{ns}/tf); core topics are relative under that namespace"
+                )
             
+            # Prefer BEST_EFFORT so we match SensorDataQoS broadcasters; also
+            # accepts RELIABLE publishers (common on some namespaced stacks).
+            from rclpy.qos import (
+                QoSProfile,
+                DurabilityPolicy,
+                HistoryPolicy,
+                ReliabilityPolicy,
+            )
+            joint_state_qos = QoSProfile(
+                depth=10,
+                reliability=ReliabilityPolicy.BEST_EFFORT,
+                durability=DurabilityPolicy.VOLATILE,
+                history=HistoryPolicy.KEEP_LAST,
+            )
             self.joint_state_sub = self.robot_node.create_subscription(
                 JointState,
                 self.config.joint_states_topic,
                 self._joint_state_callback,
-                10
+                joint_state_qos,
+            )
+            js_fqn = (
+                f"/{node_namespace.strip('/')}/{self.config.joint_states_topic.lstrip('/')}"
+                if node_namespace and not self.config.joint_states_topic.startswith("/")
+                else self.config.joint_states_topic
+            )
+            logger.info(
+                f"✅ Subscribed to joint states as {self.config.joint_states_topic!r} "
+                f"(effective {js_fqn})"
             )
             
             # Subscribe to robot description for URDF tracking
-            from rclpy.qos import QoSProfile, DurabilityPolicy, HistoryPolicy, ReliabilityPolicy
             fsm_state_qos = QoSProfile(
                 depth=1,
                 durability=DurabilityPolicy.TRANSIENT_LOCAL,
@@ -631,11 +769,11 @@ class ROS2RobotInterface:
             )
             self.fsm_state_sub = self.robot_node.create_subscription(
                 Int32,
-                "/fsm_state",
+                fsm_state_topic,
                 self._fsm_state_callback,
                 fsm_state_qos
             )
-            logger.info("✅ Subscribed to /fsm_state for actual FSM state tracking")
+            logger.info(f"✅ Subscribed to {fsm_state_topic} for actual FSM state tracking")
 
             robot_desc_qos = QoSProfile(
                 depth=10,
@@ -645,11 +783,11 @@ class ROS2RobotInterface:
             )
             self.robot_description_sub = self.robot_node.create_subscription(
                 String,
-                "/robot_description",
+                robot_description_topic,
                 self._robot_description_callback,
                 robot_desc_qos
             )
-            logger.info("✅ Subscribed to /robot_description for URDF tracking")
+            logger.info(f"✅ Subscribed to {robot_description_topic} for URDF tracking")
 
             if self.config.body_joint_current_target_topic:
                 # Subscribe to current target body joints
@@ -694,6 +832,63 @@ class ROS2RobotInterface:
                 )
                 logger.info(f"Created body target publishers: {self.config.body_target_topic} (+ /stamped)")
 
+            # WBC body/head cartesian targets (ATM BodyMarker / HeadMarker contract).
+            # Defaults are set after topic relativization, so keep them node-relative
+            # when the interface lives under a robot namespace.
+            node_ns = self.config.namespace if self.config.namespace else ""
+            if self.is_wbc and self.config.body_target_topic is None:
+                self.config.body_target_topic = (
+                    to_node_relative_topic("/body_target", node_ns)
+                    if node_ns
+                    else "/body_target"
+                )
+                if self.body_target_pub is None:
+                    self.body_target_pub = self.robot_node.create_publisher(
+                        Pose, self.config.body_target_topic, 10
+                    )
+                    self.body_target_stamped_pub = self.robot_node.create_publisher(
+                        PoseStamped, f"{self.config.body_target_topic}/stamped", 10
+                    )
+                    logger.info(
+                        f"Created body target publishers: {self.config.body_target_topic} (+ /stamped)"
+                    )
+            if self.is_wbc and self.config.head_target_topic is None:
+                self.config.head_target_topic = (
+                    to_node_relative_topic("/head_target", node_ns)
+                    if node_ns
+                    else "/head_target"
+                )
+            if self.is_wbc and self.config.head_current_target_pose_topic is None:
+                self.config.head_current_target_pose_topic = (
+                    to_node_relative_topic("/head_current_target", node_ns)
+                    if node_ns
+                    else "/head_current_target"
+                )
+
+            if self.config.head_current_target_pose_topic:
+                self.head_current_target_pose_sub = self.robot_node.create_subscription(
+                    PoseStamped,
+                    self.config.head_current_target_pose_topic,
+                    self._head_current_target_pose_callback,
+                    10,
+                )
+                logger.info(
+                    "✅ Subscribed to {} for head target pose tracking".format(
+                        self.config.head_current_target_pose_topic
+                    )
+                )
+
+            if self.config.head_target_topic:
+                self.head_target_pub = self.robot_node.create_publisher(
+                    Pose, self.config.head_target_topic, 10
+                )
+                self.head_target_stamped_pub = self.robot_node.create_publisher(
+                    PoseStamped, f"{self.config.head_target_topic}/stamped", 10
+                )
+                logger.info(
+                    f"Created head target publishers: {self.config.head_target_topic} (+ /stamped)"
+                )
+
             if self.config.joint_trajectory_action_name:
                 self.joint_trajectory_action_client = ActionClient(
                     self.robot_node,
@@ -730,15 +925,50 @@ class ROS2RobotInterface:
                     f"Created waist lifting pose action client: {self.config.waist_lifting_pose_action_name}"
                 )
 
-            # Subscribe WBC current state for mode-aware command timing.
+            # Subscribe WBC current state / capabilities for mode-aware UI & timing.
             if self.is_wbc:
+                from rclpy.qos import (
+                    DurabilityPolicy,
+                    HistoryPolicy,
+                    QoSProfile,
+                    ReliabilityPolicy,
+                )
+
+                wbc_state_topic = resolve_scoped_or_global(
+                    "/ocs2_wbc_controller/current_state",
+                    topic_prefix,
+                    topic_names_full,
+                    allow_global_fallback=False,
+                )
                 self.wbc_state_sub = self.robot_node.create_subscription(
                     WbcCurrentState,
-                    "/ocs2_wbc_controller/current_state",
+                    wbc_state_topic,
                     self._wbc_state_callback,
                     10
                 )
-                logger.info("✅ Subscribed to /ocs2_wbc_controller/current_state for WBC mode tracking")
+                logger.info(f"✅ Subscribed to {wbc_state_topic} for WBC mode tracking")
+
+                wbc_capability_topic = resolve_scoped_or_global(
+                    "/ocs2_wbc_controller/wbc_capabilities",
+                    topic_prefix,
+                    topic_names_full,
+                    allow_global_fallback=False,
+                )
+                capability_qos = QoSProfile(
+                    depth=1,
+                    history=HistoryPolicy.KEEP_LAST,
+                    reliability=ReliabilityPolicy.RELIABLE,
+                    durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                )
+                self.wbc_capability_sub = self.robot_node.create_subscription(
+                    WbcCapability,
+                    wbc_capability_topic,
+                    self._wbc_capability_callback,
+                    capability_qos,
+                )
+                logger.info(
+                    f"✅ Subscribed to {wbc_capability_topic} for WBC capability tracking"
+                )
 
             # FT publishers (sensor + COMPLIANCE filtered) use SensorDataQoS (BEST_EFFORT).
             from rclpy.qos import qos_profile_sensor_data
@@ -791,8 +1021,14 @@ class ROS2RobotInterface:
             else:
                 logger.info("No right FT filtered wrench topic configured; skipping right FT filtered subscription")
 
+            compliance_zero_wrench_service = resolve_scoped_or_global(
+                "/compliance_zero_wrench",
+                topic_prefix,
+                topic_names_full,
+                allow_global_fallback=True,
+            )
             self.compliance_zero_wrench_client = self.robot_node.create_client(
-                Trigger, "/compliance_zero_wrench"
+                Trigger, compliance_zero_wrench_service
             )
 
             # Initialize TF buffer first (needed by ArmHandler)
@@ -819,11 +1055,25 @@ class ROS2RobotInterface:
                     self.get_fsm_state,
                 )
                 self.right_arm_handler.initialize()
-                self.target_path_pub = self.robot_node.create_publisher(Path, "/target_path", 10)
+                target_path_topic = resolve_scoped_or_global(
+                    "/target_path",
+                    topic_prefix,
+                    topic_names_full,
+                    allow_global_fallback=False,
+                )
+                dual_target_stamped_topic = resolve_scoped_or_global(
+                    "/dual_target/stamped",
+                    topic_prefix,
+                    topic_names_full,
+                    allow_global_fallback=False,
+                )
+                self.target_path_pub = self.robot_node.create_publisher(Path, target_path_topic, 10)
                 self.execute_path_client = self.robot_node.create_client(
                     ExecutePath, "execute_path"
                 )
-                self.dual_target_stamped_pub = self.robot_node.create_publisher(Path, "/dual_target/stamped", 10)
+                self.dual_target_stamped_pub = self.robot_node.create_publisher(
+                    Path, dual_target_stamped_topic, 10
+                )
             
             # Create left gripper handler (if enabled and controller detected)
             if self.config.gripper_enabled and self.config.left_gripper_controller_name:
@@ -883,8 +1133,11 @@ class ROS2RobotInterface:
             else:
                 logger.debug("Right hand tactile handler not created: no tactile topic detected")
             
-            self.fsm_command_pub = self.robot_node.create_publisher(Int32, "/fsm_command", 10)
-            self.mode_command_pub = self.robot_node.create_publisher(String, "/mode_command", 10)
+            self.fsm_command_pub = self.robot_node.create_publisher(Int32, fsm_command_topic, 10)
+            self.mode_command_pub = self.robot_node.create_publisher(String, mode_command_topic, 10)
+            logger.info(
+                f"✅ FSM/mode publishers: {fsm_command_topic}, {mode_command_topic}"
+            )
             
             if self.config.head_joint_controller_topic:
                 self.head_joint_controller_pub = self.robot_node.create_publisher(
@@ -1023,6 +1276,7 @@ class ROS2RobotInterface:
         """Callback for body current cartesian pose messages."""
         try:
             self.body_current_pose = msg.pose
+            self.body_current_pose_frame_id = msg.header.frame_id or None
         except Exception as e:
             logger.error(f"Error in body current pose callback: {e}", exc_info=True)
 
@@ -1030,8 +1284,17 @@ class ROS2RobotInterface:
         """Callback for body target cartesian pose messages."""
         try:
             self.body_current_target_pose = msg.pose
+            self.body_current_target_pose_frame_id = msg.header.frame_id or None
         except Exception as e:
             logger.error(f"Error in body current target pose callback: {e}", exc_info=True)
+
+    def _head_current_target_pose_callback(self, msg: PoseStamped) -> None:
+        """Callback for head target cartesian pose messages."""
+        try:
+            self.head_current_target_pose = msg.pose
+            self.head_current_target_pose_frame_id = msg.header.frame_id or None
+        except Exception as e:
+            logger.error(f"Error in head current target pose callback: {e}", exc_info=True)
 
     def _wbc_state_callback(self, msg: WbcCurrentState) -> None:
         """Callback for /ocs2_wbc_controller/current_state."""
@@ -1039,6 +1302,13 @@ class ROS2RobotInterface:
             self.wbc_state = msg
         except Exception as e:
             logger.error(f"Error in WBC state callback: {e}", exc_info=True)
+
+    def _wbc_capability_callback(self, msg: WbcCapability) -> None:
+        """Callback for /ocs2_wbc_controller/wbc_capabilities."""
+        try:
+            self.wbc_capability = msg
+        except Exception as e:
+            logger.error(f"Error in WBC capability callback: {e}", exc_info=True)
 
     @staticmethod
     def _wrench_stamped_to_dict(msg: WrenchStamped) -> Dict[str, Any]:
@@ -2803,6 +3073,53 @@ class ROS2RobotInterface:
         msg.pose = pose
         self.body_target_stamped_pub.publish(msg)
         logger.debug(f"Published body target (stamped) in frame '{frame_id}': {pose}")
+
+    def send_head_target(self, pose: Pose) -> None:
+        """发送 head 绝对位姿目标（控制器 base_frame 坐标系下）。
+
+        Args:
+            pose: 目标位姿，位于控制器 base_frame 坐标系下。
+        """
+        if not self.is_connected:
+            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+
+        if self.head_target_pub is None:
+            logger.warning(
+                "Head target publisher not initialized. Set head_target_topic in config."
+            )
+            return
+
+        self.head_current_target_pose = None
+        self.head_target_pub.publish(pose)
+        logger.debug(f"Published head target: {pose}")
+
+    def send_head_target_stamped(self, frame_id: str = "", pose: Optional[Pose] = None) -> None:
+        """发送带坐标系信息的 head 绝对位姿目标（PoseStamped）。
+
+        Args:
+            frame_id: 目标位姿所在坐标系。
+            pose: 目标位姿。
+        """
+        if not self.is_connected:
+            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+
+        if self.head_target_stamped_pub is None:
+            logger.warning(
+                "Head target stamped publisher not initialized. Set head_target_topic in config."
+            )
+            return
+
+        if pose is None:
+            raise ValueError("pose is required in send_head_target_stamped()")
+
+        self.head_current_target_pose = None
+
+        msg = PoseStamped()
+        msg.header.frame_id = frame_id
+        msg.header.stamp = self.robot_node.get_clock().now().to_msg()
+        msg.pose = pose
+        self.head_target_stamped_pub.publish(msg)
+        logger.debug(f"Published head target (stamped) in frame '{frame_id}': {pose}")
 
     def send_waist_lifting_pose_relative(self, dx: float, dz: float, dphi: float) -> None:
         """Send local relative waist x/z/phi delta.
@@ -4584,6 +4901,9 @@ class ROS2RobotInterface:
         if self.body_current_pose_sub:
             self.body_current_pose_sub.destroy()
             self.body_current_pose_sub = None
+        if self.head_current_target_pose_sub:
+            self.head_current_target_pose_sub.destroy()
+            self.head_current_target_pose_sub = None
 
         if self.body_current_target_pose_sub:
             self.body_current_target_pose_sub.destroy()
@@ -4601,12 +4921,26 @@ class ROS2RobotInterface:
             self.body_target_stamped_pub.destroy()
             self.body_target_stamped_pub = None
 
+        if self.head_target_pub:
+            self.head_target_pub.destroy()
+            self.head_target_pub = None
+        if self.head_target_stamped_pub:
+            self.head_target_stamped_pub.destroy()
+            self.head_target_stamped_pub = None
+
         self.body_current_pose = None
+        self.body_current_pose_frame_id = None
         self.body_current_target_pose = None
+        self.body_current_target_pose_frame_id = None
+        self.head_current_target_pose = None
+        self.head_current_target_pose_frame_id = None
 
         if self.wbc_state_sub:
             self.wbc_state_sub.destroy()
             self.wbc_state_sub = None
+        if self.wbc_capability_sub:
+            self.wbc_capability_sub.destroy()
+            self.wbc_capability_sub = None
 
         if self.left_ft_wrench_sub:
             self.left_ft_wrench_sub.destroy()
@@ -4761,6 +5095,7 @@ class ROS2RobotInterface:
         self.latest_joint_state = None
         self.latest_categorized_joint_state = None
         self.wbc_state = None
+        self.wbc_capability = None
 
         
         logger.info("Disconnected from ROS 2 robot interface")

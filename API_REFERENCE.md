@@ -2657,12 +2657,14 @@ if pose_in_base:
 
 ### 系统信息查询
 
-#### `list_nodes() -> List[Dict[str, str]]`
+#### `list_nodes(include_hidden_nodes: bool = False) -> List[Dict[str, str]]`
 
 **功能：** 查询当前运行的 ROS 2 节点列表
 
 **原理：**
 - 类型：ROS 图查询（`rclpy` `get_node_names_and_namespaces`），不是 topic / action / service
+- 默认与 `ros2 node list` 一致：节点名或命名空间任一段以 `_` 开头的隐藏节点不返回
+- `include_hidden_nodes=True` 等价于 `ros2 node list -a`
 
 **说明：**
 - 此方法可以在连接或未连接状态下使用

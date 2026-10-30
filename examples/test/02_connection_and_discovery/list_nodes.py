@@ -3,6 +3,7 @@
 
 list_nodes() 行为（本脚本直接调用该接口）:
     - 查询当前运行的 ROS 2 节点，返回列表，每项含 name、namespace、full_name。
+    - 默认与 ``ros2 node list`` 一致，不包含隐藏节点；``include_hidden_nodes=True`` 等价于 ``ros2 node list -a``。
     - 无需 connect()：未连接时会创建临时节点完成查询后销毁。
     - 若已 connect()，则复用接口内部的 robot_node，避免重复创建节点。
     - graph 为空时返回空列表，不抛异常。
