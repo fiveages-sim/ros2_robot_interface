@@ -15,6 +15,7 @@ from rclpy.subscription import Subscription
 from std_msgs.msg import Float64, Int32
 
 from ..utils.exceptions import ROS2NotConnectedError
+from ..utils.topic_namespace import controller_topic
 
 logger = logging.getLogger(__name__)
 
@@ -101,15 +102,22 @@ class GripperHandler:
         # 注意：只有在 controller_name 存在时才会创建 GripperHandler，所以这里一定不为 None
         if self.gripper_type == GripperType.LEFT:
             controller_name = self.config.left_gripper_controller_name
-            target_command_topic = f"/{controller_name}/target_command"
         else:  # RIGHT
             controller_name = self.config.right_gripper_controller_name
-            target_command_topic = f"/{controller_name}/target_command"
+
+        # With topic_prefix/namespace (e.g. /g1d), do NOT publish absolute
+        # /left_hand_controller/... — that bypasses the robot workspace.
+        target_command_topic = controller_topic(
+            controller_name or "",
+            "target_command",
+            namespace=getattr(self.config, "namespace", "") or "",
+            topic_prefix=getattr(self.config, "topic_prefix", "") or "",
+        )
         
         self.target_command_pub = self.node.create_publisher(
             Int32, target_command_topic, 10
         )
-        logger.debug(f"{self.label}: Created target_command publisher for {target_command_topic}")
+        logger.info(f"{self.label}: target_command pub/sub on {target_command_topic}")
         
         # 创建订阅器用于状态同步（像VR和joystick一样）
         self.target_command_sub = self.node.create_subscription(

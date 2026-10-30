@@ -11,7 +11,7 @@ list_node_parameters(full_node_name) 行为（本脚本直接调用该接口）:
 
 本脚本流程:
     默认（交互）:
-        1. 调用 list_nodes() 列出当前 graph 中所有节点。
+        1. 调用 list_nodes() 列出当前 graph 中的可见节点（与 ``ros2 node list`` 一致，不含隐藏节点）。
         2. 用户输入序号或节点全名，选择要查看的节点。
         3. 调用 list_node_parameters() 打印该节点的参数。
 

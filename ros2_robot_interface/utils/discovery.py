@@ -7,7 +7,7 @@ These functions can be used independently or with ROS2RobotInterface.
 
 import logging
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import rclpy
 from rcl_interfaces.srv import ListParameters, DescribeParameters, GetParameters, SetParameters
@@ -15,6 +15,8 @@ from rcl_interfaces.msg import ParameterType, Parameter, ParameterValue
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.action import get_action_names_and_types
 from rclpy.node import Node
+
+from .topic_namespace import list_robot_description_topics
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +42,51 @@ def _create_temp_node(name: str, namespace: str = "") -> tuple[Node, SingleThrea
     return temp_node, temp_executor
 
 
+def discover_topics_with_types(
+    max_attempts: int = 30,
+) -> List[Tuple[str, List[str]]]:
+    """Discover available ROS 2 topics with types, with simple stabilization.
+
+    Args:
+        max_attempts: Maximum polling attempts while waiting for topics to stabilize.
+
+    Returns:
+        List of ``(topic_name, type_list)`` pairs from ``get_topic_names_and_types``.
+    """
+    temp_node, temp_executor = _create_temp_node("ros2_robot_interface_temp")
+
+    topic_names_and_types: List[Tuple[str, List[str]]] = []
+    stable_count = 0
+    last_count = 0
+
+    # Initial wait to let stale topics from previous connections disappear
+    time.sleep(0.5)
+
+    try:
+        for _ in range(max_attempts):
+            for _ in range(5):
+                temp_executor.spin_once(timeout_sec=0.05)
+            time.sleep(0.3)
+
+            raw = temp_node.get_topic_names_and_types()
+            topic_names_and_types = [(name, list(types)) for name, types in raw]
+            current_count = len(topic_names_and_types)
+
+            if current_count == last_count and current_count > 2:
+                stable_count += 1
+                if stable_count >= 3:
+                    break
+            else:
+                stable_count = 0
+
+            last_count = current_count
+    finally:
+        temp_executor.shutdown()
+        temp_node.destroy_node()
+
+    return topic_names_and_types
+
+
 def discover_topics(max_attempts: int = 30) -> List[str]:
     """Discover available ROS 2 topics with simple stabilization.
     
@@ -49,38 +96,12 @@ def discover_topics(max_attempts: int = 30) -> List[str]:
     Returns:
         List of topic names.
     """
-    temp_node, temp_executor = _create_temp_node("ros2_robot_interface_temp")
-    
-    topic_names: List[str] = []
-    stable_count = 0
-    last_count = 0
-    
-    # Initial wait to let stale topics from previous connections disappear
-    time.sleep(0.5)
-    
-    try:
-        for _ in range(max_attempts):
-            for _ in range(5):
-                temp_executor.spin_once(timeout_sec=0.05)
-            time.sleep(0.3)
-            
-            topic_names_and_types = temp_node.get_topic_names_and_types()
-            topic_names = [name for name, _ in topic_names_and_types]
-            current_count = len(topic_names)
-            
-            if current_count == last_count and current_count > 2:
-                stable_count += 1
-                if stable_count >= 3:
-                    break
-            else:
-                stable_count = 0
-            
-            last_count = current_count
-    finally:
-        temp_executor.shutdown()
-        temp_node.destroy_node()
-    
-    return topic_names
+    return [name for name, _ in discover_topics_with_types(max_attempts=max_attempts)]
+
+
+def discover_robot_description_topics(max_attempts: int = 30) -> List[str]:
+    """Discover ``*/robot_description`` topics with ``std_msgs/String`` type."""
+    return list_robot_description_topics(discover_topics_with_types(max_attempts=max_attempts))
 
 
 def discover_actions(settle_spins: int = 10) -> List[str]:
@@ -106,29 +127,48 @@ def discover_actions(settle_spins: int = 10) -> List[str]:
     return action_names
 
 
-def list_nodes(node: Optional[Node] = None, namespace: str = "") -> List[Dict[str, str]]:
+def _is_hidden_node(node_name: str, namespace: str) -> bool:
+    """True when ``ros2 node list`` would hide this node.
+
+    A node is hidden when its name, or any namespace segment, starts with ``_``.
+    This matches ``ros2node.api.get_node_names(include_hidden_nodes=False)``.
+    """
+    if node_name.startswith("_"):
+        return True
+    return any(segment.startswith("_") for segment in namespace.split("/") if segment)
+
+
+def list_nodes(
+    node: Optional[Node] = None,
+    namespace: str = "",
+    include_hidden_nodes: bool = False,
+) -> List[Dict[str, str]]:
     """查询当前运行的 ROS 2 节点列表。
-    
+
+    默认与 ``ros2 node list`` 一致：不返回隐藏节点（节点名或命名空间任一段以
+    ``_`` 开头）。``include_hidden_nodes=True`` 等价于 ``ros2 node list -a``。
+
     此函数可以在连接或未连接状态下使用。如果提供了节点，会使用现有节点；
     如果未提供，会创建一个临时节点来查询。
-    
+
     Args:
         node: 可选的 ROS 2 节点实例。如果为 None，将创建临时节点。
         namespace: 命名空间，用于临时节点创建。
-    
+        include_hidden_nodes: 为 True 时包含隐藏节点。默认 False。
+
     Returns:
         List[Dict[str, str]]: 节点信息列表，每个字典包含：
             - 'name': 节点名称（不含命名空间）
             - 'namespace': 节点命名空间
             - 'full_name': 完整节点名称（命名空间 + 名称）
-    
+
     Example:
         ```python
-        # 使用现有节点查询
+        # 使用现有节点查询（不含隐藏节点）
         nodes = list_nodes(node=my_node)
-        
-        # 创建临时节点查询
-        nodes = list_nodes()
+
+        # 创建临时节点查询，并包含隐藏节点
+        nodes = list_nodes(include_hidden_nodes=True)
         for node in nodes:
             print(f"节点: {node['full_name']}")
         ```
@@ -164,6 +204,8 @@ def list_nodes(node: Optional[Node] = None, namespace: str = "") -> List[Dict[st
         # 构建节点信息列表
         nodes = []
         for node_name, ns in node_names_and_namespaces:
+            if not include_hidden_nodes and _is_hidden_node(node_name, ns or ""):
+                continue
             # 确保命名空间以 / 开头（如果没有）
             if ns and not ns.startswith('/'):
                 ns = '/' + ns

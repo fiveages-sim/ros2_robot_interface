@@ -79,6 +79,7 @@ class ArmHandler:
         self.latest_pose: Optional[Pose] = None
         self.latest_target_pose: Optional[Pose] = None  # 从话题订阅获取的目标位置
         self.frame_id: Optional[str] = None  # 从 pose 订阅获取的 frame_id（只在第一次收到时更新）
+        self.target_frame_id: Optional[str] = None  # 从 current_target PoseStamped header 获取
         
         # 状态标志
         self._had_pose = False
@@ -163,6 +164,10 @@ class ArmHandler:
         """目标位置回调函数 - 处理接收到的目标位置消息"""
         # 更新状态
         self.latest_target_pose = msg.pose
+        if msg.header.frame_id:
+            self.target_frame_id = msg.header.frame_id
+            # Prefer target header for command/display frame once available.
+            self.frame_id = msg.header.frame_id
         self._had_target = True
     
     def get_pose(self) -> Optional[Pose]:
@@ -356,10 +361,17 @@ class ArmHandler:
         
         # 直接返回 latest_target_pose，在 Python 中单个对象引用读取是原子的
         return self.latest_target_pose
+
+    def get_target_frame_id(self) -> Optional[str]:
+        """Frame of the latest ``*_current_target`` PoseStamped (falls back to pose frame)."""
+        return self.target_frame_id or self.frame_id
     
     def get_frame_id(self) -> Optional[str]:
+        # Prefer current_target header when present (matches RViz Pose display frame).
+        if self.target_frame_id:
+            return self.target_frame_id
         # 如果未配置话题订阅，返回 None
-        if not self.current_target_topic:
+        if not self.current_target_topic and self.frame_id is None:
             return None
         
         # 直接返回 frame_id，在 Python 中单个对象引用读取是原子的
