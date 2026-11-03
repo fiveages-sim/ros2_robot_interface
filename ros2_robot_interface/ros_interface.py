@@ -50,7 +50,12 @@ from .constants import (
     is_head_joint_name,
 )
 from .utils.exceptions import ROS2AlreadyConnectedError, ROS2InterfaceError, ROS2NotConnectedError
-from .utils.quat_pose import check_pose_arrival, quat_multiply, rotate_vector_by_quat
+from .utils.quat_pose import (
+    check_pose_arrival,
+    quat_multiply,
+    quat_normalize,
+    rotate_vector_by_quat,
+)
 from .handler import ArmHandler, ArmType, GripperHandler, GripperType, HandTactileHandler, HandType
 from .utils.discovery import (
     discover_topics as _discover_topics,
@@ -1699,15 +1704,35 @@ class ROS2RobotInterface:
             )
         return result
 
+    def convert_ee_frame_pose(
+        self,
+        pose: Pose,
+        ee_frame: str,
+        command_frame: str,
+        timeout: float | None = None,
+    ) -> Pose:
+        """把 ``ee_frame`` 的期望位姿换成运控跟踪的 ``command_frame`` 位姿。
+
+        ``pose`` 与返回值在同一参考系（如 ``base_link``）。``ee_frame`` 是希望到达该位姿的
+        link（夹爪尖），``command_frame`` 是控制器实际跟踪的 link（腕部 TCP）。两者的刚体
+        偏置来自实时 TF，不写死常数。
+        """
+        return self._convert_eef_pose_to_tcp(
+            pose, ee_frame, command_frame, timeout=timeout
+        )
+
     def _convert_eef_pose_to_tcp(
         self,
         eef_pose_in_ref: Pose,
         eef_frame_name: str,
         tcp_frame_name: str,
+        timeout: float | None = None,
     ) -> Pose:
         if eef_frame_name == tcp_frame_name:
             return eef_pose_in_ref
-        tcp_in_eef = self.lookup_transform(eef_frame_name, tcp_frame_name)
+        tcp_in_eef = self.lookup_transform(
+            eef_frame_name, tcp_frame_name, timeout=timeout
+        )
         if tcp_in_eef is None:
             raise ValueError(
                 f"无法查询 {tcp_frame_name} 在 {eef_frame_name} 下的变换，"
@@ -1731,7 +1756,7 @@ class ROS2RobotInterface:
             eef_pose_in_ref.orientation.w,
         )
         offset_in_ref = rotate_vector_by_quat(tcp_in_eef_translation, eef_quaternion)
-        tcp_quaternion = quat_multiply(eef_quaternion, tcp_in_eef_quaternion)
+        tcp_quaternion = quat_normalize(quat_multiply(eef_quaternion, tcp_in_eef_quaternion))
         tcp_pose = Pose()
         tcp_pose.position.x = eef_pose_in_ref.position.x + offset_in_ref[0]
         tcp_pose.position.y = eef_pose_in_ref.position.y + offset_in_ref[1]
