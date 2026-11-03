@@ -20,7 +20,7 @@ from geometry_msgs.msg import Point, Pose, PoseStamped, Quaternion, TransformSta
 from nav_msgs.msg import Path
 from rclpy.action import ActionClient
 from rclpy.duration import Duration
-from rclpy.executors import SingleThreadedExecutor
+from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
 from rclpy.client import Client
 from rclpy.node import Node
 from rclpy.publisher import Publisher
@@ -73,11 +73,74 @@ from .utils.topic_namespace import (
     scope_names,
     to_node_relative_topic,
 )
+# ``rclpy.init()`` is process-global; this shared helper records whether this
+# package created the context so shutdown does not steal it from a host app.
+from .utils.rclpy_context import ensure_rclpy_context, shutdown_rclpy_if_owned
 
 if TYPE_CHECKING:
     from .dynamics.com_estimator import ComEstimate, ComEstimator
 
 logger = logging.getLogger(__name__)
+
+# A backwards jump in the message/TF time base larger than this means the
+# simulator was restarted (sim time reset); cached TF data must be dropped.
+CLOCK_REGRESSION_THRESHOLD_SEC: float = 1.0
+
+
+class _ClockWatchTfBuffer(tf2_ros.Buffer):
+    """TF buffer that flags a backwards jump in the data time base.
+
+    After a simulator restart every incoming transform looks older than the
+    newest cached stamp, so tf2 logs ``TF_OLD_DATA`` per message and lookups go
+    stale. Tracking the newest stamp here lets the interface rebuild the buffer
+    on the first sign of the jump instead of waiting for the spam.
+    """
+
+    def __init__(self, *args: Any, on_transform: Any = None, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.newest_stamp: float = 0.0
+        self.clock_regressed: bool = False
+        # Called for every incoming transform (used for "is this robot alive?")
+        self._on_transform = on_transform
+
+    def _note_stamp(self, stamp: Any) -> None:
+        """Record one message stamp and flag a large backwards jump."""
+        self.newest_stamp, regressed = note_stamp_regression(
+            self.newest_stamp, stamp
+        )
+        if regressed:
+            self.clock_regressed = True
+
+    def set_transform(self, transform: Any, authority: str) -> None:  # type: ignore[override]
+        self._note_stamp(getattr(getattr(transform, "header", None), "stamp", None))
+        if self._on_transform is not None:
+            try:
+                self._on_transform()
+            except Exception:  # pragma: no cover - callback must never break TF
+                pass
+        super().set_transform(transform, authority)
+
+
+def note_stamp_regression(newest_stamp: float, stamp: Any) -> tuple[float, bool]:
+    """Track the newest message stamp and report a large backwards jump.
+
+    Returns ``(newest_stamp, regressed)`` so callers can keep the running max
+    without allocating state of their own. Stamps of zero are ignored (some
+    publishers leave them unset).
+    """
+    if stamp is None:
+        return newest_stamp, False
+    try:
+        sec = float(stamp.sec) + float(stamp.nanosec) * 1e-9
+    except (TypeError, ValueError):
+        return newest_stamp, False
+    if sec <= 0.0:
+        return newest_stamp, False
+    if newest_stamp - sec >= CLOCK_REGRESSION_THRESHOLD_SEC:
+        return newest_stamp, True
+    if sec > newest_stamp:
+        return sec, False
+    return newest_stamp, False
 
 
 class ROS2RobotInterface:
@@ -126,6 +189,8 @@ class ROS2RobotInterface:
         self.robot_node: Node | None = None
         self.executor: SingleThreadedExecutor | None = None
         self.executor_thread: threading.Thread | None = None
+        # Set while tearing down so the spin thread treats faults as expected.
+        self._disconnecting = False
         
         self.joint_state_sub: Subscription | None = None
         self.fsm_state_sub: Subscription | None = None
@@ -214,6 +279,11 @@ class ROS2RobotInterface:
         
         self.tf_buffer: Optional[tf2_ros.Buffer] = None
         self.tf_listener: Optional[tf2_ros.TransformListener] = None
+        # Last message stamp seen (sim clock watchdog for simulator restarts).
+        self._last_header_stamp: Optional[float] = None
+        self._tf_reset_count: int = 0
+        # Wall-clock time of the last TF message received (liveness signal).
+        self.tf_last_msg_time: float = 0.0
         
         # Arm handlers
         self.left_arm_handler: Optional[ArmHandler] = None
@@ -628,8 +698,7 @@ class ROS2RobotInterface:
             raise ROS2AlreadyConnectedError("ROS2RobotInterface already connected")
         
         try:
-            if not rclpy.ok():
-                rclpy.init()
+            ensure_rclpy_context()
             
             is_dual_arm_detected = False
             topic_prefix = self.config.topic_prefix or ""
@@ -939,17 +1008,33 @@ class ROS2RobotInterface:
                     ReliabilityPolicy,
                 )
 
+                # The WBC controller latches both topics (transient_local), so we can
+                # read the last state right after connecting. Note: this QoS is only
+                # compatible if the publisher is also transient_local — a volatile
+                # publisher would be silently dropped (surfaced as "waiting for WBC
+                # state" in the GUI; check with `ros2 topic info -v`).
+                # Namespaced topic wins; the global fallback is opt-in via config
+                # because it may bind to another robot's controller.
+                wbc_latched_qos = QoSProfile(
+                    depth=1,
+                    history=HistoryPolicy.KEEP_LAST,
+                    reliability=ReliabilityPolicy.RELIABLE,
+                    durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                )
+                wbc_allow_global_fallback = bool(
+                    getattr(self.config, "wbc_allow_global_fallback", False)
+                )
                 wbc_state_topic = resolve_scoped_or_global(
                     "/ocs2_wbc_controller/current_state",
                     topic_prefix,
                     topic_names_full,
-                    allow_global_fallback=False,
+                    allow_global_fallback=wbc_allow_global_fallback,
                 )
                 self.wbc_state_sub = self.robot_node.create_subscription(
                     WbcCurrentState,
                     wbc_state_topic,
                     self._wbc_state_callback,
-                    10
+                    wbc_latched_qos,
                 )
                 logger.info(f"✅ Subscribed to {wbc_state_topic} for WBC mode tracking")
 
@@ -957,19 +1042,13 @@ class ROS2RobotInterface:
                     "/ocs2_wbc_controller/wbc_capabilities",
                     topic_prefix,
                     topic_names_full,
-                    allow_global_fallback=False,
-                )
-                capability_qos = QoSProfile(
-                    depth=1,
-                    history=HistoryPolicy.KEEP_LAST,
-                    reliability=ReliabilityPolicy.RELIABLE,
-                    durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                    allow_global_fallback=wbc_allow_global_fallback,
                 )
                 self.wbc_capability_sub = self.robot_node.create_subscription(
                     WbcCapability,
                     wbc_capability_topic,
                     self._wbc_capability_callback,
-                    capability_qos,
+                    wbc_latched_qos,
                 )
                 logger.info(
                     f"✅ Subscribed to {wbc_capability_topic} for WBC capability tracking"
@@ -1037,7 +1116,7 @@ class ROS2RobotInterface:
             )
 
             # Initialize TF buffer first (needed by ArmHandler)
-            self.tf_buffer = tf2_ros.Buffer()
+            self.tf_buffer = _ClockWatchTfBuffer(on_transform=self._note_tf_message)
             self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self.robot_node)
             
             # Create left arm handler (always created)
@@ -1232,7 +1311,11 @@ class ROS2RobotInterface:
             
             self.executor = SingleThreadedExecutor()
             self.executor.add_node(self.robot_node)
-            self.executor_thread = threading.Thread(target=self.executor.spin, daemon=True)
+            self.executor_thread = threading.Thread(
+                target=self._spin_executor,
+                daemon=True,
+                name="ros2-interface-spin",
+            )
             self.executor_thread.start()
 
             self._try_init_nav2()
@@ -1410,6 +1493,10 @@ class ROS2RobotInterface:
         }
         self.last_joint_state_time = current_time
         self._had_joint_state = True
+
+        # Simulator restarts reset sim time; tf2 would then reject every TF
+        # message as "from the past" and spam TF_OLD_DATA. Rebuild on a jump.
+        self._watch_clock_regression(msg)
         
         # If we were disconnected due to timeout, restore connection when new data arrives
         if not self._connected and self.robot_node is not None:
@@ -1437,7 +1524,87 @@ class ROS2RobotInterface:
         
         if was_recovering:
             logger.info("Joint state data recovery: Started receiving joint state messages again")
-    
+
+    def _note_tf_message(self) -> None:
+        """Record that a TF message arrived (used as a liveness signal)."""
+        self.tf_last_msg_time = time.time()
+
+    def _watch_clock_regression(self, msg: Any) -> None:
+        """Rebuild the TF buffer when the time base jumps backwards.
+
+        tf2 caches the newest stamp per frame, so after a simulator restart every
+        message looks older than the cache and tf2 logs ``TF_OLD_DATA`` for each
+        transform (and lookups stay stale). Recreating buffer + listener drops the
+        stale cache and re-subscribes to ``/tf_static`` so latched transforms come
+        back.
+
+        Two signals are checked because the message clock and the TF clock are not
+        guaranteed to come from the same publisher: the stamps of the messages this
+        callback sees, and the stamps the TF buffer records for itself.
+        """
+        stamp_regressed = False
+        header = getattr(msg, "header", None)
+        stamp = getattr(header, "stamp", None)
+        if stamp is not None:
+            sec = float(stamp.sec) + float(stamp.nanosec) * 1e-9
+            if sec > 0.0:
+                previous = self._last_header_stamp
+                self._last_header_stamp = sec
+                if previous is not None and previous - sec >= CLOCK_REGRESSION_THRESHOLD_SEC:
+                    logger.warning(
+                        "Message clock jumped backwards (%.3fs -> %.3fs); "
+                        "simulator restarted?",
+                        previous,
+                        sec,
+                    )
+                    stamp_regressed = True
+        if stamp_regressed:
+            self._reset_tf_buffer()
+            return
+        if getattr(self.tf_buffer, "clock_regressed", False):
+            # TF data went backwards even though the message stamps did not.
+            logger.warning("TF data time base jumped backwards; rebuilding TF buffer")
+            self._reset_tf_buffer()
+
+    def _reset_tf_buffer(self) -> None:
+        """Drop cached TF data and re-subscribe (after a clock jump)."""
+        node = self.robot_node
+        if node is None:
+            return
+        self._release_tf_listener()
+        try:
+            self.tf_buffer = _ClockWatchTfBuffer(on_transform=self._note_tf_message)
+            self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, node)
+        except Exception as e:
+            logger.error(f"Failed to rebuild TF buffer: {e}", exc_info=True)
+            return
+        self._tf_reset_count += 1
+        logger.info(f"TF buffer rebuilt after clock jump (#{self._tf_reset_count})")
+
+    def _release_tf_listener(self) -> None:
+        """Destroy the TF subscriptions and buffer (idempotent)."""
+        listener = self.tf_listener
+        buffer = self.tf_buffer
+        self.tf_listener = None
+        self.tf_buffer = None
+        if listener is not None:
+            for attr in ("tf_sub", "tf_static_sub"):
+                sub = getattr(listener, attr, None)
+                if sub is None:
+                    continue
+                try:
+                    sub.destroy()
+                except Exception as e:
+                    logger.debug(f"Failed to destroy TF subscriber {attr}: {e}")
+                setattr(listener, attr, None)
+        if buffer is not None:
+            jump_handle = getattr(buffer, "jump_handle", None)
+            if jump_handle is not None:
+                try:
+                    jump_handle.unregister()
+                except Exception as e:
+                    logger.debug(f"Failed to unregister TF jump callback: {e}")
+
     
     def _update_gripper_position_history_from_joint_state(self, joint_names: List[str], positions: List[float]) -> None:
         """Update gripper position history from joint state."""
@@ -4886,30 +5053,66 @@ class ROS2RobotInterface:
             sleep_fn=sleep_fn,
         )
 
+    def _spin_executor(self) -> None:
+        """Run the executor's spin loop without leaking teardown faults.
+
+        ``disconnect()`` shuts the executor down and destroys entities while the
+        wait set is being rebuilt; rclpy may then raise from inside ``spin()``
+        (e.g. ``InvalidHandle`` or ``StopIteration`` from the callback generator).
+        Those are expected during teardown and used to surface as an unhandled
+        "Exception in thread Thread-N (spin)" traceback on Ctrl+C.
+        """
+        executor = self.executor
+        if executor is None:
+            return
+        try:
+            executor.spin()
+        except ExternalShutdownException:
+            logger.debug("Executor spin ended: external shutdown")
+        except Exception as e:
+            if self._disconnecting or not rclpy.ok() or self.executor is None:
+                logger.debug("Executor spin ended during teardown: %s", e)
+            else:
+                logger.error("Executor spin failed: %s", e, exc_info=True)
+
     def disconnect(self) -> None:
-        """Disconnect from ROS 2 and cleanup resources."""
-        if self.tf_listener is not None:
-            self.tf_listener = None
-        if self.tf_buffer is not None:
-            self.tf_buffer = None
+        """Disconnect from ROS 2 and cleanup resources (idempotent)."""
+        if self._disconnecting:
+            logger.debug("disconnect() ignored: already in progress")
+            return
+        self._disconnecting = True
+        try:
+            self._disconnect_resources()
+        finally:
+            self._disconnecting = False
+
+    def _disconnect_resources(self) -> None:
+        """Release nodes, executors, subscriptions, publishers and handlers."""
         self._connected = False
 
-        # 先将节点移出 executor，再销毁高频 joint_states 订阅。这样 Zenoh
-        # 的尾部数据到达时 context 与 executor guard 仍然有效，不会在
-        # executor 已 shutdown 后触发订阅回调竞态。
+        # Stop the spin thread before touching any entity: destroying subscriptions
+        # or the node while the executor iterates its wait set raises from inside
+        # the spin loop (and racing destroy/shutdown was the noisy Ctrl+C traceback).
         if self.executor and self.robot_node:
             self.executor.remove_node(self.robot_node)
-        if self.joint_state_sub:
-            self.joint_state_sub.destroy()
-            self.joint_state_sub = None
-
         if self.executor:
             self.executor.shutdown()
             self.executor = None
-
         if self.executor_thread:
             self.executor_thread.join(timeout=2.0)
+            if self.executor_thread.is_alive():  # pragma: no cover - stuck callback
+                logger.warning(
+                    "Executor spin thread did not stop within 2s; continuing teardown"
+                )
             self.executor_thread = None
+
+        # TF listener owns its own /tf subscriptions; detach them explicitly now
+        # that the executor is gone.
+        self._release_tf_listener()
+
+        if self.joint_state_sub:
+            self.joint_state_sub.destroy()
+            self.joint_state_sub = None
 
         if self.fsm_state_sub:
             self.fsm_state_sub.destroy()
@@ -5109,14 +5312,13 @@ class ROS2RobotInterface:
         self._nav_result_future = None
 
         if self.robot_node:
-            self.robot_node.destroy_node()
+            try:
+                self.robot_node.destroy_node()
+            except Exception as e:
+                # A partially torn-down node must not abort the remaining cleanup.
+                logger.debug("Failed to destroy robot node: %s", e)
             self.robot_node = None
-        
-        if self.tf_listener is not None:
-            self.tf_listener = None
-        if self.tf_buffer is not None:
-            self.tf_buffer = None
-        
+
         self.latest_joint_state = None
         self.latest_categorized_joint_state = None
         self.wbc_state = None

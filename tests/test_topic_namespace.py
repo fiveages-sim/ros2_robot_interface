@@ -10,6 +10,7 @@ from ros2_robot_interface.utils.topic_namespace import (
     list_robot_description_topics,
     relativize_config_topics_for_namespace,
     resolve_core_topic,
+    resolve_scoped_or_global,
     scope_names,
     to_node_relative_topic,
     topic_prefix_from_robot_description,
@@ -148,6 +149,35 @@ def test_to_node_relative_topic():
     # Collapse double-scoped absolute / relative leftovers.
     assert to_node_relative_topic("/g1d_01/g1d_01/joint_states", "g1d_01") == "joint_states"
     assert to_node_relative_topic("g1d_01/joint_states", "g1d_01") == "joint_states"
+
+
+def test_wbc_topics_only_fall_back_when_allowed():
+    """A namespaced robot must not silently track another robot's WBC controller."""
+    available = {"/g1d_01/robot_description", "/ocs2_wbc_controller/current_state"}
+    scoped = resolve_scoped_or_global(
+        "/ocs2_wbc_controller/current_state",
+        "/g1d_01",
+        available,
+        allow_global_fallback=False,
+    )
+    assert scoped == "/g1d_01/ocs2_wbc_controller/current_state"
+
+    fallback = resolve_scoped_or_global(
+        "/ocs2_wbc_controller/current_state",
+        "/g1d_01",
+        available,
+        allow_global_fallback=True,
+    )
+    assert fallback == "/ocs2_wbc_controller/current_state"
+
+
+def test_wbc_allow_global_fallback_defaults_to_false():
+    import dataclasses
+
+    from ros2_robot_interface.config import ROS2RobotInterfaceConfig
+
+    fields = {f.name: f for f in dataclasses.fields(ROS2RobotInterfaceConfig)}
+    assert fields["wbc_allow_global_fallback"].default is False
 
 
 def test_controller_topic_respects_namespace_and_prefix():
