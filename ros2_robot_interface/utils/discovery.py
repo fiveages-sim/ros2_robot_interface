@@ -7,7 +7,7 @@ These functions can be used independently or with ROS2RobotInterface.
 
 import logging
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import rclpy
 from rcl_interfaces.srv import ListParameters, DescribeParameters, GetParameters, SetParameters
@@ -17,6 +17,7 @@ from rclpy.action import get_action_names_and_types
 from rclpy.node import Node
 
 from .topic_namespace import list_robot_description_topics
+from .rclpy_context import ensure_rclpy_context
 
 logger = logging.getLogger(__name__)
 
@@ -34,8 +35,7 @@ _SYSTEM_INTERNAL_PARAM_PREFIXES = {
 
 def _create_temp_node(name: str, namespace: str = "") -> tuple[Node, SingleThreadedExecutor]:
     """创建临时节点和 executor，便于查询/发现类操作。"""
-    if not rclpy.ok():
-        rclpy.init()
+    ensure_rclpy_context()
     temp_node = Node(name, namespace=namespace if namespace else "")
     temp_executor = SingleThreadedExecutor()
     temp_executor.add_node(temp_node)
@@ -99,9 +99,43 @@ def discover_topics(max_attempts: int = 30) -> List[str]:
     return [name for name, _ in discover_topics_with_types(max_attempts=max_attempts)]
 
 
+def filter_topics_with_publishers(
+    topics: List[str], count_publishers: Callable[[str], int]
+) -> List[str]:
+    """Keep only topics that still have at least one publisher.
+
+    ``get_topic_names_and_types()`` also lists topics that merely have subscribers
+    (e.g. our own URDF subscription, or a tool left running from a previous run),
+    so a topic can outlive the node that used to publish it.
+    """
+    kept: List[str] = []
+    for topic in topics:
+        try:
+            if int(count_publishers(topic)) > 0:
+                kept.append(topic)
+        except Exception:
+            # Keep on query failure: better to show a dead robot than to hide a live one.
+            kept.append(topic)
+    return kept
+
+
 def discover_robot_description_topics(max_attempts: int = 30) -> List[str]:
-    """Discover ``*/robot_description`` topics with ``std_msgs/String`` type."""
-    return list_robot_description_topics(discover_topics_with_types(max_attempts=max_attempts))
+    """Discover ``*/robot_description`` topics that still have a publisher."""
+    topics = list_robot_description_topics(
+        discover_topics_with_types(max_attempts=max_attempts)
+    )
+    if not topics:
+        return topics
+    temp_node, temp_executor = _create_temp_node(
+        "ros2_robot_interface_rd_pub_temp"
+    )
+    try:
+        for _ in range(6):
+            temp_executor.spin_once(timeout_sec=0.05)
+        return filter_topics_with_publishers(topics, temp_node.count_publishers)
+    finally:
+        temp_executor.shutdown()
+        temp_node.destroy_node()
 
 
 def discover_actions(settle_spins: int = 10) -> List[str]:
@@ -505,8 +539,7 @@ def set_node_parameters(
         ```
     """
     # Ensure rclpy is initialized
-    if not rclpy.ok():
-        rclpy.init()
+    ensure_rclpy_context()
     
     # 如果提供了节点，使用现有节点；否则创建临时节点
     use_temp_node = node is None

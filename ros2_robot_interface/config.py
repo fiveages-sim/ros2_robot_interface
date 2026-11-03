@@ -208,6 +208,10 @@ class ROS2RobotInterfaceConfig:
     topic_prefix: str = ""
     # 选定机器人的 robot_description 全名；空则使用 topic_prefix + "/robot_description"
     robot_description_topic: str = "/robot_description"
+    # 【可选】WBC 状态/能力话题在命名空间下不存在时，是否回退订阅全局
+    # `/ocs2_wbc_controller/...`。多机器人场景下回退可能绑到别的机器人的控制器上，
+    # 因此默认关闭；仅在确认图里只有一个 WBC 控制器时打开。
+    wbc_allow_global_fallback: bool = False
     
     # ============================================================================
     # Nav2 导航配置（可选，自动检测）
