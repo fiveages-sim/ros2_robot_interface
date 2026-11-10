@@ -716,7 +716,7 @@ result = interface.execute_movel_action("left", goal, duration=3.0, frame_id="ar
 
 **原理：**
 - 类型：Action（探测 server）
-- 名称：`config.joint_trajectory_action_name`（默认 `/ocs2_arm_controller/joint_trajectory_with_para`）
+- 名称：`config.joint_trajectory_action_name`（默认 `None`，按 WBC/split 拓扑自动检测）
 - 类型：`arms_ros2_control_msgs/action/JointTrajectory`
 
 #### `execute_joint_trajectory_action(joint_names, waypoints, *, time_mode=True, total_time=None, max_velocity=None, max_acceleration=None, max_jerk=None, auto_switch_fsm=True, feedback_callback=None, timeout=30.0, wait_for_server_timeout=5.0) -> Any`
@@ -725,7 +725,7 @@ result = interface.execute_movel_action("left", goal, duration=3.0, frame_id="ar
 
 **原理：**
 - 类型：Action
-- 名称：`config.joint_trajectory_action_name`（默认 `/ocs2_arm_controller/joint_trajectory_with_para`）
+- 名称：`config.joint_trajectory_action_name`（默认 `None`，按 WBC/split 拓扑自动检测）
 - 类型：`arms_ros2_control_msgs/action/JointTrajectory`（waypoint 为 `JointWaypoint`）
 - 隐式 FSM：默认切到 MOVEJ
 - 与 `send_joint_trajectory()` 不同：后者是 **Topic 发布** `/{controller}/target_joint_trajectory`，本方法走 Action 并等待结果
@@ -2922,3 +2922,24 @@ interface.send_fsm_command(FSM_OCS2)
 `send_waist_phi_velocity_scale(velocity_scale)` 发布俯仰速度比例；正值前倾，负值后仰，零值请求停止。非零命令会持续执行，停止发布不会自动停止控制器运动。
 
 腰部升降、旋转、俯仰速度话题在连接时按控制模式自动检测：识别到 WBC 统一关节话题时使用 `/ocs2_wbc_controller/` 前缀，否则使用 `/body_joint_controller/` 前缀；不跨模式回退。显式配置的话题优先保留。需要控制器提供相应能力。
+
+### WBC 关节轨迹 Action
+
+`joint_trajectory_action_name` 默认 None，按检测到的 WBC/split 拓扑发现
+`/ocs2_wbc_controller/joint_trajectory_with_para` 或
+`/ocs2_arm_controller/joint_trajectory_with_para`；沿用 `topic_prefix` 命名空间处理。
+显式地址优先，未发现匹配接口不跨控制器回退。WBC 同名 Service 已移除。
+连接后复用 `execute_joint_trajectory_action(joint_names, waypoints, ...)`，
+可指定 WBC `joints` 中的 body、双臂或混合子集，不会跨控制器转发。
+
+```python
+result = interface.execute_joint_trajectory_action(
+    joint_names=body_joint_names, waypoints=[body_target_positions],
+    time_mode=False, max_velocity=0.2, max_acceleration=0.4, max_jerk=2.0,
+)
+```
+
+关节名称及位置须来自实际机器人配置。默认自动切换 MOVEJ。DOUBLES 使用
+请求的速度、加速度和 jerk 约束，时间模式使用 total_time，约束模式计算时长；
+非 DOUBLES 不承诺使用请求的 max_*。反馈回调不可调用阻塞方法。
+超时沿用公共取消逻辑；实际到位须结合关节反馈。分体腰部 Service 不变。

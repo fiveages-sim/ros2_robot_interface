@@ -1,18 +1,24 @@
-"""验证全身 JointTrajectory Service 的部分关节及乱序映射。
+"""验证 ROS2RobotInterface 的 WBC 轨迹 Action 接口。
+
+运动经 execute_joint_trajectory_action() 下发，验证自动发现、FSM 切换、
+反馈回调和结果返回。独立观察节点仅查询参数和状态，不直接发送 Action。
 
 依次测试 doubles / linear / tanh，每种类型包含单点左臂子集、
-多点左右臂混合子集；请求名称故意打乱，绝不发送完整关节列表。
+多点左右臂混合子集、腰部单点及腰部+双臂多点；默认从控制器 joints
+识别腰部（可用 --body-joints 显式指定），未识别时停止；请求名称故意打乱，绝不发送完整关节列表。
 打印每次运动后的全部关节位置、目标和误差，并验证未指定关节保持。
-Service accepted 不视为运动完成；等待规划时长及反馈到点后才判定。
+Goal accepted 不视为运动完成；等待规划时长及反馈到点后才判定。
 
 在已激活 ROS 工作空间、可导入 rclpy 和 arms_ros2_control_msgs 的环境运行：
-    python examples/test/05_arm_jointspace/check_wbc_joint_trajectory_service.py
+    python examples/test/05_arm_jointspace/check_wbc_joint_trajectory_action.py
 
 会实际运动，默认偏移 0.04 rad；优先在仿真验证。
 结束或失败时切 HOLD，恢复原插值类型和多点时长。不会自动回到初始姿态。
 """
 
 from __future__ import annotations
+
+from concurrent.futures import ThreadPoolExecutor
 
 import argparse
 import math
@@ -27,13 +33,13 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Int32, String
 
-from arms_ros2_control_msgs.msg import JointWaypoint
-from arms_ros2_control_msgs.srv import JointTrajectory
+from ros2_robot_interface import ROS2RobotInterface, ROS2RobotInterfaceConfig
+from ros2_robot_interface.constants import is_body_joint_name
 
 
 class Check(Node):
     def __init__(self, controller: str):
-        super().__init__("check_wbc_joint_trajectory_service")
+        super().__init__("check_wbc_joint_trajectory_action")
         self.positions: dict[str, float] = {}
         self.feedback_time = 0.0
         self.fsm = None
@@ -43,7 +49,6 @@ class Check(Node):
         self.create_subscription(Int32, "/fsm_state", self.on_fsm, latched)
         self.create_subscription(String, "/robot_description", self.on_description, latched)
         self.fsm_pub = self.create_publisher(Int32, "/fsm_command", 10)
-        self.motion = self.create_client(JointTrajectory, controller + "/joint_trajectory_with_para")
         self.get_params = self.create_client(GetParameters, controller + "/get_parameters")
         self.set_params = self.create_client(SetParameters, controller + "/set_parameters")
 
@@ -95,7 +100,7 @@ class Check(Node):
         return result
 
 
-def run_case(node, mode, requested, multi, controlled, limits, args):
+def run_case(interface, node, mode, requested, multi, controlled, limits, args):
     before = node.snapshot(controlled)
     offsets = {}
     for i, name in enumerate(requested):
@@ -107,23 +112,52 @@ def run_case(node, mode, requested, multi, controlled, limits, args):
         if not lower <= before[name] + offset <= upper:
             raise RuntimeError(f"{name} 没有足够空间生成测试目标")
         offsets[name] = offset
-    request = JointTrajectory.Request(joint_names=requested)
-    for fraction in ([0.5, 1.0] if multi else [1.0]):
-        request.waypoints.append(JointWaypoint(
-            position=[before[n] + offsets[n] * fraction for n in requested],
-            time_mode=True, total_time=args.duration,
-            blend_ratio_percent=0.0,
-        ))
-    target = dict(zip(requested, request.waypoints[-1].position))
-    label = f"{mode} / {'多点混合子集' if multi else '单点左臂子集'}"
+    waypoints = [
+        [before[n] + offsets[n] * fraction for n in requested]
+        for fraction in ([0.5, 1.0] if multi else [1.0])
+    ]
+    target = dict(zip(requested, waypoints[-1]))
+    label = f"{mode} / {'多点' if multi else '单点'} / {', '.join(requested)}"
     print(f"\n[{label}] 请求顺序：{requested}", flush=True)
-    print(f"目标（按请求顺序）：{request.waypoints[-1].position}", flush=True)
-    response = node.call(node.motion, request)
+    print(f"目标（按请求顺序）：{waypoints[-1]}", flush=True)
+    feedback = []
+    held_drift = {n: 0.0 for n in controlled if n not in target}
+
+    entered_movej = False
+
+    def monitor_result():
+        nonlocal entered_movej
+        entered_movej = entered_movej or node.fsm == 4
+        for name in held_drift:
+            held_drift[name] = max(held_drift[name], abs(node.positions[name] - before[name]))
+        if (entered_movej and node.fsm != 4) or time.monotonic() - node.feedback_time > 1.0:
+            raise RuntimeError("执行期间离开 MOVEJ 或关节反馈超时")
+        return result_future.done()
+
+    # The public API blocks; keep this independent observer spinning on the
+    # calling thread. The interface owns its own background executor.
+    with ThreadPoolExecutor(max_workers=1) as worker:
+        result_future = worker.submit(
+            interface.execute_joint_trajectory_action,
+            joint_names=requested,
+            waypoints=waypoints,
+            time_mode=True,
+            total_time=args.duration,
+            feedback_callback=feedback.append,
+            timeout=args.duration * (len(waypoints) + 1) + args.margin,
+        )
+        try:
+            node.wait(monitor_result, timeout=args.duration * (len(waypoints) + 1) + args.margin + 15.0)
+        except (Exception, KeyboardInterrupt):
+            interface.send_fsm_command(2)
+            raise
+        response = result_future.result()
+    if response is None or not feedback:
+        raise RuntimeError("接口未返回 Action 结果或未收到反馈")
     print(f"response: {response}", flush=True)
     if not response.success or response.planned_duration <= 0:
-        raise RuntimeError(f"请求未立即规划成功：{response.message}")
+        raise RuntimeError(f"Action 规划或执行未成功：{response.message}")
     started = time.monotonic()
-    held_drift = {n: 0.0 for n in controlled if n not in target}
     stable_since = None
     failure = None
     while time.monotonic() - started < response.planned_duration + args.margin:
@@ -165,6 +199,7 @@ def run_case(node, mode, requested, multi, controlled, limits, args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--controller", default="/ocs2_wbc_controller")
+    parser.add_argument("--body-joints", nargs="+", help="覆盖默认自动识别的腰部关节名")
     parser.add_argument("--delta", type=float, default=0.04)
     parser.add_argument("--duration", type=float, default=3.0)
     parser.add_argument("--tolerance", type=float, default=0.01)
@@ -178,9 +213,18 @@ def main():
         parser.error("偏移应大于到点容差，避免不运动也通过")
     rclpy.init()
     node = Check(args.controller.rstrip("/"))
+    interface = ROS2RobotInterface(ROS2RobotInterfaceConfig())
     original = {}
     motion_started = False
     try:
+        interface.connect()
+        expected_action = args.controller.rstrip("/") + "/joint_trajectory_with_para"
+        if not interface.is_wbc or interface.config.joint_trajectory_action_name != expected_action:
+            raise RuntimeError(
+                f"接口未自动选择预期 WBC Action：{interface.config.joint_trajectory_action_name}"
+            )
+        if not interface.wait_for_joint_trajectory_action_server():
+            raise RuntimeError("接口等待 WBC Action 服务端超时")
         names = ["joints", "movej_interpolation_type", "movej_trajectory_duration"]
         response = node.call(node.get_params, GetParameters.Request(names=names))
         controlled = list(response.values[0].string_array_value)
@@ -188,8 +232,18 @@ def main():
                     names[2]: response.values[2].double_value}
         cases = [(["left_joint5", "left_joint1", "left_joint3", "left_joint2", "left_joint4"], False),
                  (["right_joint3", "left_joint2", "right_joint1", "left_joint3", "right_joint2", "left_joint1"], True)]
+        body_names = args.body_joints if args.body_joints is not None else [
+            name for name in controlled if is_body_joint_name(name)
+        ]
+        if not body_names:
+            raise RuntimeError("未识别到腰部关节，请通过 --body-joints 指定控制器中的实际关节名")
+        if len(set(body_names)) != len(body_names):
+            raise RuntimeError("腰部关节名不能重复")
+        body = list(reversed(body_names))
+        print("腰部测试关节：", body)
+        cases.extend([(body, False), (body + ["left_joint1", "right_joint1"], True)])
         if not controlled or any(n not in controlled for ns, _ in cases for n in ns):
-            raise RuntimeError("控制器关节配置不支持本测试使用的左右臂关节名称")
+            raise RuntimeError("控制器关节配置不支持本测试使用的腰部或左右臂关节名称")
         if any(len(ns) >= len(controlled) for ns, _ in cases):
             raise RuntimeError("本测试要求请求关节为控制器关节的严格子集")
         node.wait(lambda: bool(node.description))
@@ -205,13 +259,13 @@ def main():
         print("控制器完整顺序：", controlled)
         motion_started = True
         node.switch(2)
-        node.switch(4)
         for mode in ("doubles", "linear", "tanh"):
             node.set_parameters_remote({"movej_interpolation_type": mode,
                                         "movej_trajectory_duration": args.duration * 2})
             for requested, multi in cases:
-                run_case(node, mode, requested, multi, controlled, limits, args)
-        print("\nPASS: 6 个 Service 运动检查全部通过")
+                node.switch(2)
+                run_case(interface, node, mode, requested, multi, controlled, limits, args)
+        print(f"\nPASS: {3 * len(cases)} 个 Action 运动检查全部通过")
     finally:
         try:
             if motion_started:
@@ -219,8 +273,12 @@ def main():
             if original:
                 node.set_parameters_remote(original)
         finally:
-            node.destroy_node()
-            rclpy.shutdown()
+            try:
+                if interface.is_connected:
+                    interface.disconnect()
+            finally:
+                node.destroy_node()
+                rclpy.shutdown()
 
 
 if __name__ == "__main__":

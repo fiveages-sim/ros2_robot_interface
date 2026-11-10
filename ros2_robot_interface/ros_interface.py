@@ -554,6 +554,15 @@ class ROS2RobotInterface:
 
         # 腰部位姿 action：只使用 action 发现结果精确匹配。
         action_name_list = action_names or []
+        if self.config.joint_trajectory_action_name is None:
+            controller = "ocs2_wbc_controller" if self.is_wbc else "ocs2_arm_controller"
+            candidate = f"/{controller}/joint_trajectory_with_para"
+            if candidate in action_name_list:
+                self.config.joint_trajectory_action_name = candidate
+                logger.info(f"Detected joint trajectory action: {candidate}")
+            else:
+                logger.warning(f"Joint trajectory action unavailable: {candidate}")
+
         if self.config.waist_lifting_pose_action_name is None:
             for candidate in (
                 "/ocs2_wbc_controller/waist_lifting_pose",
@@ -700,6 +709,14 @@ class ROS2RobotInterface:
         try:
             ensure_rclpy_context()
             
+            # Re-discover an automatically selected address on reconnect, while
+            # preserving an address explicitly changed by the caller.
+            previous_auto = getattr(self, "_auto_joint_trajectory_action_name", None)
+            if previous_auto is not None and self.config.joint_trajectory_action_name == previous_auto:
+                self.config.joint_trajectory_action_name = None
+            explicit_joint_action = self.config.joint_trajectory_action_name
+            auto_joint_action = explicit_joint_action is None
+            self._auto_joint_trajectory_action_name = None
             is_dual_arm_detected = False
             topic_prefix = self.config.topic_prefix or ""
             topic_names_full: list[str] = []
@@ -723,6 +740,10 @@ class ROS2RobotInterface:
                 )
                 available_paths = set(topic_names_full) | set(action_names_full)
                 apply_prefix_to_config_paths(self.config, topic_prefix, available_paths)
+                if auto_joint_action:
+                    self._auto_joint_trajectory_action_name = self.config.joint_trajectory_action_name
+                else:
+                    self.config.joint_trajectory_action_name = explicit_joint_action
             except Exception as e:
                 logger.warning(f"Failed to auto-detect configuration: {e}")
                 is_dual_arm_detected = False
@@ -2315,7 +2336,7 @@ class ROS2RobotInterface:
 
         .. deprecated::
             第一代双臂路径接口，通过发布 ``/target_path`` topic 下发路径。已被第二代
-            ExecutePath service 接口取代：请改用 :meth:`execute_path`、
+            ExecutePath service 接口取代：请改用 :meth:`execute_path`
             :meth:`execute_left_path`、:meth:`execute_right_path`。第二代接口支持
             ``trajectory_duration``、返回 ``success``、允许左右路径不等长、空侧保持
             原有参考轨迹。本方法暂予保留仅为向后兼容，新代码不应再使用。

@@ -1,15 +1,19 @@
-"""验证分体双臂 JointTrajectory Action 的部分关节及乱序映射。
+"""沿固定左臂路点验证分体双臂 JointTrajectory Action。
 
-依次测试 doubles / linear / tanh，每种类型包含单点左臂子集、
-多点左右臂混合子集；请求名称故意打乱，绝不发送完整关节列表。
-打印每次运动后的全部关节位置、目标和误差，并验证未指定关节保持。
+把模块里的 LEFT_ARM_WAYPOINTS（三个左臂关节位置，弧度）作为路点依次下发，
+打印运动前后的全部关节位置、目标与误差，并验证右臂等未指定关节保持。
 Action accepted 不视为运动完成；同时检查成功结果和实际反馈到点。
+
+注意：GetParameters / SetParameters 的服务调用已注释，只保留 Action 通路；
+因此不再切换插值模式，沿用控制器当前的 movej_interpolation_type。
+多点轨迹的总时长由控制器 movej_trajectory_duration 决定（本脚本不再设置它），
+若现场该参数较大，请适当调大 --margin。
 
 在已激活 ROS 工作空间、可导入 rclpy 和 arms_ros2_control_msgs 的环境运行：
     python examples/test/05_arm_jointspace/check_split_joint_trajectory_action.py
 
-会实际运动，默认偏移 0.04 rad；优先在仿真验证。
-结束或失败时切 HOLD，恢复原插值类型和多点时长。不会自动回到初始姿态。
+会实际运动且幅度较大；优先在仿真验证。
+结束或失败时切 HOLD。不会自动回到初始姿态。
 """
 
 from __future__ import annotations
@@ -20,17 +24,39 @@ import time
 import xml.etree.ElementTree as ET
 
 import rclpy
-from rcl_interfaces.srv import GetParameters, SetParameters
+# NOTE: 服务调用已按要求注释，只保留 Action 通路，需要恢复时取消下面两行注释。
+# from rcl_interfaces.srv import GetParameters, SetParameters
 from rclpy.node import Node
 from rclpy.action import ActionClient
 from action_msgs.msg import GoalStatus
-from rclpy.parameter import Parameter
+# from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Int32, String
 
 from arms_ros2_control_msgs.msg import JointWaypoint
 from arms_ros2_control_msgs.action import JointTrajectory
+
+# 目标关节：左臂 7 个关节
+LEFT_ARM_JOINT_NAMES = [
+    "left_joint1",
+    "left_joint2",
+    "left_joint3",
+    "left_joint4",
+    "left_joint5",
+    "left_joint6",
+    "left_joint7",
+]
+
+# 左臂路点（弧度），每点顺序与 LEFT_ARM_JOINT_NAMES 一一对应
+LEFT_ARM_WAYPOINTS = [
+    [1.87641669974313, -0.5687477016984709, -1.730039779714491,
+     -1.9825839235531273, -1.0040110954577952, 0.07270804751898144, 0.2687643399448287],
+    [0.9644474437188942, -0.5046140506501708, -1.5921780158023264,
+     -0.47424058673172265, -0.7691065252830858, -0.0748338879732527, -0.8967314065858463],
+    [1.5177486656402732, -1.2694007275883998, -0.89838601010572,
+     -1.6746200861523974, -0.27997303648008287, -0.02395193698124802, 0.678350940785112],
+]
 
 
 class Check(Node):
@@ -48,8 +74,9 @@ class Check(Node):
         self.motion = ActionClient(self, JointTrajectory, controller + "/joint_trajectory_with_para")
         self.active_goal = None
         self.last_progress_print = 0.0
-        self.get_params = self.create_client(GetParameters, controller + "/get_parameters")
-        self.set_params = self.create_client(SetParameters, controller + "/set_parameters")
+        # NOTE: 参数服务客户端已注释，只保留 Action。
+        # self.get_params = self.create_client(GetParameters, controller + "/get_parameters")
+        # self.set_params = self.create_client(SetParameters, controller + "/set_parameters")
 
     def on_progress(self, msg):
         now = time.monotonic()
@@ -78,21 +105,22 @@ class Check(Node):
                 return
         raise TimeoutError("等待状态、反馈或服务响应超时")
 
-    def call(self, client, request):
-        if not client.wait_for_service(timeout_sec=5.0):
-            raise RuntimeError(f"Service 不可用：{client.srv_name}")
-        future = client.call_async(request)
-        self.wait(future.done)
-        return future.result()
-
-    def set_parameters_remote(self, values):
-        request = SetParameters.Request()
-        request.parameters = [Parameter(name, value=value).to_parameter_msg()
-                              for name, value in values.items()]
-        response = self.call(self.set_params, request)
-        for name, result in zip(values, response.results):
-            if not result.successful:
-                raise RuntimeError(f"设置 {name} 失败：{result.reason}")
+    # NOTE: 服务辅助方法已注释（只保留 Action）。
+    # def call(self, client, request):
+    #     if not client.wait_for_service(timeout_sec=5.0):
+    #         raise RuntimeError(f"Service 不可用：{client.srv_name}")
+    #     future = client.call_async(request)
+    #     self.wait(future.done)
+    #     return future.result()
+    #
+    # def set_parameters_remote(self, values):
+    #     request = SetParameters.Request()
+    #     request.parameters = [Parameter(name, value=value).to_parameter_msg()
+    #                           for name, value in values.items()]
+    #     response = self.call(self.set_params, request)
+    #     for name, result in zip(values, response.results):
+    #         if not result.successful:
+    #             raise RuntimeError(f"设置 {name} 失败：{result.reason}")
 
     def switch(self, state):
         self.wait(lambda: self.fsm_pub.get_subscription_count() > 0)
@@ -108,29 +136,28 @@ class Check(Node):
         return result
 
 
-def run_case(node, mode, requested, multi, controlled, limits, args):
+def run_case(node, label, requested, waypoints, controlled, limits, args):
     before = node.snapshot(controlled)
-    offsets = {}
-    for i, name in enumerate(requested):
-        # 不同偏移让乱序映射错误更容易识别；根据限位选择可行方向。
-        offset = args.delta * (1.0 + i * 0.15)
-        lower, upper = limits[name]
-        if before[name] + offset > upper:
-            offset = -offset
-        if not lower <= before[name] + offset <= upper:
-            raise RuntimeError(f"{name} 没有足够空间生成测试目标")
-        offsets[name] = offset
+    for i, positions in enumerate(waypoints):
+        if len(positions) != len(requested):
+            raise RuntimeError(f"路点 {i} 长度 {len(positions)} 与关节数 {len(requested)} 不一致")
+        for name, value in zip(requested, positions):
+            lower, upper = limits[name]
+            if not lower <= value <= upper:
+                raise RuntimeError(
+                    f"路点 {i} 的 {name}={value:.6f} 超出限位 [{lower:.6f}, {upper:.6f}]"
+                )
     request = JointTrajectory.Goal(joint_names=requested)
-    for fraction in ([0.5, 1.0] if multi else [1.0]):
+    for positions in waypoints:
         request.waypoints.append(JointWaypoint(
-            position=[before[n] + offsets[n] * fraction for n in requested],
+            position=list(positions),
             time_mode=True, total_time=args.duration,
             blend_ratio_percent=0.0,
         ))
     target = dict(zip(requested, request.waypoints[-1].position))
-    label = f"{mode} / {'多点混合子集' if multi else '单点左臂子集'}"
-    print(f"\n[{label}] 请求顺序：{requested}", flush=True)
-    print(f"目标（按请求顺序）：{request.waypoints[-1].position}", flush=True)
+    print(f"\n[{label}] 关节顺序：{requested}", flush=True)
+    print(f"路点数：{len(request.waypoints)}，末路点（按请求顺序）："
+          f"{request.waypoints[-1].position}", flush=True)
     if not node.motion.wait_for_server(timeout_sec=5.0):
         raise RuntimeError("分体双臂 JointTrajectory Action 不可用")
     sent = node.motion.send_goal_async(request, feedback_callback=node.on_progress)
@@ -141,7 +168,7 @@ def run_case(node, mode, requested, multi, controlled, limits, args):
         raise RuntimeError("Action 目标被拒绝")
     result_future = node.active_goal.get_result_async()
     started = time.monotonic()
-    # doubles 每段时间、普通插值总时间在本测试中都按路点数设置。
+    # 单点用 goal 的 total_time；多点由控制器 movej_trajectory_duration 决定，留足余量。
     timeout = len(request.waypoints) * args.duration + args.margin
     held_drift = {n: 0.0 for n in controlled if n not in target}
     stable_since = None
@@ -184,9 +211,9 @@ def run_case(node, mode, requested, multi, controlled, limits, args):
         actual = node.positions.get(name, float("nan"))
         print(f"{name:22s} {before[name]: .6f}  {expected: .6f}  {actual: .6f}  "
               f"{abs(actual - expected):.6f}  {'运动' if name in target else '保持'}")
-    print("实际位置（按乱序请求顺序）：", [node.positions.get(n) for n in requested])
+    print("实际位置（按请求顺序）：", [node.positions.get(n) for n in requested])
     drift = max(held_drift.values(), default=0.0)
-    print(f"未指定关节运动期间最大偏移：{drift:.6f} rad", flush=True)
+    print(f"未指定关节（右臂等）运动期间最大偏移：{drift:.6f} rad", flush=True)
     if failure or drift > args.hold_tolerance:
         raise RuntimeError(failure or f"未指定关节偏移超限：{drift:.6f}")
     print(f"PASS: {label}", flush=True)
@@ -195,33 +222,36 @@ def run_case(node, mode, requested, multi, controlled, limits, args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--controller", default="/ocs2_arm_controller")
-    parser.add_argument("--delta", type=float, default=0.04)
-    parser.add_argument("--duration", type=float, default=3.0)
+    parser.add_argument("--duration", type=float, default=3.0,
+                        help="写入每个路点的 total_time；单点轨迹生效，也用于估算等待超时")
     parser.add_argument("--tolerance", type=float, default=0.01)
     parser.add_argument("--hold-tolerance", type=float, default=0.01)
-    parser.add_argument("--margin", type=float, default=5.0)
+    parser.add_argument("--margin", type=float, default=5.0,
+                        help="等待余量；多点轨迹总时长由控制器 movej_trajectory_duration 决定，必要时调大")
     args = parser.parse_args()
     if any(not math.isfinite(v) or v <= 0 for v in
-           (args.delta, args.duration, args.tolerance, args.hold_tolerance, args.margin)):
-        parser.error("偏移、时长、容差和等待余量必须为有限正数")
-    if args.delta <= args.tolerance:
-        parser.error("偏移应大于到点容差，避免不运动也通过")
+           (args.duration, args.tolerance, args.hold_tolerance, args.margin)):
+        parser.error("时长、容差和等待余量必须为有限正数")
     rclpy.init()
     node = Check(args.controller.rstrip("/"))
-    original = {}
+    # original = {}  # NOTE: 不再读写控制器参数，无需保存原始值
     motion_started = False
     try:
-        names = ["joints", "movej_interpolation_type", "movej_trajectory_duration"]
-        response = node.call(node.get_params, GetParameters.Request(names=names))
-        controlled = list(response.values[0].string_array_value)
-        original = {names[1]: response.values[1].string_value,
-                    names[2]: response.values[2].double_value}
-        cases = [(["left_joint5", "left_joint1", "left_joint3", "left_joint2", "left_joint4"], False),
-                 (["right_joint3", "left_joint2", "right_joint1", "left_joint3", "right_joint2", "left_joint1"], True)]
-        if not controlled or any(n not in controlled for ns, _ in cases for n in ns):
-            raise RuntimeError("控制器关节配置不支持本测试使用的左右臂关节名称")
-        if any(len(ns) >= len(controlled) for ns, _ in cases):
-            raise RuntimeError("本测试要求请求关节为控制器关节的严格子集")
+        # NOTE: GetParameters 调用已注释；改用 /joint_states 中的左右臂关节作为受控集合。
+        # names = ["joints", "movej_interpolation_type", "movej_trajectory_duration"]
+        # response = node.call(node.get_params, GetParameters.Request(names=names))
+        # controlled = list(response.values[0].string_array_value)
+        # original = {names[1]: response.values[1].string_value,
+        #             names[2]: response.values[2].double_value}
+        node.wait(lambda: bool(node.positions))
+        controlled = sorted(
+            n for n in node.positions if n.startswith(("left_joint", "right_joint"))
+        )
+        if not controlled:
+            raise RuntimeError("/joint_states 中没有 left_joint*/right_joint*，无法确定受控关节")
+        missing = [n for n in LEFT_ARM_JOINT_NAMES if n not in controlled]
+        if missing:
+            raise RuntimeError(f"/joint_states 中缺少左臂关节：{missing}")
         node.wait(lambda: bool(node.description))
         limits = {}
         for joint in ET.fromstring(node.description).findall("joint"):
@@ -230,18 +260,17 @@ def main():
                 limits[joint.get("name")] = (-math.inf, math.inf)
             elif limit is not None and "lower" in limit.attrib and "upper" in limit.attrib:
                 limits[joint.get("name")] = (float(limit.get("lower")), float(limit.get("upper")))
-        if any(n not in limits for ns, _ in cases for n in ns):
-            raise RuntimeError("robot_description 中缺少测试关节限位")
-        print("控制器完整顺序：", controlled)
+        missing_limits = [n for n in LEFT_ARM_JOINT_NAMES if n not in limits]
+        if missing_limits:
+            raise RuntimeError(f"robot_description 中缺少关节限位：{missing_limits}")
+        print("受控关节（来自 /joint_states）：", controlled)
         motion_started = True
         node.switch(2)
         node.switch(4)
-        for mode in ("doubles", "linear", "tanh"):
-            node.set_parameters_remote({"movej_interpolation_type": mode,
-                                        "movej_trajectory_duration": args.duration * 2})
-            for requested, multi in cases:
-                run_case(node, mode, requested, multi, controlled, limits, args)
-        print("\nPASS: 6 个 Action 运动检查全部通过")
+        # NOTE: 插值模式切换依赖 SetParameters，已注释，沿用控制器当前配置。
+        run_case(node, "左臂固定路点", LEFT_ARM_JOINT_NAMES, LEFT_ARM_WAYPOINTS,
+                 controlled, limits, args)
+        print("\nPASS: 左臂路点 Action 检查通过")
     finally:
         try:
             if node.active_goal is not None:
@@ -252,8 +281,9 @@ def main():
                     print(f"取消 Action 未确认：{exc}；继续切 HOLD", flush=True)
             if motion_started:
                 node.switch(2)
-            if original:
-                node.set_parameters_remote(original)
+            # NOTE: 参数恢复依赖 SetParameters，已注释。
+            # if original:
+            #     node.set_parameters_remote(original)
         finally:
             node.motion.destroy()
             node.destroy_node()
