@@ -1154,7 +1154,7 @@ head_positions = [0.5, -0.3]  # 弧度
 interface.send_head_joint_positions(head_positions)
 ```
 
-#### `send_head_joint_trajectory(joint_names: List[str], waypoints: List[List[float]], trajectory_duration: float | None = None) -> None`
+#### `send_head_joint_trajectory(joint_names: List[str], waypoints: List[List[float]], movej_trajectory_duration: float | None = None, movej_trajectory_blend_ratio: float | None = None) -> None`
 
 **功能：** 发送头部关节多路点轨迹（split 拓扑）。
 
@@ -1163,13 +1163,13 @@ interface.send_head_joint_positions(head_positions)
 - 名称：`config.head_joint_trajectory_topic`（自动检测 `/head_joint_controller/target_joint_trajectory`）
 - 消息：`trajectory_msgs/msg/JointTrajectory`
 - 隐式 FSM：切到 MOVEJ
-- 执行参数：`trajectory_duration` 非空时写 `movej_trajectory_duration` 到 head 控制器节点（`head_joint_controller`）
+- 执行参数：`movej_trajectory_duration` 非空时写 `movej_trajectory_duration` 到 head 控制器节点（`head_joint_controller`）
 - 控制器自动把当前位置作为首路点
 
 **参数：**
 - `joint_names` (`List[str]`): 头部关节名列表（须与控制器关节一致）
 - `waypoints` (`List[List[float]]`): 多路点，每点为与 `joint_names` 等长的关节位置列表（弧度）
-- `trajectory_duration` (`float | None`): 可选总轨迹时长（秒）；`None` 沿用控制器当前参数
+- `movej_trajectory_duration` (`float | None`): 可选总轨迹时长（秒）；`None` 沿用控制器当前参数
 
 **说明：**
 - 仅 split 拓扑存在该话题；WBC full-body 请用 `send_joint_trajectory()`（`/ocs2_wbc_controller/target_joint_trajectory`，`joint_names` 选头部关节）
@@ -1184,7 +1184,7 @@ interface.send_head_joint_trajectory(
         [0.5, -0.3],
         [0.0, 0.0],
     ],
-    trajectory_duration=3.0,
+    movej_trajectory_duration=3.0,
 )
 ```
 
@@ -1318,7 +1318,7 @@ body_positions = [0.0, 0.0, 0.0, 0.0]  # 弧度
 interface.send_body_joint_positions(body_positions)
 ```
 
-#### `send_body_joint_trajectory(joint_names: List[str], waypoints: List[List[float]], trajectory_duration: float | None = None) -> None`
+#### `send_body_joint_trajectory(joint_names: List[str], waypoints: List[List[float]], movej_trajectory_duration: float | None = None, movej_trajectory_blend_ratio: float | None = None) -> None`
 
 **功能：** 发送躯干关节多路点轨迹（split 拓扑）。
 
@@ -1327,13 +1327,13 @@ interface.send_body_joint_positions(body_positions)
 - 名称：`config.body_joint_trajectory_topic`（自动检测 `/body_joint_controller/target_joint_trajectory`）
 - 消息：`trajectory_msgs/msg/JointTrajectory`
 - 隐式 FSM：切到 MOVEJ
-- 执行参数：`trajectory_duration` 非空时写 `movej_trajectory_duration` 到 body 控制器节点（`body_joint_controller`）
+- 执行参数：`movej_trajectory_duration` 非空时写 `movej_trajectory_duration` 到 body 控制器节点（`body_joint_controller`）
 - 控制器自动把当前位置作为首路点
 
 **参数：**
 - `joint_names` (`List[str]`): 躯干关节名列表（须与控制器关节一致）
 - `waypoints` (`List[List[float]]`): 多路点，每点为与 `joint_names` 等长的关节位置列表（弧度）
-- `trajectory_duration` (`float | None`): 可选总轨迹时长（秒）；`None` 沿用控制器当前参数
+- `movej_trajectory_duration` (`float | None`): 可选总轨迹时长（秒）；`None` 沿用控制器当前参数
 
 **说明：**
 - 仅 split 拓扑存在该话题；WBC full-body 请用 `send_joint_trajectory()`（`/ocs2_wbc_controller/target_joint_trajectory`，`joint_names` 选躯干关节）
@@ -1348,7 +1348,7 @@ interface.send_body_joint_trajectory(
         [0.0, 0.0, 0.0, 0.0],
         [0.2, 0.0, 0.1, 0.0],
     ],
-    trajectory_duration=3.0,
+    movej_trajectory_duration=3.0,
 )
 ```
 
@@ -2375,7 +2375,7 @@ print(f"execute_path success: {ok}")
 
 **原理：** 包装 `execute_path(..., left_poses=[])`，同一 Service `execute_path`。
 
-#### `send_joint_trajectory(joint_names: List[str], waypoints: List[List[float]], trajectory_duration: float | None = None) -> None`
+#### `send_joint_trajectory(joint_names: List[str], waypoints: List[List[float]], movej_trajectory_duration: float | None = None, movej_trajectory_blend_ratio: float | None = None) -> None`
 
 **功能：** 发送多路点关节轨迹，支持单臂/双臂统一接口。
 
@@ -2383,7 +2383,7 @@ print(f"execute_path success: {ok}")
 - 类型：Topic 发布；可选参数服务
 - 名称：`/{controller_name}/target_joint_trajectory`（`controller_name` 从左/右臂关节 topic 第一段解析，如 `/ocs2_wbc_controller/target_joint_trajectory`）
 - 消息：`trajectory_msgs/msg/JointTrajectory`
-- `trajectory_duration` 若给定：对 `arm_controller` 调用 `SetParameters` 写 `movej_trajectory_duration`
+- `movej_trajectory_duration` 若给定：对 `arm_controller` 调用 `SetParameters` 写 `movej_trajectory_duration`
 - 路点融合另可读节点参数 `movej_trajectory_blend_ratio`
 - 隐式 FSM：切到 MOVEJ
 - 需要等待结果时请用 `execute_joint_trajectory_action`
@@ -2391,11 +2391,11 @@ print(f"execute_path success: {ok}")
 **参数：**
 - `joint_names` (`List[str]`): 被控制关节名，顺序决定每个 waypoint 中数值的对应关系；不可为空
 - `waypoints` (`List[List[float]]`): 目标关节角路点，单位弧度；不可为空，每个路点长度必须等于 `joint_names` 长度；控制器会把当前关节位置作为首个路点，因此至少需提供 2 个路点
-- `trajectory_duration` (`float | None`): 整条轨迹总时长，单位秒；给定时先写入 `arm_controller.movej_trajectory_duration`（与 ros2-viser 控制器配置一致），`None` 沿用当前节点参数
+- `movej_trajectory_duration` (`float | None`): 整条轨迹总时长，单位秒；给定时先写入 `arm_controller.movej_trajectory_duration`（与 ros2-viser 控制器配置一致），`None` 沿用当前节点参数
 
 **异常：**
 - `ROS2NotConnectedError`: 接口未连接，或轨迹发布器 / `arm_controller` 节点未知
-- `ValueError`: `joint_names` 为空、路点少于 2 个、`trajectory_duration` 非正，或路点长度与 `joint_names` 不一致
+- `ValueError`: `joint_names` 为空、路点少于 2 个、`movej_trajectory_duration` 非正，或路点长度与 `joint_names` 不一致
 
 **示例：**
 ```python
@@ -2405,7 +2405,7 @@ waypoints = [
     [0.0, 0.3, -0.2, 0.0, 1.2, 0.0, 0.0],
     [0.1, 0.4, -0.3, 0.1, 1.1, 0.1, 0.0],
 ]
-interface.send_joint_trajectory(joint_names, waypoints, trajectory_duration=5.0)
+interface.send_joint_trajectory(joint_names, waypoints, movej_trajectory_duration=5.0)
 ```
 
 ---
@@ -2973,3 +2973,18 @@ execute_joint_trajectory_action。分体 body 与双臂分别执行，不保证�
 BasicJointController 所有实例（含 head）同名业务 Service 均已改为 Action；
 已有 send_body_joint_trajectory Topic 方法以及专用腰部升降接口保持不变。
 验证脚本：examples/test/10_body_waist/check_execute_body_joint_trajectory_action.py。
+
+### Topic 轨迹参数命名更新
+
+`send_joint_trajectory()`、`send_body_joint_trajectory()`、`send_head_joint_trajectory()`
+的 `trajectory_duration` 参数已改名为 `movej_trajectory_duration`，旧关键字不再接受；
+第三个位置参数含义不变。新增 `movej_trajectory_blend_ratio=None`，范围 [0, 1]，
+仅 DOUBLES 多点转接生效。两个参数都通过参数服务写入对应控制器，持续生效；
+None 不修改当前配置。它们不是轨迹消息中的逐点时间或逐点 blend ratio。
+
+```python
+interface.send_joint_trajectory(
+    joint_names=names, waypoints=points,
+    movej_trajectory_duration=5.0, movej_trajectory_blend_ratio=0.2,
+)
+```

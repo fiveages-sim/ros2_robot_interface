@@ -4165,7 +4165,8 @@ class ROS2RobotInterface:
     def send_joint_trajectory(self,
                              joint_names: List[str],
                              waypoints: List[List[float]],
-                             trajectory_duration: float | None = None) -> None:
+                             movej_trajectory_duration: float | None = None,
+                             movej_trajectory_blend_ratio: float | None = None) -> None:
         """Send multi-node joint trajectory for arm joints.
         
         This method uses a unified topic for both single-arm and dual-arm control.
@@ -4179,10 +4180,15 @@ class ROS2RobotInterface:
             waypoints: List of waypoints, each waypoint is a list of joint positions
                       Note: Current joint position will be added as first waypoint automatically
                       Each waypoint must have the same length as joint_names
-            trajectory_duration: Optional total trajectory time in seconds. When set, updates the
+            movej_trajectory_duration: Optional total trajectory time in seconds. When set, updates the
                       arm controller ROS parameter ``movej_trajectory_duration`` before publishing
                       (same as ros2-viser controller config). ``None`` leaves the current parameter value.
         
+        Note:
+            movej_trajectory_blend_ratio: Optional controller-wide blend ratio in [0, 1].
+                Only DOUBLES uses blending. None preserves the current ROS parameter.
+                Both movej_* settings persist and affect subsequent trajectories.
+
         Raises:
             ROS2NotConnectedError: If interface is not connected
             ValueError: If waypoints are invalid
@@ -4207,17 +4213,22 @@ class ROS2RobotInterface:
             if len(waypoint) != len(joint_names):
                 raise ValueError(f"Waypoint {i} has {len(waypoint)} positions, but expected {len(joint_names)}")
 
-        if trajectory_duration is not None:
-            if trajectory_duration <= 0:
-                raise ValueError("trajectory_duration must be positive")
+        parameters = {}
+        if movej_trajectory_duration is not None:
+            if not math.isfinite(movej_trajectory_duration) or movej_trajectory_duration <= 0:
+                raise ValueError("movej_trajectory_duration must be finite and positive")
+            parameters["movej_trajectory_duration"] = float(movej_trajectory_duration)
+        if movej_trajectory_blend_ratio is not None:
+            if not math.isfinite(movej_trajectory_blend_ratio) or not 0 <= movej_trajectory_blend_ratio <= 1:
+                raise ValueError("movej_trajectory_blend_ratio must be finite and within [0, 1]")
+            parameters["movej_trajectory_blend_ratio"] = float(movej_trajectory_blend_ratio)
+        if parameters:
             ctrl = self.arm_controller
             if not ctrl:
-                raise ROS2NotConnectedError(
-                    "Arm controller node unknown; cannot set movej_trajectory_duration"
-                )
-            if not self.set_node_parameters(ctrl, {"movej_trajectory_duration": trajectory_duration}):
-                logger.warning("Failed to set movej_trajectory_duration on %s", ctrl)
-        
+                raise ROS2NotConnectedError("Controller node unknown; cannot set trajectory parameters")
+            if not self.set_node_parameters(ctrl, parameters):
+                logger.warning("Failed to set trajectory parameters on %s", ctrl)
+
         # Create JointTrajectory message
         trajectory_msg = JointTrajectory()
         trajectory_msg.header.stamp = self.robot_node.get_clock().now().to_msg()
@@ -4225,11 +4236,12 @@ class ROS2RobotInterface:
         trajectory_msg.joint_names = joint_names
         
         # Add waypoints (current position will be added as first point by the controller)
-        for waypoint in waypoints:
+        for i, waypoint in enumerate(waypoints):
             point = JointTrajectoryPoint()
             point.positions = waypoint
-            # time_from_start is not used currently, but we can set it for future use
-            # For now, trajectory_duration parameter in controller will be used
+            # ponytail: temporary positive, increasing times for controller validation;
+            # planning still uses movej_trajectory_duration. Unify timing semantics later.
+            point.time_from_start.sec = i + 1
             trajectory_msg.points.append(point)
         
         # Publish trajectory
@@ -4256,17 +4268,23 @@ class ROS2RobotInterface:
     def send_body_joint_trajectory(self,
                                    joint_names: List[str],
                                    waypoints: List[List[float]],
-                                   trajectory_duration: float | None = None) -> None:
+                                   movej_trajectory_duration: float | None = None,
+                             movej_trajectory_blend_ratio: float | None = None) -> None:
         """发送躯干关节多路点轨迹（split 拓扑）。
 
-        控制器会把当前位置自动插到轨迹起点；``trajectory_duration`` 非空时，
+        控制器会把当前位置自动插到轨迹起点；``movej_trajectory_duration`` 非空时，
         发布前将 body 控制器节点（``body_joint_controller``）参数
         ``movej_trajectory_duration`` 设为该值。
 
         Args:
             joint_names: 躯干关节名列表（须与控制器关节一致）。
             waypoints: 多路点，每点为与 joint_names 等长的关节位置列表（弧度）。
-            trajectory_duration: 可选总轨迹时长（秒）；None 沿用控制器当前参数。
+            movej_trajectory_duration: 可选总轨迹时长（秒）；None 沿用控制器当前参数。
+
+        Note:
+            movej_trajectory_blend_ratio: Optional controller-wide blend ratio in [0, 1].
+                Only DOUBLES uses blending. None preserves the current ROS parameter.
+                Both movej_* settings persist and affect subsequent trajectories.
 
         Raises:
             ROS2NotConnectedError: 接口未连接。
@@ -4293,14 +4311,21 @@ class ROS2RobotInterface:
             if len(waypoint) != len(joint_names):
                 raise ValueError(f"Waypoint {i} has {len(waypoint)} positions, but expected {len(joint_names)}")
 
-        if trajectory_duration is not None:
-            if trajectory_duration <= 0:
-                raise ValueError("trajectory_duration must be positive")
+        parameters = {}
+        if movej_trajectory_duration is not None:
+            if not math.isfinite(movej_trajectory_duration) or movej_trajectory_duration <= 0:
+                raise ValueError("movej_trajectory_duration must be finite and positive")
+            parameters["movej_trajectory_duration"] = float(movej_trajectory_duration)
+        if movej_trajectory_blend_ratio is not None:
+            if not math.isfinite(movej_trajectory_blend_ratio) or not 0 <= movej_trajectory_blend_ratio <= 1:
+                raise ValueError("movej_trajectory_blend_ratio must be finite and within [0, 1]")
+            parameters["movej_trajectory_blend_ratio"] = float(movej_trajectory_blend_ratio)
+        if parameters:
             ctrl = self.body_controller
             if not ctrl:
-                logger.warning("Body controller node unknown; cannot set movej_trajectory_duration")
-            elif not self.set_node_parameters(ctrl, {"movej_trajectory_duration": trajectory_duration}):
-                logger.warning("Failed to set movej_trajectory_duration on %s", ctrl)
+                raise ROS2NotConnectedError("Controller node unknown; cannot set trajectory parameters")
+            if not self.set_node_parameters(ctrl, parameters):
+                logger.warning("Failed to set trajectory parameters on %s", ctrl)
 
         trajectory_msg = JointTrajectory()
         trajectory_msg.header.stamp = self.robot_node.get_clock().now().to_msg()
@@ -4324,17 +4349,23 @@ class ROS2RobotInterface:
     def send_head_joint_trajectory(self,
                                    joint_names: List[str],
                                    waypoints: List[List[float]],
-                                   trajectory_duration: float | None = None) -> None:
+                                   movej_trajectory_duration: float | None = None,
+                             movej_trajectory_blend_ratio: float | None = None) -> None:
         """发送头部关节多路点轨迹（split 拓扑）。
 
-        控制器会把当前位置自动插到轨迹起点；``trajectory_duration`` 非空时，
+        控制器会把当前位置自动插到轨迹起点；``movej_trajectory_duration`` 非空时，
         发布前将 head 控制器节点（``head_joint_controller``）参数
         ``movej_trajectory_duration`` 设为该值。
 
         Args:
             joint_names: 头部关节名列表（须与控制器关节一致）。
             waypoints: 多路点，每点为与 joint_names 等长的关节位置列表（弧度）。
-            trajectory_duration: 可选总轨迹时长（秒）；None 沿用控制器当前参数。
+            movej_trajectory_duration: 可选总轨迹时长（秒）；None 沿用控制器当前参数。
+
+        Note:
+            movej_trajectory_blend_ratio: Optional controller-wide blend ratio in [0, 1].
+                Only DOUBLES uses blending. None preserves the current ROS parameter.
+                Both movej_* settings persist and affect subsequent trajectories.
 
         Raises:
             ROS2NotConnectedError: 接口未连接。
@@ -4361,14 +4392,21 @@ class ROS2RobotInterface:
             if len(waypoint) != len(joint_names):
                 raise ValueError(f"Waypoint {i} has {len(waypoint)} positions, but expected {len(joint_names)}")
 
-        if trajectory_duration is not None:
-            if trajectory_duration <= 0:
-                raise ValueError("trajectory_duration must be positive")
+        parameters = {}
+        if movej_trajectory_duration is not None:
+            if not math.isfinite(movej_trajectory_duration) or movej_trajectory_duration <= 0:
+                raise ValueError("movej_trajectory_duration must be finite and positive")
+            parameters["movej_trajectory_duration"] = float(movej_trajectory_duration)
+        if movej_trajectory_blend_ratio is not None:
+            if not math.isfinite(movej_trajectory_blend_ratio) or not 0 <= movej_trajectory_blend_ratio <= 1:
+                raise ValueError("movej_trajectory_blend_ratio must be finite and within [0, 1]")
+            parameters["movej_trajectory_blend_ratio"] = float(movej_trajectory_blend_ratio)
+        if parameters:
             ctrl = self._controller_node_from_topic(self.config.head_joint_controller_topic)
             if not ctrl:
-                logger.warning("Head controller node unknown; cannot set movej_trajectory_duration")
-            elif not self.set_node_parameters(ctrl, {"movej_trajectory_duration": trajectory_duration}):
-                logger.warning("Failed to set movej_trajectory_duration on %s", ctrl)
+                raise ROS2NotConnectedError("Controller node unknown; cannot set trajectory parameters")
+            if not self.set_node_parameters(ctrl, parameters):
+                logger.warning("Failed to set trajectory parameters on %s", ctrl)
 
         trajectory_msg = JointTrajectory()
         trajectory_msg.header.stamp = self.robot_node.get_clock().now().to_msg()
