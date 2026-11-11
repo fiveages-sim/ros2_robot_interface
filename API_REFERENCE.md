@@ -2943,3 +2943,33 @@ result = interface.execute_joint_trajectory_action(
 请求的速度、加速度和 jerk 约束，时间模式使用 total_time，约束模式计算时长；
 非 DOUBLES 不承诺使用请求的 max_*。反馈回调不可调用阻塞方法。
 超时沿用公共取消逻辑；实际到位须结合关节反馈。分体腰部 Service 不变。
+
+### 分体腰部关节轨迹 Action
+
+`body_joint_trajectory_action_name: str | None = None` 自动发现分体部署的
+`/body_joint_controller/joint_trajectory_with_para`，消息类型为
+`arms_ros2_control_msgs/action/JointTrajectory`。显式地址优先，支持 topic_prefix，
+自动地址重连时重新发现；不回退到 Service，也不占用双臂客户端。
+
+`wait_for_body_joint_trajectory_action_server(timeout=5.0) -> bool` 等待独立服务端。
+`execute_body_joint_trajectory_action(joint_names, waypoints, *, time_mode=True,
+total_time=None, max_velocity=None, max_acceleration=None, max_jerk=None,
+auto_switch_fsm=True, feedback_callback=None, timeout=30.0,
+wait_for_server_timeout=5.0)` 返回 Action 结果，拒绝/超时等未取得结果时返回 None。
+参数和列表广播语义与 execute_joint_trajectory_action 一致；位置单位为 rad 或 m。
+DOUBLES 支持约束参数，非 DOUBLES 不承诺使用请求 max_*。
+默认经 body_joint 切 MOVEJ，服务端要求目标控制器实际处于 MOVEJ；失败时不能
+仅凭全局 FSM 缓存认定 body 已切换。反馈回调不应调用阻塞 API。
+超时沿用公共取消流程，实际停止/到位需要关节反馈验证。
+
+```python
+result = interface.execute_body_joint_trajectory_action(
+    body_joint_names, [body_target_positions], total_time=3.0,
+)
+```
+
+该方法在 WBC 模式下拒绝执行（包括手动配置 body 地址时），请使用统一的
+execute_joint_trajectory_action。分体 body 与双臂分别执行，不保证同步起动。
+BasicJointController 所有实例（含 head）同名业务 Service 均已改为 Action；
+已有 send_body_joint_trajectory Topic 方法以及专用腰部升降接口保持不变。
+验证脚本：examples/test/10_body_waist/check_execute_body_joint_trajectory_action.py。

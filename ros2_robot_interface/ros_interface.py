@@ -212,6 +212,7 @@ class ROS2RobotInterface:
         self.compliance_zero_wrench_client: Client | None = None
         self.target_path_pub: Publisher | None = None
         self.execute_path_client: Client | None = None
+        self.body_joint_trajectory_action_client: ActionClient | None = None
         self.joint_trajectory_action_client: ActionClient | None = None
         self.movel_action_client: ActionClient | None = None
         self.movec_action_client: ActionClient | None = None
@@ -563,6 +564,12 @@ class ROS2RobotInterface:
             else:
                 logger.warning(f"Joint trajectory action unavailable: {candidate}")
 
+        if self.config.body_joint_trajectory_action_name is None and not self.is_wbc:
+            candidate = "/body_joint_controller/joint_trajectory_with_para"
+            if candidate in action_name_list:
+                self.config.body_joint_trajectory_action_name = candidate
+                logger.info(f"Detected body joint trajectory action: {candidate}")
+
         if self.config.waist_lifting_pose_action_name is None:
             for candidate in (
                 "/ocs2_wbc_controller/waist_lifting_pose",
@@ -714,6 +721,11 @@ class ROS2RobotInterface:
             previous_auto = getattr(self, "_auto_joint_trajectory_action_name", None)
             if previous_auto is not None and self.config.joint_trajectory_action_name == previous_auto:
                 self.config.joint_trajectory_action_name = None
+            previous_body_auto = getattr(self, "_auto_body_joint_trajectory_action_name", None)
+            if previous_body_auto is not None and self.config.body_joint_trajectory_action_name == previous_body_auto:
+                self.config.body_joint_trajectory_action_name = None
+            explicit_body_action = self.config.body_joint_trajectory_action_name
+            self._auto_body_joint_trajectory_action_name = None
             explicit_joint_action = self.config.joint_trajectory_action_name
             auto_joint_action = explicit_joint_action is None
             self._auto_joint_trajectory_action_name = None
@@ -740,6 +752,10 @@ class ROS2RobotInterface:
                 )
                 available_paths = set(topic_names_full) | set(action_names_full)
                 apply_prefix_to_config_paths(self.config, topic_prefix, available_paths)
+                if explicit_body_action is None:
+                    self._auto_body_joint_trajectory_action_name = self.config.body_joint_trajectory_action_name
+                else:
+                    self.config.body_joint_trajectory_action_name = explicit_body_action
                 if auto_joint_action:
                     self._auto_joint_trajectory_action_name = self.config.joint_trajectory_action_name
                 else:
@@ -983,6 +999,13 @@ class ROS2RobotInterface:
                 logger.info(
                     f"Created head target publishers: {self.config.head_target_topic} (+ /stamped)"
                 )
+
+            if self.config.body_joint_trajectory_action_name and not self.is_wbc:
+                self.body_joint_trajectory_action_client = ActionClient(
+                    self.robot_node, JointTrajectoryAction,
+                    self.config.body_joint_trajectory_action_name,
+                )
+                logger.info(f"Created body MoveJ action client: {self.config.body_joint_trajectory_action_name}")
 
             if self.config.joint_trajectory_action_name:
                 self.joint_trajectory_action_client = ActionClient(
@@ -1994,6 +2017,45 @@ class ROS2RobotInterface:
             )
         return values
 
+    def _build_joint_trajectory_goal(
+        self, joint_names, waypoints, *, time_mode, total_time,
+        max_velocity, max_acceleration, max_jerk,
+    ) -> Any:
+        if not joint_names:
+            raise ValueError("joint_names cannot be empty")
+        if not waypoints:
+            raise ValueError("waypoints cannot be empty")
+
+        joint_count = len(joint_names)
+        goal_msg = JointTrajectoryAction.Goal()
+        goal_msg.joint_names = list(joint_names)
+
+        velocity = self._optional_float_array(max_velocity, joint_count, "max_velocity")
+        acceleration = self._optional_float_array(
+            max_acceleration, joint_count, "max_acceleration"
+        )
+        jerk = self._optional_float_array(max_jerk, joint_count, "max_jerk")
+
+        for i, positions in enumerate(waypoints):
+            if len(positions) != joint_count:
+                raise ValueError(
+                    f"Waypoint {i} length mismatch: got {len(positions)}, expected {joint_count}"
+                )
+            waypoint = JointWaypoint()
+            waypoint.position = [float(p) for p in positions]
+            waypoint.time_mode = bool(time_mode)
+            if total_time is not None:
+                waypoint.total_time = float(total_time)
+            if velocity is not None:
+                waypoint.max_velocity = list(velocity)
+            if acceleration is not None:
+                waypoint.max_acceleration = list(acceleration)
+            if jerk is not None:
+                waypoint.max_jerk = list(jerk)
+            goal_msg.waypoints.append(waypoint)
+
+        return goal_msg
+
     def execute_joint_trajectory_action(
         self,
         joint_names: List[str],
@@ -2033,38 +2095,10 @@ class ROS2RobotInterface:
         Returns:
             The action result object, or ``None`` if rejected/timed out.
         """
-        if not joint_names:
-            raise ValueError("joint_names cannot be empty")
-        if not waypoints:
-            raise ValueError("waypoints cannot be empty")
-
-        joint_count = len(joint_names)
-        goal_msg = JointTrajectoryAction.Goal()
-        goal_msg.joint_names = list(joint_names)
-
-        velocity = self._optional_float_array(max_velocity, joint_count, "max_velocity")
-        acceleration = self._optional_float_array(
-            max_acceleration, joint_count, "max_acceleration"
+        goal_msg = self._build_joint_trajectory_goal(
+            joint_names, waypoints, time_mode=time_mode, total_time=total_time,
+            max_velocity=max_velocity, max_acceleration=max_acceleration, max_jerk=max_jerk,
         )
-        jerk = self._optional_float_array(max_jerk, joint_count, "max_jerk")
-
-        for i, positions in enumerate(waypoints):
-            if len(positions) != joint_count:
-                raise ValueError(
-                    f"Waypoint {i} length mismatch: got {len(positions)}, expected {joint_count}"
-                )
-            waypoint = JointWaypoint()
-            waypoint.position = [float(p) for p in positions]
-            waypoint.time_mode = bool(time_mode)
-            if total_time is not None:
-                waypoint.total_time = float(total_time)
-            if velocity is not None:
-                waypoint.max_velocity = list(velocity)
-            if acceleration is not None:
-                waypoint.max_acceleration = list(acceleration)
-            if jerk is not None:
-                waypoint.max_jerk = list(jerk)
-            goal_msg.waypoints.append(waypoint)
 
         return self._send_motion_action_goal(
             self.joint_trajectory_action_client,
@@ -2073,6 +2107,41 @@ class ROS2RobotInterface:
             control_type="arm_joint" if auto_switch_fsm else None,
             feedback_callback=feedback_callback,
             timeout=timeout,
+            wait_for_server_timeout=wait_for_server_timeout,
+        )
+
+    def wait_for_body_joint_trajectory_action_server(self, timeout: float = 5.0) -> bool:
+        """等待独立分体腰部关节轨迹 Action。"""
+        client = self.body_joint_trajectory_action_client
+        return not self.is_wbc and client is not None and client.wait_for_server(timeout_sec=timeout)
+
+    def execute_body_joint_trajectory_action(
+        self, joint_names: List[str], waypoints: List[List[float]], *,
+        time_mode: bool = True, total_time: Optional[float] = None,
+        max_velocity: Any = None, max_acceleration: Any = None, max_jerk: Any = None,
+        auto_switch_fsm: bool = True,
+        feedback_callback: Optional[Callable[[Any], None]] = None,
+        timeout: float = 30.0, wait_for_server_timeout: float = 5.0,
+    ) -> Any:
+        """执行分体腰部关节轨迹；位置为 rad 或 m，返回结果或 None。
+
+        WBC 腰部请使用 execute_joint_trajectory_action。独立 body 客户端
+        不与双臂同步起动，超时取消沿用公共 Action 发送逻辑。
+        """
+        if not self.is_connected:
+            raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
+        if self.is_wbc:
+            raise ValueError("WBC body trajectory requires execute_joint_trajectory_action()")
+        goal_msg = self._build_joint_trajectory_goal(
+            joint_names, waypoints, time_mode=time_mode, total_time=total_time,
+            max_velocity=max_velocity, max_acceleration=max_acceleration, max_jerk=max_jerk,
+        )
+
+        return self._send_motion_action_goal(
+            self.body_joint_trajectory_action_client, goal_msg,
+            action_label="Body MoveJ",
+            control_type="body_joint" if auto_switch_fsm else None,
+            feedback_callback=feedback_callback, timeout=timeout,
             wait_for_server_timeout=wait_for_server_timeout,
         )
 
@@ -5230,6 +5299,9 @@ class ROS2RobotInterface:
             self.execute_path_client.destroy()
             self.execute_path_client = None
 
+        if self.body_joint_trajectory_action_client:
+            self.body_joint_trajectory_action_client.destroy()
+            self.body_joint_trajectory_action_client = None
         if self.joint_trajectory_action_client:
             self.joint_trajectory_action_client.destroy()
             self.joint_trajectory_action_client = None
