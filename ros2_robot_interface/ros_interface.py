@@ -2018,7 +2018,7 @@ class ROS2RobotInterface:
         return values
 
     def _build_joint_trajectory_goal(
-        self, joint_names, waypoints, *, time_mode, total_time,
+        self, joint_names, waypoints, *, time_mode, movej_trajectory_duration, time_from_start,
         max_velocity, max_acceleration, max_jerk,
     ) -> Any:
         if not joint_names:
@@ -2029,6 +2029,33 @@ class ROS2RobotInterface:
         joint_count = len(joint_names)
         goal_msg = JointTrajectoryAction.Goal()
         goal_msg.joint_names = list(joint_names)
+        goal_msg.time_mode = bool(time_mode)
+        total = 0.0 if movej_trajectory_duration is None else float(movej_trajectory_duration)
+        if not math.isfinite(total) or total < 0.0:
+            raise ValueError("movej_trajectory_duration must be finite and nonnegative")
+        goal_msg.movej_trajectory_duration = total
+        stamps = None
+        if time_from_start is not None:
+            if len(time_from_start) != len(waypoints):
+                raise ValueError("time_from_start length must match waypoints")
+            stamps = []
+            previous = 0
+            previous_seconds = 0.0
+            for value in time_from_start:
+                seconds = float(value)
+                if not math.isfinite(seconds) or not 0.0 <= seconds < 2_147_483_648 or seconds < previous_seconds:
+                    raise ValueError("time_from_start must be finite and nonnegative")
+                nanoseconds = round(seconds * 1_000_000_000)
+                if nanoseconds < previous or nanoseconds // 1_000_000_000 > 2_147_483_647:
+                    raise ValueError("time_from_start must be nondecreasing and fit ROS Duration")
+                stamps.append(nanoseconds)
+                previous = nanoseconds
+                previous_seconds = seconds
+        specified = stamps is not None and any(stamps)
+        if total > 0.0 and specified:
+            raise ValueError("movej_trajectory_duration and time_from_start are mutually exclusive")
+        if not time_mode and (total > 0.0 or specified):
+            raise ValueError("Constraint mode does not accept timing fields")
 
         velocity = self._optional_float_array(max_velocity, joint_count, "max_velocity")
         acceleration = self._optional_float_array(
@@ -2043,9 +2070,8 @@ class ROS2RobotInterface:
                 )
             waypoint = JointWaypoint()
             waypoint.position = [float(p) for p in positions]
-            waypoint.time_mode = bool(time_mode)
-            if total_time is not None:
-                waypoint.total_time = float(total_time)
+            if stamps is not None:
+                waypoint.time_from_start.sec, waypoint.time_from_start.nanosec = divmod(stamps[i], 1_000_000_000)
             if velocity is not None:
                 waypoint.max_velocity = list(velocity)
             if acceleration is not None:
@@ -2062,7 +2088,8 @@ class ROS2RobotInterface:
         waypoints: List[List[float]],
         *,
         time_mode: bool = True,
-        total_time: Optional[float] = None,
+        movej_trajectory_duration: Optional[float] = None,
+        time_from_start: Optional[List[float]] = None,
         max_velocity: Any = None,
         max_acceleration: Any = None,
         max_jerk: Any = None,
@@ -2083,10 +2110,13 @@ class ROS2RobotInterface:
         Args:
             joint_names: Joint names controlled by the action.
             waypoints: Position arrays. Each waypoint must match ``joint_names`` length.
-            time_mode: ``True`` (default) uses ``total_time`` as duration (controller
-                falls back to 3 s if ``total_time`` is unset). ``False`` is constraint
-                mode: duration is computed from vel/acc/jerk.
-            total_time: Optional duration in seconds for time mode.
+            time_mode: True uses total/cumulative timing; False is DOUBLES constraint mode.
+            movej_trajectory_duration: Goal total seconds; positive values persist to the
+                controller ROS parameter. None/0 leaves it unchanged.
+            time_from_start: Optional cumulative arrival seconds for each waypoint.
+                Nonnegative/nondecreasing. Equal-time motion is rejected by the server;
+                equal positions at increasing times hold. All zero means unspecified.
+                Without either time input the controller uses its current total duration.
             max_velocity/max_acceleration/max_jerk: Optional scalar or per-joint list.
                 ``None`` (default) does not fill the arrays; the controller applies
                 ``movej_max_*``.
@@ -2096,7 +2126,7 @@ class ROS2RobotInterface:
             The action result object, or ``None`` if rejected/timed out.
         """
         goal_msg = self._build_joint_trajectory_goal(
-            joint_names, waypoints, time_mode=time_mode, total_time=total_time,
+            joint_names, waypoints, time_mode=time_mode, movej_trajectory_duration=movej_trajectory_duration, time_from_start=time_from_start,
             max_velocity=max_velocity, max_acceleration=max_acceleration, max_jerk=max_jerk,
         )
 
@@ -2117,7 +2147,8 @@ class ROS2RobotInterface:
 
     def execute_body_joint_trajectory_action(
         self, joint_names: List[str], waypoints: List[List[float]], *,
-        time_mode: bool = True, total_time: Optional[float] = None,
+        time_mode: bool = True, movej_trajectory_duration: Optional[float] = None,
+        time_from_start: Optional[List[float]] = None,
         max_velocity: Any = None, max_acceleration: Any = None, max_jerk: Any = None,
         auto_switch_fsm: bool = True,
         feedback_callback: Optional[Callable[[Any], None]] = None,
@@ -2127,13 +2158,16 @@ class ROS2RobotInterface:
 
         WBC 腰部请使用 execute_joint_trajectory_action。独立 body 客户端
         不与双臂同步起动，超时取消沿用公共 Action 发送逻辑。
+        movej_trajectory_duration 是持久更新的 Goal 总秒数；time_from_start
+        是每点累计秒数列表，两者互斥。省略时间则用控制器当前总时长。
+        指定正时间零位移可停留；约束模式不得提供非零时间。
         """
         if not self.is_connected:
             raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
         if self.is_wbc:
             raise ValueError("WBC body trajectory requires execute_joint_trajectory_action()")
         goal_msg = self._build_joint_trajectory_goal(
-            joint_names, waypoints, time_mode=time_mode, total_time=total_time,
+            joint_names, waypoints, time_mode=time_mode, movej_trajectory_duration=movej_trajectory_duration, time_from_start=time_from_start,
             max_velocity=max_velocity, max_acceleration=max_acceleration, max_jerk=max_jerk,
         )
 
@@ -2184,7 +2218,7 @@ class ROS2RobotInterface:
             joint_names,
             [positions],
             time_mode=time_mode,
-            total_time=duration,
+            movej_trajectory_duration=duration,
             max_velocity=max_velocity,
             max_acceleration=max_acceleration,
             max_jerk=max_jerk,

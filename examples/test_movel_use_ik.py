@@ -6,6 +6,9 @@
 服务: /ocs2_arm_controller/joint_trajectory_with_para, /ocs2_arm_controller/execute_linear
 """
 
+from arms_ros2_control_msgs.action import JointTrajectory
+from rclpy.action import ActionClient
+from joint_trajectory_action_utils import send_joint_trajectory_action
 import rclpy
 from rclpy.node import Node
 import time
@@ -17,7 +20,7 @@ from datetime import datetime
 from geometry_msgs.msg import Point, Quaternion, Pose, PoseStamped
 
 # 导入服务类型
-from arms_ros2_control_msgs.srv import ExecuteLinear, KinematicsService, JointTrajectory
+from arms_ros2_control_msgs.srv import ExecuteLinear, KinematicsService
 from arms_ros2_control_msgs.msg import LinearMessage, JointWaypoint
 from ros2_robot_interface import ROS2RobotInterface, ROS2RobotInterfaceConfig
 
@@ -137,7 +140,7 @@ class LinearTrajectoryClient(Node):
         
         self.linear_client = self.create_client(ExecuteLinear, '/ocs2_arm_controller/execute_linear')
         self.kinematics_client = self.create_client(KinematicsService, '/kinematics_service')
-        self.joint_trajectory_client = self.create_client(JointTrajectory, '/ocs2_arm_controller/joint_trajectory_with_para')
+        self.joint_trajectory_client = ActionClient(self, JointTrajectory, '/ocs2_arm_controller/joint_trajectory_with_para')
         
         self.left_arm_joint_names = ["left_joint1", "left_joint2", "left_joint3", "left_joint4",
                                      "left_joint5", "left_joint6", "left_joint7"]
@@ -147,7 +150,7 @@ class LinearTrajectoryClient(Node):
     def wait_for_services(self, timeout=10.0):
         linear_ready = self.linear_client.wait_for_service(timeout_sec=timeout)
         kinematics_ready = self.kinematics_client.wait_for_service(timeout_sec=timeout)
-        trajectory_ready = self.joint_trajectory_client.wait_for_service(timeout_sec=timeout)
+        trajectory_ready = self.joint_trajectory_client.wait_for_server(timeout_sec=timeout)
         if linear_ready and kinematics_ready and trajectory_ready:
             self.get_logger().info('所有服务可用')
             return True
@@ -192,13 +195,12 @@ class LinearTrajectoryClient(Node):
         else:
             dual_joint_positions = current_positions['left'] + joint_positions
         
-        req = JointTrajectory.Request()
+        req = JointTrajectory.Goal(time_mode=True)
         req.joint_names = self.left_arm_joint_names + self.right_arm_joint_names
         
         wp = JointWaypoint()
         wp.position = dual_joint_positions
-        wp.time_mode = True
-        wp.total_time = duration
+        req.movej_trajectory_duration = duration
         
         wp.max_velocity = [0.5] * 14
         wp.max_acceleration = [1.0] * 14
@@ -208,7 +210,7 @@ class LinearTrajectoryClient(Node):
         
         self.get_logger().info(f'发送{arm_name}臂MoveJ命令，目标关节: {[f"{j:.3f}" for j in joint_positions[:3]]}...')
         
-        future = self.joint_trajectory_client.call_async(req)
+        future = send_joint_trajectory_action(self.joint_trajectory_client, req)
         
         try:
             rclpy.spin_until_future_complete(self, future, timeout_sec=duration + 2.0)
@@ -230,13 +232,12 @@ class LinearTrajectoryClient(Node):
         """同时移动双臂"""
         dual_joint_positions = left_joints + right_joints
         
-        req = JointTrajectory.Request()
+        req = JointTrajectory.Goal(time_mode=True)
         req.joint_names = self.left_arm_joint_names + self.right_arm_joint_names
         
         wp = JointWaypoint()
         wp.position = dual_joint_positions
-        wp.time_mode = True
-        wp.total_time = duration
+        req.movej_trajectory_duration = duration
         
         wp.max_velocity = [0.5] * 14
         wp.max_acceleration = [1.0] * 14
@@ -246,7 +247,7 @@ class LinearTrajectoryClient(Node):
         
         self.get_logger().info(f'发送双臂MoveJ命令...')
         
-        future = self.joint_trajectory_client.call_async(req)
+        future = send_joint_trajectory_action(self.joint_trajectory_client, req)
         
         try:
             rclpy.spin_until_future_complete(self, future, timeout_sec=duration + 2.0)

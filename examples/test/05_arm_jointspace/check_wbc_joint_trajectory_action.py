@@ -116,6 +116,12 @@ def run_case(interface, node, mode, requested, multi, controlled, limits, args):
         [before[n] + offsets[n] * fraction for n in requested]
         for fraction in ([0.5, 1.0] if multi else [1.0])
     ]
+    arrival_times = [args.duration * (i + 1) for i in range(len(waypoints))]
+    if args.dwell:
+        waypoints.insert(1, list(waypoints[0]))
+        arrival_times.insert(1, arrival_times[0] + args.dwell)
+        for i in range(2, len(arrival_times)):
+            arrival_times[i] += args.dwell
     target = dict(zip(requested, waypoints[-1]))
     label = f"{mode} / {'多点' if multi else '单点'} / {', '.join(requested)}"
     print(f"\n[{label}] 请求顺序：{requested}", flush=True)
@@ -142,12 +148,13 @@ def run_case(interface, node, mode, requested, multi, controlled, limits, args):
             joint_names=requested,
             waypoints=waypoints,
             time_mode=True,
-            total_time=args.duration,
+            movej_trajectory_duration=args.duration if args.timing == "total" else None,
+            time_from_start=arrival_times if args.timing == "waypoints" else None,
             feedback_callback=feedback.append,
-            timeout=args.duration * (len(waypoints) + 1) + args.margin,
+            timeout=args.duration * (len(waypoints) + 1) + args.dwell + args.margin,
         )
         try:
-            node.wait(monitor_result, timeout=args.duration * (len(waypoints) + 1) + args.margin + 15.0)
+            node.wait(monitor_result, timeout=args.duration * (len(waypoints) + 1) + args.dwell + args.margin + 15.0)
         except (Exception, KeyboardInterrupt):
             interface.send_fsm_command(2)
             raise
@@ -155,7 +162,7 @@ def run_case(interface, node, mode, requested, multi, controlled, limits, args):
     if response is None or not feedback:
         raise RuntimeError("接口未返回 Action 结果或未收到反馈")
     print(f"response: {response}", flush=True)
-    if not response.success or response.planned_duration <= 0:
+    if not response.success or response.planned_duration < 0:
         raise RuntimeError(f"Action 规划或执行未成功：{response.message}")
     started = time.monotonic()
     stable_since = None
@@ -201,6 +208,9 @@ def main():
     parser.add_argument("--controller", default="/ocs2_wbc_controller")
     parser.add_argument("--body-joints", nargs="+", help="覆盖默认自动识别的腰部关节名")
     parser.add_argument("--delta", type=float, default=0.04)
+    parser.add_argument("--dwell", type=float, default=0.0, help="首目标后显式停留秒数，仅 waypoints 模式")
+    parser.add_argument("--timing", choices=["waypoints", "total", "default"], default="waypoints",
+                        help="累计时间、持久总时长或控制器默认时长")
     parser.add_argument("--duration", type=float, default=3.0)
     parser.add_argument("--tolerance", type=float, default=0.01)
     parser.add_argument("--hold-tolerance", type=float, default=0.01)
@@ -211,6 +221,8 @@ def main():
         parser.error("偏移、时长、容差和等待余量必须为有限正数")
     if args.delta <= args.tolerance:
         parser.error("偏移应大于到点容差，避免不运动也通过")
+    if not math.isfinite(args.dwell) or args.dwell < 0 or (args.dwell and args.timing != "waypoints"):
+        parser.error("dwell 必须非负有限，且只用于 waypoints 模式")
     rclpy.init()
     node = Check(args.controller.rstrip("/"))
     interface = ROS2RobotInterface(ROS2RobotInterfaceConfig())
@@ -260,8 +272,7 @@ def main():
         motion_started = True
         node.switch(2)
         for mode in ("doubles", "linear", "tanh"):
-            node.set_parameters_remote({"movej_interpolation_type": mode,
-                                        "movej_trajectory_duration": args.duration * 2})
+            node.set_parameters_remote({"movej_interpolation_type": mode})
             for requested, multi in cases:
                 node.switch(2)
                 run_case(interface, node, mode, requested, multi, controlled, limits, args)

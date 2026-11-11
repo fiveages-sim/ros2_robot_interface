@@ -17,15 +17,17 @@ import sys
 import time
 from datetime import datetime
 
+from arms_ros2_control_msgs.action import JointTrajectory
+from rclpy.action import ActionClient
+from joint_trajectory_action_utils import send_joint_trajectory_action
 import rclpy
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import Point, Pose, PoseStamped, Quaternion, Vector3
-from rclpy.action import ActionClient
 from rclpy.node import Node
 
 from arms_ros2_control_msgs.action import MovecUseIK
 from arms_ros2_control_msgs.msg import CircleMessage, JointWaypoint
-from arms_ros2_control_msgs.srv import JointTrajectory, KinematicsService
+from arms_ros2_control_msgs.srv import KinematicsService
 from ros2_robot_interface import ROS2RobotInterface, ROS2RobotInterfaceConfig
 
 DEFAULT_OUTPUT_DIR = os.environ.get(
@@ -186,7 +188,7 @@ class CircleTrajectoryActionClient(Node):
             "/ocs2_arm_controller/execute_circle_use_ik",
         )
         self.kinematics_client = self.create_client(KinematicsService, "/kinematics_service")
-        self.joint_trajectory_client = self.create_client(
+        self.joint_trajectory_client = ActionClient(self,
             JointTrajectory,
             "/ocs2_arm_controller/joint_trajectory_with_para",
         )
@@ -203,7 +205,7 @@ class CircleTrajectoryActionClient(Node):
     def wait_for_servers(self, timeout=10.0):
         circle_ready = self.circle_action_client.wait_for_server(timeout_sec=timeout)
         kinematics_ready = self.kinematics_client.wait_for_service(timeout_sec=timeout)
-        trajectory_ready = self.joint_trajectory_client.wait_for_service(timeout_sec=timeout)
+        trajectory_ready = self.joint_trajectory_client.wait_for_server(timeout_sec=timeout)
         if circle_ready and kinematics_ready and trajectory_ready:
             self.get_logger().info("所有服务/action 可用")
             return True
@@ -251,19 +253,18 @@ class CircleTrajectoryActionClient(Node):
         )
 
     def send_dual_movej_command(self, left_joints, right_joints, duration=4.0):
-        req = JointTrajectory.Request()
+        req = JointTrajectory.Goal(time_mode=True)
         req.joint_names = self.left_arm_joint_names + self.right_arm_joint_names
 
         waypoint = JointWaypoint()
         waypoint.position = left_joints + right_joints
-        waypoint.time_mode = True
-        waypoint.total_time = duration
+        req.movej_trajectory_duration = duration
         waypoint.max_velocity = [0.5] * 14
         waypoint.max_acceleration = [1.0] * 14
         waypoint.max_jerk = [2.0] * 14
         req.waypoints = [waypoint]
 
-        future = self.joint_trajectory_client.call_async(req)
+        future = send_joint_trajectory_action(self.joint_trajectory_client, req)
         rclpy.spin_until_future_complete(self, future, timeout_sec=duration + 2.0)
         if future.result() and future.result().success:
             planned_duration = future.result().planned_duration

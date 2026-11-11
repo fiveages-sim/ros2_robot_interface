@@ -6,8 +6,8 @@ Action accepted 不视为运动完成；同时检查成功结果和实际反馈�
 
 注意：GetParameters / SetParameters 的服务调用已注释，只保留 Action 通路；
 因此不再切换插值模式，沿用控制器当前的 movej_interpolation_type。
-多点轨迹的总时长由控制器 movej_trajectory_duration 决定（本脚本不再设置它），
-若现场该参数较大，请适当调大 --margin。
+逐点累计时间按 --duration 的段时长累加；默认三段 2、4、10 秒，
+对应累计 2、6、16 秒，不修改控制器总时长参数。
 
 在已激活 ROS 工作空间、可导入 rclpy 和 arms_ros2_control_msgs 的环境运行：
     python examples/test/05_arm_jointspace/check_split_joint_trajectory_action.py
@@ -18,6 +18,8 @@ Action accepted 不视为运动完成；同时检查成功结果和实际反馈�
 
 from __future__ import annotations
 
+from itertools import accumulate
+
 import argparse
 import math
 import time
@@ -27,6 +29,7 @@ import rclpy
 # NOTE: 服务调用已按要求注释，只保留 Action 通路，需要恢复时取消下面两行注释。
 # from rcl_interfaces.srv import GetParameters, SetParameters
 from rclpy.node import Node
+from rclpy.duration import Duration
 from rclpy.action import ActionClient
 from action_msgs.msg import GoalStatus
 # from rclpy.parameter import Parameter
@@ -147,11 +150,13 @@ def run_case(node, label, requested, waypoints, controlled, limits, args):
                 raise RuntimeError(
                     f"路点 {i} 的 {name}={value:.6f} 超出限位 [{lower:.6f}, {upper:.6f}]"
                 )
-    request = JointTrajectory.Goal(joint_names=requested)
-    for positions in waypoints:
+    request = JointTrajectory.Goal(joint_names=requested, time_mode=True)
+    arrival_times = list(accumulate(args.duration))
+    print(f"段时长：{args.duration} 秒；累计到达时间：{arrival_times} 秒", flush=True)
+    for i, positions in enumerate(waypoints):
         request.waypoints.append(JointWaypoint(
             position=list(positions),
-            time_mode=True, total_time=args.duration,
+            time_from_start=Duration(seconds=arrival_times[i]).to_msg(),
             blend_ratio_percent=0.0,
         ))
     target = dict(zip(requested, request.waypoints[-1].position))
@@ -168,8 +173,8 @@ def run_case(node, label, requested, waypoints, controlled, limits, args):
         raise RuntimeError("Action 目标被拒绝")
     result_future = node.active_goal.get_result_async()
     started = time.monotonic()
-    # 单点用 goal 的 total_time；多点由控制器 movej_trajectory_duration 决定，留足余量。
-    timeout = len(request.waypoints) * args.duration + args.margin
+    # 按最后一个累计到达时间加余量等待。
+    timeout = arrival_times[-1] + args.margin
     held_drift = {n: 0.0 for n in controlled if n not in target}
     stable_since = None
     failure = None
@@ -222,16 +227,20 @@ def run_case(node, label, requested, waypoints, controlled, limits, args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--controller", default="/ocs2_arm_controller")
-    parser.add_argument("--duration", type=float, default=3.0,
-                        help="写入每个路点的 total_time；单点轨迹生效，也用于估算等待超时")
+    parser.add_argument("--duration", type=float, nargs="+", default=[2.0, 4.0, 10.0],
+                        help="各段秒数，默认 2 4 10；只传一个数则所有段同一时长")
     parser.add_argument("--tolerance", type=float, default=0.01)
     parser.add_argument("--hold-tolerance", type=float, default=0.01)
     parser.add_argument("--margin", type=float, default=5.0,
-                        help="等待余量；多点轨迹总时长由控制器 movej_trajectory_duration 决定，必要时调大")
+                        help="累计到达总时间以外的等待余量（秒）")
     args = parser.parse_args()
     if any(not math.isfinite(v) or v <= 0 for v in
-           (args.duration, args.tolerance, args.hold_tolerance, args.margin)):
+           (*args.duration, args.tolerance, args.hold_tolerance, args.margin)):
         parser.error("时长、容差和等待余量必须为有限正数")
+    if len(args.duration) == 1:
+        args.duration *= len(LEFT_ARM_WAYPOINTS)
+    if len(args.duration) != len(LEFT_ARM_WAYPOINTS):
+        parser.error("段时长数量必须等于路点数量，或只提供一个统一时长")
     rclpy.init()
     node = Check(args.controller.rstrip("/"))
     # original = {}  # NOTE: 不再读写控制器参数，无需保存原始值

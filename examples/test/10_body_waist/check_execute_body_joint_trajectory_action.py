@@ -19,10 +19,15 @@ def main():
     parser.add_argument('--delta-rad', type=float, default=0.02)
     parser.add_argument('--delta-m', type=float, default=0.005)
     parser.add_argument('--duration', type=float, default=3.0)
+    parser.add_argument('--dwell', type=float, default=0.0, help='首目标后停留秒数，仅累计时间模式')
     parser.add_argument('--constraint', action='store_true')
+    parser.add_argument('--timing', choices=['waypoints', 'total', 'default'], default='waypoints',
+                        help='累计时间、持久总时长或控制器默认时长；约束模式不填写时间')
     args = parser.parse_args()
     if any(not math.isfinite(x) or x <= 0 for x in (args.delta_rad, args.delta_m, args.duration)):
         parser.error('偏移和时长必须为有限正数')
+    if not math.isfinite(args.dwell) or args.dwell < 0 or (args.dwell and (args.constraint or args.timing != 'waypoints')):
+        parser.error('dwell 必须非负有限且只用于累计时间模式')
     interface = ROS2RobotInterface(ROS2RobotInterfaceConfig())
     query = None
     try:
@@ -84,6 +89,12 @@ def main():
                 jerk.append(0.2 if linear else 1.0)
             points = [[before[n] + (t - before[n]) * f for n, t in zip(names, targets)]
                       for f in ([0.5, 1.0] if multi else [1.0])]
+            arrival_times = [args.duration * (i + 1) for i in range(len(points))]
+            if args.dwell:
+                points.insert(1, list(points[0]))
+                arrival_times.insert(1, arrival_times[0] + args.dwell)
+                for i in range(2, len(arrival_times)):
+                    arrival_times[i] += args.dwell
             feedback = []
             drift = {}
             observer_errors = []
@@ -101,7 +112,9 @@ def main():
 
             interface.send_fsm_command(2)
             result = interface.execute_body_joint_trajectory_action(
-                names, points, time_mode=not args.constraint, total_time=args.duration,
+                names, points, time_mode=not args.constraint,
+                movej_trajectory_duration=args.duration if not args.constraint and args.timing == 'total' else None,
+                time_from_start=arrival_times if not args.constraint and args.timing == 'waypoints' else None,
                 max_velocity=velocity, max_acceleration=acceleration, max_jerk=jerk,
                 feedback_callback=observe, timeout=60.0,
             )
