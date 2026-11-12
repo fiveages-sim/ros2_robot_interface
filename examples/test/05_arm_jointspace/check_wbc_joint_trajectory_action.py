@@ -151,6 +151,7 @@ def run_case(interface, node, mode, requested, multi, controlled, limits, args):
             movej_trajectory_duration=args.duration if args.timing == "total" else None,
             time_from_start=arrival_times if args.timing == "waypoints" else None,
             feedback_callback=feedback.append,
+            blend_ratio_percent=0.0,
             timeout=args.duration * (len(waypoints) + 1) + args.dwell + args.margin,
         )
         try:

@@ -719,13 +719,14 @@ result = interface.execute_movel_action("left", goal, duration=3.0, frame_id="ar
 - 名称：`config.joint_trajectory_action_name`（默认 `None`，按 WBC/split 拓扑自动检测）
 - 类型：`arms_ros2_control_msgs/action/JointTrajectory`
 
-#### `execute_joint_trajectory_action(joint_names, waypoints, *, time_mode=True, movej_trajectory_duration=None, time_from_start=None, max_velocity=None, max_acceleration=None, max_jerk=None, auto_switch_fsm=True, feedback_callback=None, timeout=30.0, wait_for_server_timeout=5.0) -> Any`
+#### `execute_joint_trajectory_action(joint_names, waypoints, *, time_mode=True, movej_trajectory_duration=None, time_from_start=None, blend_ratio_percent=None, max_velocity=None, max_acceleration=None, max_jerk=None, auto_switch_fsm=True, feedback_callback=None, timeout=30.0, wait_for_server_timeout=5.0) -> Any`
 
 通过发现的 split 双臂或 WBC Action 执行关节轨迹；WBC 支持其管理的腰部+双臂子集。
 
 - `joint_names`：非空关节列表，顺序对应每点 position；`waypoints` 至少一个目标点。
 - `time_mode=True`：Goal 总时长或逐点累计时间模式；False 为仅 DOUBLES 支持的约束模式。
 - `movej_trajectory_duration`：整条 Goal 的总秒数，非负且有限。None/0 表示未指定；正值由服务端在实际规划时持久更新同名 ROS 参数，不由 Python 预先 set 参数。
+- `blend_ratio_percent`：`None` 在实际规划时使用控制器默认值；标量覆盖全部点；纯数值列表逐点设置，不允许列表内含 `None`。显式 `0.0` 关闭转接，数值须有限且在 `[0, 1]`。不修改 ROS 参数，仅 DOUBLES 使用。body 和双臂包装方法支持相同参数。
 - `time_from_start`：每个目标的累计到达秒数列表，长度须等于目标数，非负、有限、非递减。Python 转为 Duration，超过 sec 范围拒绝。
 - 正总时长和非零累计时间互斥；两者都未指定/全零则沿用控制器当前总时长。约束模式不接受非零时间。
 - 相同累计时间仅允许相同位置（服务端结合真实起点检查）；正时间零位移执行停留。只给总时间时相邻重复位置会合并。全部已满足可成功返回 planned_duration=0。
@@ -749,7 +750,7 @@ result = interface.execute_joint_trajectory_action(
 
 旧 total_time 关键字不再接受；旧每段 [2,3] 秒需改为累计 [2,5]，不能仅替换参数名。消息包、公共库、控制器及 Python 必须统一升级重启。
 
-#### `execute_dual_arm_movej_action(left_arm_positions, right_arm_positions, *, duration=None, time_mode=True, left_joint_names=None, right_joint_names=None, max_velocity=None, max_acceleration=None, max_jerk=None, auto_switch_fsm=True, feedback_callback=None, timeout=30.0, wait_for_server_timeout=5.0) -> Any`
+#### `execute_dual_arm_movej_action(left_arm_positions, right_arm_positions, *, duration=None, time_mode=True, left_joint_names=None, right_joint_names=None, blend_ratio_percent=None, max_velocity=None, max_acceleration=None, max_jerk=None, auto_switch_fsm=True, feedback_callback=None, timeout=30.0, wait_for_server_timeout=5.0) -> Any`
 
 **功能：** 双臂参数化 MoveJ 的便捷封装（把左右臂关节拼成一条 `execute_joint_trajectory_action`）。
 
@@ -2933,7 +2934,7 @@ result = interface.execute_joint_trajectory_action(
 
 `wait_for_body_joint_trajectory_action_server(timeout=5.0) -> bool` 等待独立服务端。
 `execute_body_joint_trajectory_action(joint_names, waypoints, *, time_mode=True,
-movej_trajectory_duration=None, time_from_start=None, max_velocity=None, max_acceleration=None, max_jerk=None,
+movej_trajectory_duration=None, time_from_start=None, blend_ratio_percent=None, max_velocity=None, max_acceleration=None, max_jerk=None,
 auto_switch_fsm=True, feedback_callback=None, timeout=30.0,
 wait_for_server_timeout=5.0)` 返回 Action 结果，拒绝/超时等未取得结果时返回 None。
 参数和列表广播语义与 execute_joint_trajectory_action 一致；位置单位为 rad 或 m。
@@ -2979,3 +2980,15 @@ body 的 --constraint 不发送任何时间字段。
 改为统一时间模式、累计 6/11/17 秒，不再提供每点混合 time_mode。
 其余旧 MoveL/MoveC 示例的关节请求也迁移为 Action，但保留原有其他笛卡尔接口，
 不代表这些旧接口均已在当前控制器注册。新接口验证优先使用 examples/test 下脚本。
+
+Action 转接示例（总时长和逐点累计时间模式均适用）：
+
+```python
+interface.execute_joint_trajectory_action(
+    joint_names, waypoints, time_from_start=[2.0, 6.0, 16.0],
+    blend_ratio_percent=[0.0, 0.1, 0.2],
+)
+```
+
+原生客户端须设置 `JointTrajectory.Goal.use_waypoint_blend_ratio=True` 才使用各点的比例；
+否则读取规划开始时的 `movej_trajectory_blend_ratio`。更新后须重建并重启消息使用方。

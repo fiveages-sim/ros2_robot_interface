@@ -116,7 +116,8 @@ def main():
                 movej_trajectory_duration=args.duration if not args.constraint and args.timing == 'total' else None,
                 time_from_start=arrival_times if not args.constraint and args.timing == 'waypoints' else None,
                 max_velocity=velocity, max_acceleration=acceleration, max_jerk=jerk,
-                feedback_callback=observe, timeout=60.0,
+                feedback_callback=observe,
+                blend_ratio_percent=0.0, timeout=60.0,
             )
             if observer_errors:
                 raise RuntimeError(f"反馈观察失败：{observer_errors}")

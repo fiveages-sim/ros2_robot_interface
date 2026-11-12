@@ -145,7 +145,7 @@ def main():
         return 1
     
     # 创建单点请求
-    req = JointTrajectory.Goal(time_mode=True)
+    req = JointTrajectory.Goal(time_mode=True, use_waypoint_blend_ratio=True)
     req.joint_names = dual_arm_joint_names
     
     wp = JointWaypoint()
@@ -234,7 +234,7 @@ def main():
         return 1
     
     # 创建多点轨迹请求
-    req_multi = JointTrajectory.Goal(time_mode=True)
+    req_multi = JointTrajectory.Goal(time_mode=True, use_waypoint_blend_ratio=True)
     req_multi.joint_names = dual_arm_joint_names
     
     # 定义多个目标位置

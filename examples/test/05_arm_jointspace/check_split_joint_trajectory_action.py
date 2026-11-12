@@ -150,7 +150,7 @@ def run_case(node, label, requested, waypoints, controlled, limits, args):
                 raise RuntimeError(
                     f"路点 {i} 的 {name}={value:.6f} 超出限位 [{lower:.6f}, {upper:.6f}]"
                 )
-    request = JointTrajectory.Goal(joint_names=requested, time_mode=True)
+    request = JointTrajectory.Goal(joint_names=requested, time_mode=True, use_waypoint_blend_ratio=True)
     arrival_times = list(accumulate(args.duration))
     print(f"段时长：{args.duration} 秒；累计到达时间：{arrival_times} 秒", flush=True)
     for i, positions in enumerate(waypoints):

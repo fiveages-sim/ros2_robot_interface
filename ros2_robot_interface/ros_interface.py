@@ -2019,7 +2019,7 @@ class ROS2RobotInterface:
 
     def _build_joint_trajectory_goal(
         self, joint_names, waypoints, *, time_mode, movej_trajectory_duration, time_from_start,
-        max_velocity, max_acceleration, max_jerk,
+        max_velocity, max_acceleration, max_jerk, blend_ratio_percent,
     ) -> Any:
         if not joint_names:
             raise ValueError("joint_names cannot be empty")
@@ -2063,12 +2063,30 @@ class ROS2RobotInterface:
         )
         jerk = self._optional_float_array(max_jerk, joint_count, "max_jerk")
 
+        if blend_ratio_percent is None or np.isscalar(blend_ratio_percent):
+            blend_ratios = [blend_ratio_percent] * len(waypoints)
+        else:
+            blend_ratios = list(blend_ratio_percent)
+            if len(blend_ratios) != len(waypoints):
+                raise ValueError("blend_ratio_percent length must match waypoints")
+        goal_msg.use_waypoint_blend_ratio = blend_ratio_percent is not None
+        for i, value in enumerate(blend_ratios):
+            if goal_msg.use_waypoint_blend_ratio and value is None:
+                raise ValueError("blend_ratio_percent list cannot contain None")
+            if value is not None:
+                value = float(value)
+                if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+                    raise ValueError("blend_ratio_percent must be finite and within [0, 1]")
+                blend_ratios[i] = value
+
         for i, positions in enumerate(waypoints):
             if len(positions) != joint_count:
                 raise ValueError(
                     f"Waypoint {i} length mismatch: got {len(positions)}, expected {joint_count}"
                 )
             waypoint = JointWaypoint()
+            if blend_ratios[i] is not None:
+                waypoint.blend_ratio_percent = blend_ratios[i]
             waypoint.position = [float(p) for p in positions]
             if stamps is not None:
                 waypoint.time_from_start.sec, waypoint.time_from_start.nanosec = divmod(stamps[i], 1_000_000_000)
@@ -2088,6 +2106,7 @@ class ROS2RobotInterface:
         waypoints: List[List[float]],
         *,
         time_mode: bool = True,
+        blend_ratio_percent: Any = None,
         movej_trajectory_duration: Optional[float] = None,
         time_from_start: Optional[List[float]] = None,
         max_velocity: Any = None,
@@ -2120,6 +2139,9 @@ class ROS2RobotInterface:
             max_velocity/max_acceleration/max_jerk: Optional scalar or per-joint list.
                 ``None`` (default) does not fill the arrays; the controller applies
                 ``movej_max_*``.
+            blend_ratio_percent: None uses the controller default. A scalar overrides
+                every waypoint, or pass one numeric value per waypoint (no None). Explicit 0 disables
+                blending. Only DOUBLES uses this parameter; ROS parameters are unchanged.
             feedback_callback: Receives the action feedback object.
 
         Returns:
@@ -2128,6 +2150,7 @@ class ROS2RobotInterface:
         goal_msg = self._build_joint_trajectory_goal(
             joint_names, waypoints, time_mode=time_mode, movej_trajectory_duration=movej_trajectory_duration, time_from_start=time_from_start,
             max_velocity=max_velocity, max_acceleration=max_acceleration, max_jerk=max_jerk,
+            blend_ratio_percent=blend_ratio_percent,
         )
 
         return self._send_motion_action_goal(
@@ -2147,6 +2170,7 @@ class ROS2RobotInterface:
 
     def execute_body_joint_trajectory_action(
         self, joint_names: List[str], waypoints: List[List[float]], *,
+        blend_ratio_percent: Any = None,
         time_mode: bool = True, movej_trajectory_duration: Optional[float] = None,
         time_from_start: Optional[List[float]] = None,
         max_velocity: Any = None, max_acceleration: Any = None, max_jerk: Any = None,
@@ -2161,6 +2185,7 @@ class ROS2RobotInterface:
         movej_trajectory_duration 是持久更新的 Goal 总秒数；time_from_start
         是每点累计秒数列表，两者互斥。省略时间则用控制器当前总时长。
         指定正时间零位移可停留；约束模式不得提供非零时间。
+        blend_ratio_percent 的 None/标量/逐点列表语义与通用 Action 方法相同。
         """
         if not self.is_connected:
             raise ROS2NotConnectedError("ROS2RobotInterface is not connected")
@@ -2169,6 +2194,7 @@ class ROS2RobotInterface:
         goal_msg = self._build_joint_trajectory_goal(
             joint_names, waypoints, time_mode=time_mode, movej_trajectory_duration=movej_trajectory_duration, time_from_start=time_from_start,
             max_velocity=max_velocity, max_acceleration=max_acceleration, max_jerk=max_jerk,
+            blend_ratio_percent=blend_ratio_percent,
         )
 
         return self._send_motion_action_goal(
@@ -2186,6 +2212,7 @@ class ROS2RobotInterface:
         *,
         duration: Optional[float] = None,
         time_mode: bool = True,
+        blend_ratio_percent: Any = None,
         left_joint_names: Optional[List[str]] = None,
         right_joint_names: Optional[List[str]] = None,
         max_velocity: Any = None,
@@ -2218,6 +2245,7 @@ class ROS2RobotInterface:
             joint_names,
             [positions],
             time_mode=time_mode,
+            blend_ratio_percent=blend_ratio_percent,
             movej_trajectory_duration=duration,
             max_velocity=max_velocity,
             max_acceleration=max_acceleration,
