@@ -18,7 +18,7 @@ send_joint_trajectory() 行为:
     1. connect()；无 arm_trajectory_pub 则 skip。
     2. 打印左臂当前关节状态（便于对照）。
     3. 使用复现问题的固定 joint_names / waypoints。
-    4. send_joint_trajectory(..., trajectory_duration=TRAJ_DURATION)。
+    4. send_joint_trajectory(..., movej_trajectory_duration=TRAJ_DURATION)。
     5. 等待 TRAJ_DURATION + 余量后打印关节状态与相对末路点误差。
     6. finally 切 HOLD 并 disconnect。
 
@@ -51,24 +51,12 @@ JOINT_NAMES = [
     "left_joint7",
 ]
 WAYPOINTS = [
-    [
-        -0.3375,
-        1.1042,
-        0.1900,
-        -1.5587,
-        -1.4510,
-        -0.1154,
-        -1.1156,
-    ],
-    [
-        -0.8480558191023421,
-        0.5525663782492543,
-        1.0078321021226186,
-        -1.9438721723174808,
-        -1.118159342654522,
-        -0.1657565776956177,
-        0.06792394856960618,
-    ],
+    [1.87641669974313, -0.5687477016984709, -1.730039779714491,
+     -1.9825839235531273, -1.0040110954577952, 0.07270804751898144, 0.2687643399448287],
+    [0.9644474437188942, -0.5046140506501708, -1.5921780158023264,
+     -0.47424058673172265, -0.7691065252830858, -0.0748338879732527, -0.8967314065858463],
+    [1.5177486656402732, -1.2694007275883998, -0.89838601010572,
+     -1.6746200861523974, -0.27997303648008287, -0.02395193698124802, 0.678350940785112],
 ]
 TRAJ_DURATION = 5.0
 WAIT_MARGIN = 2.0
@@ -133,12 +121,13 @@ def main() -> int:
         print(f"waypoints ({len(WAYPOINTS)}):")
         for i, wp in enumerate(WAYPOINTS):
             print(f"  [{i}] {[f'{p:.4f}' for p in wp]}")
-        print(f"trajectory_duration={TRAJ_DURATION:.1f}s")
+        print(f"movej_trajectory_duration={TRAJ_DURATION:.1f}s")
 
         interface.send_joint_trajectory(
             joint_names=JOINT_NAMES,
             waypoints=WAYPOINTS,
-            trajectory_duration=TRAJ_DURATION,
+            movej_trajectory_duration=10.0,
+            movej_trajectory_blend_ratio=0.5,
         )
         print("send_joint_trajectory() published")
 

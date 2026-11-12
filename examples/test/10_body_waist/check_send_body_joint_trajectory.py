@@ -11,7 +11,7 @@ send_body_joint_trajectory() 行为:
     1. connect()；无 body_joint_trajectory_pub 则 skip。
     2. 从 get_joint_state(categorized=True) 取 body 关节名与当前位置。
     3. 构造两个路点：首关节 + 小偏移，再回到当前。
-    4. send_body_joint_trajectory(..., trajectory_duration=TRAJ_DURATION)。
+    4. send_body_joint_trajectory(..., movej_trajectory_duration=TRAJ_DURATION)。
     5. 等待后打印 check_arrive(part='body')。
     6. finally 切 HOLD 并 disconnect。
 
@@ -98,7 +98,7 @@ def main() -> int:
         print(f"send_body_joint_trajectory(names, {len(waypoints)} waypoints, duration={TRAJ_DURATION})")
         print(f"  waypoint0[0] = {waypoints[0][0]:.4f} (current[0] + {DELTA})")
         interface.send_body_joint_trajectory(
-            joint_names, waypoints, trajectory_duration=TRAJ_DURATION
+            joint_names, waypoints, movej_trajectory_duration=TRAJ_DURATION
         )
 
         wait = TRAJ_DURATION + WAIT_MARGIN

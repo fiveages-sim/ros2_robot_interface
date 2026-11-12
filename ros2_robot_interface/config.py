@@ -112,7 +112,8 @@ class ROS2RobotInterfaceConfig:
     # ============================================================================
     # 参数化笛卡尔轨迹 Action（可选，手动配置）
     # ============================================================================
-    joint_trajectory_action_name: str | None = "/ocs2_arm_controller/joint_trajectory_with_para"  # 带参数/反馈的 MoveJ action
+    joint_trajectory_action_name: str | None = None  # 【可自动检测】WBC/split MoveJ action，显式地址优先
+    body_joint_trajectory_action_name: str | None = None  # 【可自动检测】分体腰部 JointTrajectory Action，WBC 使用统一接口
     movel_action_name: str | None = "/ocs2_arm_controller/execute_linear"  # 带参数/反馈的 MOVEL action
     movec_action_name: str | None = "/ocs2_arm_controller/execute_circle_use_ik"  # 带参数/反馈的 MOVEC action
     waist_lifting_pose_action_name: str | None = None  # 【可自动检测】腰部位姿 action，例如 "/ocs2_wbc_controller/waist_lifting_pose" 或 "/body_joint_controller/waist_lifting_pose"

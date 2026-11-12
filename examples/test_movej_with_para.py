@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
+from arms_ros2_control_msgs.action import JointTrajectory
+from rclpy.action import ActionClient
+from rclpy.duration import Duration
+from joint_trajectory_action_utils import send_joint_trajectory_action
 import rclpy
 from rclpy.node import Node
-from arms_ros2_control_msgs.srv import JointTrajectory
 from arms_ros2_control_msgs.msg import JointWaypoint
 from rclpy.executors import SingleThreadedExecutor
 import time
@@ -11,7 +14,7 @@ import math
 from ros2_robot_interface import ROS2RobotInterface, ROS2RobotInterfaceConfig
 
 def main():
-    """测试机器人设置参数的movej单点和多点的service"""
+    """测试机器人设置参数的movej单点和多点的 Action"""
 
     # ========================================================================
     # 第一部分：初始化和连接（保持不变）
@@ -118,7 +121,7 @@ def main():
     # 第三部分：测试单点轨迹
     # ========================================================================
     print("-" * 70)
-    print("[7] 测试关节单点轨迹服务")
+    print("[7] 测试关节单点轨迹 Action")
     print("-" * 70)
 
     # 初始化ROS 2（如果还没初始化）
@@ -130,10 +133,10 @@ def main():
     executor = SingleThreadedExecutor()
     executor.add_node(node)
     
-    client = node.create_client(JointTrajectory, '/ocs2_arm_controller/joint_trajectory_with_para')
+    client = ActionClient(node, JointTrajectory, '/ocs2_arm_controller/joint_trajectory_with_para')
     
     # 等待服务
-    if not client.wait_for_service(timeout_sec=5.0):
+    if not client.wait_for_server(timeout_sec=5.0):
         node.get_logger().error('服务不可用')
         executor.remove_node(node)
         node.destroy_node()
@@ -142,14 +145,13 @@ def main():
         return 1
     
     # 创建单点请求
-    req = JointTrajectory.Request()
+    req = JointTrajectory.Goal(time_mode=True, use_waypoint_blend_ratio=True)
     req.joint_names = dual_arm_joint_names
     
     wp = JointWaypoint()
     wp.position = [1.5, -0.3, 0.0, -0.5, -0.6, -0.2, 0.5,
                    -1.6, -1.0, 0.4, -0.6, 1.2, 0.0, -0.3]
-    wp.time_mode = False
-    wp.total_time=5.0
+    req.time_mode = False  # DOUBLES constraint mode; no timing fields
     wp.max_velocity = [0.1, 0.2, 0.2, 0.2, 0.2, 0.3, 0.3,
                        0.1, 0.2, 0.2, 0.2, 0.2, 0.3, 0.3]
     wp.max_acceleration = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
@@ -160,7 +162,7 @@ def main():
     
     # 发送请求
     node.get_logger().info('发送运动指令...')
-    future = client.call_async(req)
+    future = send_joint_trajectory_action(client, req)
     rclpy.spin_until_future_complete(node, future)
     
     if future.result():
@@ -220,10 +222,10 @@ def main():
     executor_multi = SingleThreadedExecutor()
     executor_multi.add_node(node_multi)
     
-    client_multi = node_multi.create_client(JointTrajectory, '/ocs2_arm_controller/joint_trajectory_with_para')
+    client_multi = ActionClient(node_multi, JointTrajectory, '/ocs2_arm_controller/joint_trajectory_with_para')
     
     # 等待服务
-    if not client_multi.wait_for_service(timeout_sec=5.0):
+    if not client_multi.wait_for_server(timeout_sec=5.0):
         node_multi.get_logger().error('服务不可用')
         executor_multi.remove_node(node_multi)
         node_multi.destroy_node()
@@ -232,15 +234,15 @@ def main():
         return 1
     
     # 创建多点轨迹请求
-    req_multi = JointTrajectory.Request()
+    req_multi = JointTrajectory.Goal(time_mode=True, use_waypoint_blend_ratio=True)
     req_multi.joint_names = dual_arm_joint_names
     
     # 定义多个目标位置
     wp1 = JointWaypoint()
     wp1.position = [0.5, 0.0, 0.7, 0.3, -0.2, 0.4, -0.1,
                     -1.0, -1.5, 0.9, -0.3, 0.7, -0.2, 0.4]
-    wp1.time_mode = False
-    # wp1.total_time=6.0
+    # Mixed per-waypoint modes are no longer supported; use timed 6/5/6-second segments.
+    wp1.time_from_start = Duration(seconds=6.0).to_msg()
     wp1.max_velocity = [0.1, 0.2, 0.2, 0.2, 0.2, 0.3, 0.3,
                        0.1, 0.2, 0.2, 0.2, 0.2, 0.3, 0.3]
     wp1.max_acceleration = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
@@ -252,15 +254,13 @@ def main():
     wp2 = JointWaypoint()
     wp2.position = [0.0, -0.3, 0.4, 0.3, 0.2, -0.1, 0.3,
                     -0.4, -0.8, 0.2, 0.0, 0.7, -0.5, 0.3]
-    wp2.time_mode = True
-    wp2.total_time = 5.0
+    wp2.time_from_start = Duration(seconds=11.0).to_msg()
     wp2.blend_ratio_percent = 0.3
     
     wp3 = JointWaypoint()
     wp3.position = [-0.5, 0.1, 0.0, 0.3, 0.6, 0.2, 0.3,
                     -0.9, -0.2, 0.3, 0.2, 0.7, -0.6, 0.1]
-    wp3.time_mode = True
-    wp3.total_time = 6.0
+    wp3.time_from_start = Duration(seconds=17.0).to_msg()
     wp3.max_velocity = [0.5, 0.3, 0.3, 0.4, 0.5, 0.3, 0.3,
                        0.5, 0.3, 0.3, 0.4, 0.5, 0.3, 0.3]
     wp3.max_acceleration = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
@@ -273,7 +273,7 @@ def main():
     
     # 发送请求
     node_multi.get_logger().info('发送运动指令...')
-    future_multi = client_multi.call_async(req_multi)
+    future_multi = send_joint_trajectory_action(client_multi, req_multi)
     rclpy.spin_until_future_complete(node_multi, future_multi)
     
     if future_multi.result():

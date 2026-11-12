@@ -716,60 +716,41 @@ result = interface.execute_movel_action("left", goal, duration=3.0, frame_id="ar
 
 **原理：**
 - 类型：Action（探测 server）
-- 名称：`config.joint_trajectory_action_name`（默认 `/ocs2_arm_controller/joint_trajectory_with_para`）
+- 名称：`config.joint_trajectory_action_name`（默认 `None`，按 WBC/split 拓扑自动检测）
 - 类型：`arms_ros2_control_msgs/action/JointTrajectory`
 
-#### `execute_joint_trajectory_action(joint_names, waypoints, *, time_mode=True, total_time=None, max_velocity=None, max_acceleration=None, max_jerk=None, auto_switch_fsm=True, feedback_callback=None, timeout=30.0, wait_for_server_timeout=5.0) -> Any`
+#### `execute_joint_trajectory_action(joint_names, waypoints, *, time_mode=True, movej_trajectory_duration=None, time_from_start=None, blend_ratio_percent=None, max_velocity=None, max_acceleration=None, max_jerk=None, auto_switch_fsm=True, feedback_callback=None, timeout=30.0, wait_for_server_timeout=5.0) -> Any`
 
-**功能：** 带速度/加速度/jerk 约束的参数化关节轨迹（MoveJ action）。
+通过发现的 split 双臂或 WBC Action 执行关节轨迹；WBC 支持其管理的腰部+双臂子集。
 
-**原理：**
-- 类型：Action
-- 名称：`config.joint_trajectory_action_name`（默认 `/ocs2_arm_controller/joint_trajectory_with_para`）
-- 类型：`arms_ros2_control_msgs/action/JointTrajectory`（waypoint 为 `JointWaypoint`）
-- 隐式 FSM：默认切到 MOVEJ
-- 与 `send_joint_trajectory()` 不同：后者是 **Topic 发布** `/{controller}/target_joint_trajectory`，本方法走 Action 并等待结果
-- `max_*` 传 `None` 时 Python 不写 waypoint 数组，控制器回退 `movej_max_*`（见下表）
+- `joint_names`：非空关节列表，顺序对应每点 position；`waypoints` 至少一个目标点。
+- `time_mode=True`：Goal 总时长或逐点累计时间模式；False 为仅 DOUBLES 支持的约束模式。
+- `movej_trajectory_duration`：整条 Goal 的总秒数，非负且有限。None/0 表示未指定；正值由服务端在实际规划时持久更新同名 ROS 参数，不由 Python 预先 set 参数。
+- `blend_ratio_percent`：`None` 在实际规划时使用控制器默认值；标量覆盖全部点；纯数值列表逐点设置，不允许列表内含 `None`。显式 `0.0` 关闭转接，数值须有限且在 `[0, 1]`。不修改 ROS 参数，仅 DOUBLES 使用。body 和双臂包装方法支持相同参数。
+- `time_from_start`：每个目标的累计到达秒数列表，长度须等于目标数，非负、有限、非递减。Python 转为 Duration，超过 sec 范围拒绝。
+- 正总时长和非零累计时间互斥；两者都未指定/全零则沿用控制器当前总时长。约束模式不接受非零时间。
+- 相同累计时间仅允许相同位置（服务端结合真实起点检查）；正时间零位移执行停留。只给总时间时相邻重复位置会合并。全部已满足可成功返回 planned_duration=0。
+- `max_velocity/max_acceleration/max_jerk`：None 沿用控制器默认值；标量广播到各关节或传等长数组。旋转使用 rad 的导数，升降使用 m 的导数。DOUBLES 使用这些约束，linear/tanh 不新增 max_* 保证。
+- `auto_switch_fsm` 默认 True，执行前尝试进入 MOVEJ；feedback_callback 在后台 executor 中运行，不可调用阻塞接口。
+- timeout/wait_for_server_timeout 分别控制结果和服务端等待；超时沿用取消逻辑。返回 Action Result，未取得结果（包括拒绝/超时）为 None。
 
-**参数：**
-- `joint_names` (`List[str]`): 被控制关节名；不可为空，每个 waypoint 长度必须等于关节数
-- `waypoints` (`List[List[float]]`): 路点关节角列表，单位弧度；不可为空，每个路点长度必须等于 `joint_names` 长度，否则抛 `ValueError`
-- `time_mode` (`bool`): `True`（默认）按 `total_time` 时间约束执行；`False` 按速度 / 加速度 / jerk 约束规划时长
-- `total_time` (`float | None`): 写入每个 waypoint 的总时长（秒）；`None` 时不写字段，时间模式下控制器回退 3 s
-- `max_velocity` / `max_acceleration` / `max_jerk` (`float | List[float] | None`): 速度 / 加速度 / jerk 约束，单位 rad/s、rad/s²、rad/s³。可传标量（广播到每个关节）或逐关节列表，列表长度与 `joint_names` 不匹配时抛 `ValueError`。`None`（默认）不填充数组，由运控 `movej_max_*` 补齐
-- `auto_switch_fsm` (`bool`): 是否自动切到 MOVEJ（经 `/fsm_command`），默认 `True`
-- `feedback_callback`: 收到的是 action feedback 对象
-- `timeout` (`float`): 等待 action result 的超时（秒），默认 30.0
-- `wait_for_server_timeout` (`float`): 等待 action server 就绪的超时（秒），默认 5.0
+正总时长更新成功后会持续影响后续默认轨迹；即使随后规划失败也不自动回滚。已生成轨迹不随之后参数修改而重新定时。
+DOUBLES 停留边界不做 blending；非零路点 blending 可能改变实际规划时长，检查 planned_duration。
 
-**返回值：**
-- action result；goal 被拒绝或超时返回 `None`
-
-**参数：**
-- `joint_names` (`List[str]`): 被控制关节名；不可为空，每个 waypoint 长度必须等于关节数
-- `waypoints` (`List[List[float]]`): 路点关节角列表，单位弧度；不可为空，每个路点长度必须等于 `joint_names` 长度，否则抛 `ValueError`
-- `time_mode` (`bool`): `True` 按固定时间约束执行；`False` 按速度 / 加速度 / jerk 约束规划（默认 `True`）
-- `total_time` (`float | None`): 写入每个 waypoint 的总时长（秒）；`None` 时沿用控制器默认规划
-- `max_velocity` / `max_acceleration` / `max_jerk` (`float | List[float] | None`): 速度 / 加速度 / jerk 约束；可传标量（广播到每个关节）或逐关节列表，列表长度与 `joint_names` 不匹配时抛 `ValueError`
-- `auto_switch_fsm` (`bool`): 是否自动切到 MOVEJ（经 `/fsm_command`），默认 `True`
-- `feedback_callback`: 收到的是 action feedback 对象
-- `timeout` (`float`): 等待 action result 的超时（秒），默认 30.0
-- `wait_for_server_timeout` (`float`): 等待 action server 就绪的超时（秒），默认 5.0
-
-**返回值：**
-- action result；goal 被拒绝或超时返回 `None`
-
-**示例：**
 ```python
-# 不必传入 max_velocity / max_acceleration / max_jerk
+# 逐点累计 2、5 秒，对应两段 2、3 秒；不修改全局总时长。
 result = interface.execute_joint_trajectory_action(
-    ["left_joint1", "left_joint2", "left_joint3", "left_joint4", "left_joint5", "left_joint6", "left_joint7"],
-    [[0.0, 0.3, -0.2, 0.0, 1.2, 0.0, 0.0]],
-    total_time=4.0,
+    names, [point1, point2], time_from_start=[2.0, 5.0],
+)
+# 整条轨迹总时间，持久更新控制器参数。
+result = interface.execute_joint_trajectory_action(
+    names, [point1, point2], movej_trajectory_duration=5.0,
 )
 ```
 
-#### `execute_dual_arm_movej_action(left_arm_positions, right_arm_positions, *, duration=None, time_mode=True, left_joint_names=None, right_joint_names=None, max_velocity=None, max_acceleration=None, max_jerk=None, auto_switch_fsm=True, feedback_callback=None, timeout=30.0, wait_for_server_timeout=5.0) -> Any`
+旧 total_time 关键字不再接受；旧每段 [2,3] 秒需改为累计 [2,5]，不能仅替换参数名。消息包、公共库、控制器及 Python 必须统一升级重启。
+
+#### `execute_dual_arm_movej_action(left_arm_positions, right_arm_positions, *, duration=None, time_mode=True, left_joint_names=None, right_joint_names=None, blend_ratio_percent=None, max_velocity=None, max_acceleration=None, max_jerk=None, auto_switch_fsm=True, feedback_callback=None, timeout=30.0, wait_for_server_timeout=5.0) -> Any`
 
 **功能：** 双臂参数化 MoveJ 的便捷封装（把左右臂关节拼成一条 `execute_joint_trajectory_action`）。
 
@@ -777,7 +758,7 @@ result = interface.execute_joint_trajectory_action(
 
 **参数：**
 - `left_arm_positions` / `right_arm_positions` (`List[float]`): 左右臂关节角列表，单位弧度；左右拼接成单个 waypoint（左在前、右在后）
-- `duration` (`float | None`): 总时长（秒），转发为 `total_time` 写入 waypoint；`None` 时不写字段，时间模式下控制器回退 3 s
+- `duration` (`float | None`): 总时长（秒），转发为 Goal `movej_trajectory_duration` 并持久更新控制器参数；None 使用当前控制器时长；约束模式须省略 duration
 - `time_mode` (`bool`): 同 `execute_joint_trajectory_action`
 - `left_joint_names` / `right_joint_names` (`List[str] | None`): 左右臂关节名，拼接为 `joint_names`；默认各使用 7 个标准关节名（`left_joint1..7` / `right_joint1..7`）
 - `max_velocity` / `max_acceleration` / `max_jerk`: 同 `execute_joint_trajectory_action`；`None`（默认）不填充数组，由运控 `movej_max_*` 补齐
@@ -804,13 +785,13 @@ result = interface.execute_dual_arm_movej_action(
 | `movej_max_velocity` | `2.0` | waypoint 的 `max_velocity` 为空 |
 | `movej_max_acceleration` | `4.0` | waypoint 的 `max_acceleration` 为空 |
 | `movej_max_jerk` | `20.0` | waypoint 的 `max_jerk` 为空 |
-| 时间模式下的时长 | `3.0` s | `time_mode=True` 且未写 `total_time` |
+| 时间模式下的时长 | 控制器当前 `movej_trajectory_duration` | 未提供 Goal 总时间及非零累计时间 |
 
 这些是 MoveJ Action 的 goal 回退值，不是 Topic 接口 `send_joint_positions` 的 `movej_duration`。
 
 **参数：**
 - `left_arm_positions` / `right_arm_positions` (`List[float]`): 左右臂关节角列表，单位弧度；左右拼接成单个 waypoint（左在前、右在后）
-- `duration` (`float | None`): 总时长（秒），转发为 `total_time` 写入 waypoint；`None` 时沿用控制器默认规划
+- `duration` (`float | None`): 总时长（秒），转发为 Goal `movej_trajectory_duration` 并持久更新参数；None 沿用当前参数，约束模式须省略 duration
 - `time_mode` (`bool`): 同 `execute_joint_trajectory_action`
 - `left_joint_names` / `right_joint_names` (`List[str] | None`): 左右臂关节名，拼接为 `joint_names`；默认各使用 7 个标准关节名（`left_joint1..7` / `right_joint1..7`）
 - `max_velocity` / `max_acceleration` / `max_jerk`: 同 `execute_joint_trajectory_action`（标量广播 / 列表长度校验）
@@ -1154,7 +1135,7 @@ head_positions = [0.5, -0.3]  # 弧度
 interface.send_head_joint_positions(head_positions)
 ```
 
-#### `send_head_joint_trajectory(joint_names: List[str], waypoints: List[List[float]], trajectory_duration: float | None = None) -> None`
+#### `send_head_joint_trajectory(joint_names: List[str], waypoints: List[List[float]], movej_trajectory_duration: float | None = None, movej_trajectory_blend_ratio: float | None = None) -> None`
 
 **功能：** 发送头部关节多路点轨迹（split 拓扑）。
 
@@ -1163,13 +1144,13 @@ interface.send_head_joint_positions(head_positions)
 - 名称：`config.head_joint_trajectory_topic`（自动检测 `/head_joint_controller/target_joint_trajectory`）
 - 消息：`trajectory_msgs/msg/JointTrajectory`
 - 隐式 FSM：切到 MOVEJ
-- 执行参数：`trajectory_duration` 非空时写 `movej_trajectory_duration` 到 head 控制器节点（`head_joint_controller`）
+- 执行参数：`movej_trajectory_duration` 非空时写 `movej_trajectory_duration` 到 head 控制器节点（`head_joint_controller`）
 - 控制器自动把当前位置作为首路点
 
 **参数：**
 - `joint_names` (`List[str]`): 头部关节名列表（须与控制器关节一致）
 - `waypoints` (`List[List[float]]`): 多路点，每点为与 `joint_names` 等长的关节位置列表（弧度）
-- `trajectory_duration` (`float | None`): 可选总轨迹时长（秒）；`None` 沿用控制器当前参数
+- `movej_trajectory_duration` (`float | None`): 可选总轨迹时长（秒）；`None` 沿用控制器当前参数
 
 **说明：**
 - 仅 split 拓扑存在该话题；WBC full-body 请用 `send_joint_trajectory()`（`/ocs2_wbc_controller/target_joint_trajectory`，`joint_names` 选头部关节）
@@ -1184,7 +1165,7 @@ interface.send_head_joint_trajectory(
         [0.5, -0.3],
         [0.0, 0.0],
     ],
-    trajectory_duration=3.0,
+    movej_trajectory_duration=3.0,
 )
 ```
 
@@ -1318,7 +1299,7 @@ body_positions = [0.0, 0.0, 0.0, 0.0]  # 弧度
 interface.send_body_joint_positions(body_positions)
 ```
 
-#### `send_body_joint_trajectory(joint_names: List[str], waypoints: List[List[float]], trajectory_duration: float | None = None) -> None`
+#### `send_body_joint_trajectory(joint_names: List[str], waypoints: List[List[float]], movej_trajectory_duration: float | None = None, movej_trajectory_blend_ratio: float | None = None) -> None`
 
 **功能：** 发送躯干关节多路点轨迹（split 拓扑）。
 
@@ -1327,13 +1308,13 @@ interface.send_body_joint_positions(body_positions)
 - 名称：`config.body_joint_trajectory_topic`（自动检测 `/body_joint_controller/target_joint_trajectory`）
 - 消息：`trajectory_msgs/msg/JointTrajectory`
 - 隐式 FSM：切到 MOVEJ
-- 执行参数：`trajectory_duration` 非空时写 `movej_trajectory_duration` 到 body 控制器节点（`body_joint_controller`）
+- 执行参数：`movej_trajectory_duration` 非空时写 `movej_trajectory_duration` 到 body 控制器节点（`body_joint_controller`）
 - 控制器自动把当前位置作为首路点
 
 **参数：**
 - `joint_names` (`List[str]`): 躯干关节名列表（须与控制器关节一致）
 - `waypoints` (`List[List[float]]`): 多路点，每点为与 `joint_names` 等长的关节位置列表（弧度）
-- `trajectory_duration` (`float | None`): 可选总轨迹时长（秒）；`None` 沿用控制器当前参数
+- `movej_trajectory_duration` (`float | None`): 可选总轨迹时长（秒）；`None` 沿用控制器当前参数
 
 **说明：**
 - 仅 split 拓扑存在该话题；WBC full-body 请用 `send_joint_trajectory()`（`/ocs2_wbc_controller/target_joint_trajectory`，`joint_names` 选躯干关节）
@@ -1348,7 +1329,7 @@ interface.send_body_joint_trajectory(
         [0.0, 0.0, 0.0, 0.0],
         [0.2, 0.0, 0.1, 0.0],
     ],
-    trajectory_duration=3.0,
+    movej_trajectory_duration=3.0,
 )
 ```
 
@@ -2375,7 +2356,7 @@ print(f"execute_path success: {ok}")
 
 **原理：** 包装 `execute_path(..., left_poses=[])`，同一 Service `execute_path`。
 
-#### `send_joint_trajectory(joint_names: List[str], waypoints: List[List[float]], trajectory_duration: float | None = None) -> None`
+#### `send_joint_trajectory(joint_names: List[str], waypoints: List[List[float]], movej_trajectory_duration: float | None = None, movej_trajectory_blend_ratio: float | None = None) -> None`
 
 **功能：** 发送多路点关节轨迹，支持单臂/双臂统一接口。
 
@@ -2383,7 +2364,7 @@ print(f"execute_path success: {ok}")
 - 类型：Topic 发布；可选参数服务
 - 名称：`/{controller_name}/target_joint_trajectory`（`controller_name` 从左/右臂关节 topic 第一段解析，如 `/ocs2_wbc_controller/target_joint_trajectory`）
 - 消息：`trajectory_msgs/msg/JointTrajectory`
-- `trajectory_duration` 若给定：对 `arm_controller` 调用 `SetParameters` 写 `movej_trajectory_duration`
+- `movej_trajectory_duration` 若给定：对 `arm_controller` 调用 `SetParameters` 写 `movej_trajectory_duration`
 - 路点融合另可读节点参数 `movej_trajectory_blend_ratio`
 - 隐式 FSM：切到 MOVEJ
 - 需要等待结果时请用 `execute_joint_trajectory_action`
@@ -2391,11 +2372,11 @@ print(f"execute_path success: {ok}")
 **参数：**
 - `joint_names` (`List[str]`): 被控制关节名，顺序决定每个 waypoint 中数值的对应关系；不可为空
 - `waypoints` (`List[List[float]]`): 目标关节角路点，单位弧度；不可为空，每个路点长度必须等于 `joint_names` 长度；控制器会把当前关节位置作为首个路点，因此至少需提供 2 个路点
-- `trajectory_duration` (`float | None`): 整条轨迹总时长，单位秒；给定时先写入 `arm_controller.movej_trajectory_duration`（与 ros2-viser 控制器配置一致），`None` 沿用当前节点参数
+- `movej_trajectory_duration` (`float | None`): 整条轨迹总时长，单位秒；给定时先写入 `arm_controller.movej_trajectory_duration`（与 ros2-viser 控制器配置一致），`None` 沿用当前节点参数
 
 **异常：**
 - `ROS2NotConnectedError`: 接口未连接，或轨迹发布器 / `arm_controller` 节点未知
-- `ValueError`: `joint_names` 为空、路点少于 2 个、`trajectory_duration` 非正，或路点长度与 `joint_names` 不一致
+- `ValueError`: `joint_names` 为空、路点少于 2 个、`movej_trajectory_duration` 非正，或路点长度与 `joint_names` 不一致
 
 **示例：**
 ```python
@@ -2405,7 +2386,7 @@ waypoints = [
     [0.0, 0.3, -0.2, 0.0, 1.2, 0.0, 0.0],
     [0.1, 0.4, -0.3, 0.1, 1.1, 0.1, 0.0],
 ]
-interface.send_joint_trajectory(joint_names, waypoints, trajectory_duration=5.0)
+interface.send_joint_trajectory(joint_names, waypoints, movej_trajectory_duration=5.0)
 ```
 
 ---
@@ -2742,7 +2723,7 @@ interface.set_node_parameters(interface.body_controller, {"waist_lifting_duratio
 | `send_waist_lifting_pose_*`、`execute_waist_lifting_pose_*_action` | `body_controller` | `waist_lifting_duration`（默认 3 s） |
 | `send_waist_lifting_velocity_scale` / `send_waist_turning_velocity_scale` | `body_controller` | `waist_lifting_default_parameter` / `waist_turning_default_parameter` = `[目标速度, 最大加速度, 最大加加速度]`；实际速度 = `scale × 第一项` |
 
-MoveL / MoveC Action 的时长写在 goal 里；六个笛卡尔 `max_*` 省略时回退 `cartesian_defaults.*`。MoveJ Action（`joint_trajectory_with_para`）的 `max_velocity` / `max_acceleration` / `max_jerk` 省略时回退控制器节点参数 `movej_max_velocity` / `movej_max_acceleration` / `movej_max_jerk`（默认 2.0 / 4.0 / 20.0），时长仍可写在 goal 的 `total_time` 里（时间模式未写时控制器回退 3 s）。力控见 `set_compliance_force`。
+MoveL / MoveC Action 的时长写在 goal 里；六个笛卡尔 `max_*` 省略时回退 `cartesian_defaults.*`。MoveJ Action（`joint_trajectory_with_para`）的 `max_velocity` / `max_acceleration` / `max_jerk` 省略时回退控制器节点参数 `movej_max_velocity` / `movej_max_acceleration` / `movej_max_jerk`（默认 2.0 / 4.0 / 20.0），总时长写在 Goal 的 `movej_trajectory_duration` 中（未提供时间则沿用当前控制器参数）。力控见 `set_compliance_force`。
 
 ---
 
@@ -2922,3 +2903,92 @@ interface.send_fsm_command(FSM_OCS2)
 `send_waist_phi_velocity_scale(velocity_scale)` 发布俯仰速度比例；正值前倾，负值后仰，零值请求停止。非零命令会持续执行，停止发布不会自动停止控制器运动。
 
 腰部升降、旋转、俯仰速度话题在连接时按控制模式自动检测：识别到 WBC 统一关节话题时使用 `/ocs2_wbc_controller/` 前缀，否则使用 `/body_joint_controller/` 前缀；不跨模式回退。显式配置的话题优先保留。需要控制器提供相应能力。
+
+### WBC 关节轨迹 Action
+
+`joint_trajectory_action_name` 默认 None，按检测到的 WBC/split 拓扑发现
+`/ocs2_wbc_controller/joint_trajectory_with_para` 或
+`/ocs2_arm_controller/joint_trajectory_with_para`；沿用 `topic_prefix` 命名空间处理。
+显式地址优先，未发现匹配接口不跨控制器回退。WBC 同名 Service 已移除。
+连接后复用 `execute_joint_trajectory_action(joint_names, waypoints, ...)`，
+可指定 WBC `joints` 中的 body、双臂或混合子集，不会跨控制器转发。
+
+```python
+result = interface.execute_joint_trajectory_action(
+    joint_names=body_joint_names, waypoints=[body_target_positions],
+    time_mode=False, max_velocity=0.2, max_acceleration=0.4, max_jerk=2.0,
+)
+```
+
+关节名称及位置须来自实际机器人配置。默认自动切换 MOVEJ。DOUBLES 使用
+请求的速度、加速度和 jerk 约束，时间模式使用 Goal 总时长或逐点累计时间，约束模式计算时长；
+非 DOUBLES 不承诺使用请求的 max_*。反馈回调不可调用阻塞方法。
+超时沿用公共取消逻辑；实际到位须结合关节反馈。分体腰部也已迁移为 Topic + Action。
+
+### 分体腰部关节轨迹 Action
+
+`body_joint_trajectory_action_name: str | None = None` 自动发现分体部署的
+`/body_joint_controller/joint_trajectory_with_para`，消息类型为
+`arms_ros2_control_msgs/action/JointTrajectory`。显式地址优先，支持 topic_prefix，
+自动地址重连时重新发现；不回退到 Service，也不占用双臂客户端。
+
+`wait_for_body_joint_trajectory_action_server(timeout=5.0) -> bool` 等待独立服务端。
+`execute_body_joint_trajectory_action(joint_names, waypoints, *, time_mode=True,
+movej_trajectory_duration=None, time_from_start=None, blend_ratio_percent=None, max_velocity=None, max_acceleration=None, max_jerk=None,
+auto_switch_fsm=True, feedback_callback=None, timeout=30.0,
+wait_for_server_timeout=5.0)` 返回 Action 结果，拒绝/超时等未取得结果时返回 None。
+参数和列表广播语义与 execute_joint_trajectory_action 一致；位置单位为 rad 或 m。
+DOUBLES 支持约束参数，非 DOUBLES 不承诺使用请求 max_*。
+默认经 body_joint 切 MOVEJ，服务端要求目标控制器实际处于 MOVEJ；失败时不能
+仅凭全局 FSM 缓存认定 body 已切换。反馈回调不应调用阻塞 API。
+超时沿用公共取消流程，实际停止/到位需要关节反馈验证。
+
+```python
+result = interface.execute_body_joint_trajectory_action(
+    body_joint_names, [body_target_positions], movej_trajectory_duration=3.0,
+)
+```
+
+该方法在 WBC 模式下拒绝执行（包括手动配置 body 地址时），请使用统一的
+execute_joint_trajectory_action。分体 body 与双臂分别执行，不保证同步起动。
+BasicJointController 所有实例（含 head）同名业务 Service 均已改为 Action；
+已有 send_body_joint_trajectory Topic 方法以及专用腰部升降接口保持不变。
+验证脚本：examples/test/10_body_waist/check_execute_body_joint_trajectory_action.py。
+
+### Topic 轨迹参数命名更新
+
+`send_joint_trajectory()`、`send_body_joint_trajectory()`、`send_head_joint_trajectory()`
+的 `trajectory_duration` 参数已改名为 `movej_trajectory_duration`，旧关键字不再接受；
+第三个位置参数含义不变。新增 `movej_trajectory_blend_ratio=None`，范围 [0, 1]，
+仅 DOUBLES 多点转接生效。两个参数都通过参数服务写入对应控制器，持续生效；
+None 不修改当前配置。它们不是轨迹消息中的逐点时间或逐点 blend ratio。
+
+```python
+interface.send_joint_trajectory(
+    joint_names=names, waypoints=points,
+    movej_trajectory_duration=5.0, movej_trajectory_blend_ratio=0.2,
+)
+```
+
+### Action 时间迁移检查脚本
+
+WBC 和 split body 检查脚本支持 --timing waypoints|total|default，分别验证累计时间、
+持久总时间和控制器默认时间；--dwell 可在首目标后增加显式停留（仅 waypoints）；
+body 的 --constraint 不发送任何时间字段。
+原生 split 双臂脚本把 --duration 作为每段时长，累加写入 time_from_start。
+旧 examples/test_movej_with_para.py 已迁移为原生 Action；其原混合模式多点示例
+改为统一时间模式、累计 6/11/17 秒，不再提供每点混合 time_mode。
+其余旧 MoveL/MoveC 示例的关节请求也迁移为 Action，但保留原有其他笛卡尔接口，
+不代表这些旧接口均已在当前控制器注册。新接口验证优先使用 examples/test 下脚本。
+
+Action 转接示例（总时长和逐点累计时间模式均适用）：
+
+```python
+interface.execute_joint_trajectory_action(
+    joint_names, waypoints, time_from_start=[2.0, 6.0, 16.0],
+    blend_ratio_percent=[0.0, 0.1, 0.2],
+)
+```
+
+原生客户端须设置 `JointTrajectory.Goal.use_waypoint_blend_ratio=True` 才使用各点的比例；
+否则读取规划开始时的 `movej_trajectory_blend_ratio`。更新后须重建并重启消息使用方。

@@ -4,6 +4,9 @@
 支持双臂独立画圆，可顺序执行右臂->左臂
 """
 
+from arms_ros2_control_msgs.action import JointTrajectory
+from rclpy.action import ActionClient
+from joint_trajectory_action_utils import send_joint_trajectory_action
 import rclpy
 from rclpy.node import Node
 import time
@@ -19,7 +22,7 @@ from std_msgs.msg import Int32
 from sensor_msgs.msg import JointState
 
 # 导入服务类型
-from arms_ros2_control_msgs.srv import MovecUseIK, JointTrajectory, KinematicsService
+from arms_ros2_control_msgs.srv import MovecUseIK, KinematicsService
 from arms_ros2_control_msgs.msg import JointWaypoint, CircleMessage
 from ros2_robot_interface import ROS2RobotInterface, ROS2RobotInterfaceConfig
 
@@ -232,8 +235,8 @@ class MoveJAndCircleClient(Node):
         # 创建圆弧服务客户端
         self.circle_client = self.create_client(MovecUseIK, '/ocs2_arm_controller/execute_circle_use_ik')
         
-        # 创建关节轨迹服务客户端
-        self.joint_trajectory_client = self.create_client(
+        # 创建关节轨迹 Action 客户端
+        self.joint_trajectory_client = ActionClient(self,
             JointTrajectory, 
             '/ocs2_arm_controller/joint_trajectory_with_para'
         )
@@ -275,7 +278,7 @@ class MoveJAndCircleClient(Node):
     def wait_for_services(self, timeout=10.0):
         """等待服务可用"""
         circle_ready = self.circle_client.wait_for_service(timeout_sec=timeout)
-        trajectory_ready = self.joint_trajectory_client.wait_for_service(timeout_sec=timeout)
+        trajectory_ready = self.joint_trajectory_client.wait_for_server(timeout_sec=timeout)
         kinematics_ready = self.kinematics_client.wait_for_service(timeout_sec=timeout)
         
         if circle_ready and trajectory_ready and kinematics_ready:
@@ -369,14 +372,13 @@ class MoveJAndCircleClient(Node):
             dual_joint_positions = current_positions['left'] + joint_positions
         
         # 创建请求
-        req = JointTrajectory.Request()
+        req = JointTrajectory.Goal(time_mode=True)
         req.joint_names = self.left_arm_joint_names + self.right_arm_joint_names
         
         # 创建轨迹点
         wp = JointWaypoint()
         wp.position = dual_joint_positions
-        wp.time_mode = True  # 使用总时间模式
-        wp.total_time = duration
+        req.movej_trajectory_duration = duration
         
         # 设置运动限制（可根据需要调整）
         wp.max_velocity = [0.5] * 14  # 最大速度 rad/s
@@ -388,7 +390,7 @@ class MoveJAndCircleClient(Node):
         # 发送请求（不记录数据）
         self.get_logger().info(f'发送{arm_name}臂MoveJ命令，目标关节: {[f"{j:.3f}" for j in joint_positions[:3]]}...')
         
-        future = self.joint_trajectory_client.call_async(req)
+        future = send_joint_trajectory_action(self.joint_trajectory_client, req)
         
         # 等待结果
         try:
@@ -427,13 +429,12 @@ class MoveJAndCircleClient(Node):
         dual_joint_positions = left_joints + right_joints
         
         # 创建请求
-        req = JointTrajectory.Request()
+        req = JointTrajectory.Goal(time_mode=True)
         req.joint_names = self.left_arm_joint_names + self.right_arm_joint_names
         
         wp = JointWaypoint()
         wp.position = dual_joint_positions
-        wp.time_mode = True
-        wp.total_time = duration
+        req.movej_trajectory_duration = duration
         
         wp.max_velocity = [0.5] * 14
         wp.max_acceleration = [1.0] * 14
@@ -441,7 +442,7 @@ class MoveJAndCircleClient(Node):
         
         req.waypoints = [wp]
         
-        future = self.joint_trajectory_client.call_async(req)
+        future = send_joint_trajectory_action(self.joint_trajectory_client, req)
         
         try:
             rclpy.spin_until_future_complete(self, future, timeout_sec=duration + 2.0)
