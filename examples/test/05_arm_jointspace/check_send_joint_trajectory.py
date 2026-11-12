@@ -126,7 +126,8 @@ def main() -> int:
         interface.send_joint_trajectory(
             joint_names=JOINT_NAMES,
             waypoints=WAYPOINTS,
-            movej_trajectory_duration=TRAJ_DURATION,
+            movej_trajectory_duration=10.0,
+            movej_trajectory_blend_ratio=0.5,
         )
         print("send_joint_trajectory() published")
 

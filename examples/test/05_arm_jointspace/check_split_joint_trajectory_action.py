@@ -150,22 +150,32 @@ def run_case(node, label, requested, waypoints, controlled, limits, args):
                 raise RuntimeError(
                     f"路点 {i} 的 {name}={value:.6f} 超出限位 [{lower:.6f}, {upper:.6f}]"
                 )
-    request = JointTrajectory.Goal(joint_names=requested, time_mode=True, use_waypoint_blend_ratio=True)
+    request = JointTrajectory.Goal(
+        joint_names=requested,
+        time_mode=True,
+        use_waypoint_blend_ratio=True,
+    )
     arrival_times = list(accumulate(args.duration))
     print(f"段时长：{args.duration} 秒；累计到达时间：{arrival_times} 秒", flush=True)
+
     for i, positions in enumerate(waypoints):
-        request.waypoints.append(JointWaypoint(
+        waypoint = JointWaypoint(
             position=list(positions),
             time_from_start=Duration(seconds=arrival_times[i]).to_msg(),
             blend_ratio_percent=0.0,
-        ))
+        )
+        request.waypoints.append(waypoint)
+
     target = dict(zip(requested, request.waypoints[-1].position))
     print(f"\n[{label}] 关节顺序：{requested}", flush=True)
     print(f"路点数：{len(request.waypoints)}，末路点（按请求顺序）："
           f"{request.waypoints[-1].position}", flush=True)
     if not node.motion.wait_for_server(timeout_sec=5.0):
         raise RuntimeError("分体双臂 JointTrajectory Action 不可用")
-    sent = node.motion.send_goal_async(request, feedback_callback=node.on_progress)
+    sent = node.motion.send_goal_async(
+        request,
+        feedback_callback=node.on_progress,
+    )
     node.wait(sent.done)
     node.active_goal = sent.result()
     if not node.active_goal.accepted:
