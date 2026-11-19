@@ -4,7 +4,8 @@
 前置条件（通用）:
     - ROS 2 已 source；WBC 仿真/真机在运行。
     - 已 connect()，且对端存在 /mode_command 话题。
-    - 发送 mode 命令前，FSM 须处于 OCS2 (3)；否则底层控制器通常不会响应模式切换。
+    - 当前 WBC 控制器支持在 HOLD/MOVEJ 下预设 mode，进入 OCS2 时保留预设。
+      退出 OCS2 或激活控制器时恢复默认模式；本脚本仍先进入 OCS2 再逐项观察。
     - 本脚本连接后会先 send_fsm_command(3) 切到 OCS2，再依次测试各 mode 命令。
 
 左右臂使能 / 双臂耦合 专用前置条件:
@@ -29,9 +30,9 @@ HOME_JOINT_ON / HOME_JOINT_OFF 专用前置条件:
       未启用时控制器会忽略该命令并打印 "HOME joint reference command ignored"。
     - HOME_JOINT_* 是参考约束开关，不是 HumanoidMode 位，由 WBC 控制器在任何 FSM 状态
       （HOLD/MOVEJ/OCS2）都会应用；但仍建议保持脚本默认流程（先切 OCS2）。
-    - send_mode_command 只负责发布；HOME_JOINT_* 没有对应的 current_state 字段映射，
-      无法用 wait_until_mode_commands_applied 确认，需直接读
-      current_state.home_joint_reference_enabled 判断是否生效。
+    - send_mode_command 只负责发布；HOME_JOINT_* 已映射到
+      current_state.home_joint_reference_enabled，可用 wait_until_mode_commands_applied
+      确认，也可直接读该字段。HOME_JOINT_ON 会校验当前 HOME 参考的 URDF 关节限位。
 
 send_mode_command(command: str) 用法:
     在已连接的 ROS2RobotInterface 实例上调用，向 /mode_command 发布模式字符串。
@@ -57,7 +58,7 @@ send_mode_command() 行为（本脚本依次调用该接口）:
       不会抛出异常。
 
 与 FSM 的关系:
-    mode 命令控制 WBC / 底盘等行为模式；生效前提是 FSM 已在 OCS2 (3)。
+    mode 命令选择 WBC 的各类约束；支持在 HOLD/MOVEJ 下预设，再进入 OCS2 执行。
     本脚本在每条 mode 命令发送前后打印 get_fsm_state()，确认测试期间 FSM 保持 OCS2。
 
 内置测试序列（字符串需与底层控制器约定一致）:
@@ -137,7 +138,7 @@ ARM_SEQUENCE = [
 
 # HOME_JOINT_ON/OFF 走 /mode_command，由 WBC 控制器 handleHomeJointReferenceCommand 处理
 # （先于 resolveHumanoidModeCommand），不进入 mode 位解析；末尾恢复为「开启」。
-# 生效确认读 current_state.home_joint_reference_enabled（wait_until_* 无 HOME_JOINT 映射）。
+# 生效确认读 current_state.home_joint_reference_enabled，也可用 wait_until_mode_commands_applied。
 HOME_JOINT_SEQUENCE = [
     ("参考关节开启（软拉向 HOME）", "HOME_JOINT_ON", 2.0),
     ("参考关节关闭", "HOME_JOINT_OFF", 2.0),
@@ -199,7 +200,7 @@ def main() -> int:
     try:
         print_state(interface, "initial")
         print("-" * 70)
-        print("send_fsm_command(3) -> OCS2 (required before mode commands)")
+        print("send_fsm_command(3) -> OCS2 (test sequence)")
         print_state(interface, "before OCS2")
         interface.send_fsm_command(3)
         time.sleep(1.0)
