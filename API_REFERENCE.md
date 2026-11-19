@@ -1912,11 +1912,26 @@ print(f"FSM state={state}")
 
 `MODE_COMMAND_TO_WBC_EXPECT` 将命令映射到消息字段：
 
-| `/mode_command` | 检查字段 | 说明 |
-|-----------------|----------|------|
-| `BODY_*` | `body_state` | 由 `BODY_MODE_TO_STATE` 派生（含 `BODY_VERTICAL` 别名） |
-| `ARMS_COUPLED` / `ARMS_INDEPENDENT` | `bimanual_state` | |
-| `BASE_LOCK` / `BASE_UNLOCK` | `base_state` | |
+| `/mode_command` | 检查字段 | 期望值 |
+|-----------------|----------|--------|
+| `BODY_FREE` | `body_state` | `0`（`BODY_FREE`） |
+| `BODY_RELATIVE` / `BODY_VERTICAL` | `body_state` | `1`（`BODY_VERTICAL`）；后者是兼容别名 |
+| `BODY_TRACKING` | `body_state` | `2`（`BODY_TRACKING`） |
+| `BODY_LOCK` | `body_state` | `3`（`BODY_LOCKED`） |
+| `BODY_CUSTOM_LOCK` | `body_state` | `5`（`BODY_CUSTOM_LOCKED`） |
+| `ARMS_COUPLED` / `ARMS_INDEPENDENT` | `bimanual_state` | `1`（耦合）/ `0`（独立） |
+| `BASE_LOCK` / `BASE_UNLOCK` | `base_state` | `0`（锁定）/ `1`（解锁） |
+| `HEAD_DISABLE` | `head_state` | `0`（`HEAD_DISABLED`） |
+| `HEAD_TRACKING` | `head_state` | `1`（`HEAD_TRACKING`） |
+| `HEAD_GAZE` | `head_state` | `2`（`HEAD_GAZE`） |
+| `HEAD_FORWARD` | `head_state` | `3`（`HEAD_FORWARD`） |
+| `LEFT_ARM_ENABLE` / `LEFT_ARM_DISABLE` | `left_arm_state` | `1`（启用）/ `0`（禁用） |
+| `RIGHT_ARM_ENABLE` / `RIGHT_ARM_DISABLE` | `right_arm_state` | `1`（启用）/ `0`（禁用） |
+| `HOME_JOINT_ON` / `HOME_JOINT_OFF` | `home_joint_reference_enabled` | `true` / `false` |
+
+切换前，先查看 `/ocs2_wbc_controller/wbc_capabilities`（`WbcCapability`），确认机器人已配置相应能力。单臂使能切换前需先解除双臂耦合；开启耦合则要求左右臂都已启用。头部跟踪、注视、朝前分别依赖 `head_tracking_ee_enabled`、`head_midpoint_gaze_enabled`、`has_head_coupling`，HOME 关节参考依赖 `has_home_joint_reference`。
+
+`HEAD_GAZE` 生效时，`head_midpoint_gaze_active` 为 `true`；该字段不是单独的命令，也不表示已经对准。`HEAD_FORWARD` 会暂时覆盖身体约束，`body_state` 仍回报选中的身体模式，退出后恢复。`HOME_JOINT_*` 是参考约束开关，不等于把 FSM 切到 HOME；打开时若参考超出 URDF 关节限位，控制器会拒绝启用。
 
 #### `send_mode_command(command: str) -> None`
 
@@ -1930,7 +1945,7 @@ print(f"FSM state={state}")
 
 **说明：**
 - 需要确认生效时，请在发完命令后调用下方 `wait_until_mode_commands_applied`。
-- 常见前提：FSM 已在 OCS2，否则控制器可能忽略 mode。
+- 通常先进入 OCS2 再切模式。当前 WBC 控制器也支持在 HOLD 或 MOVEJ 下预设模式，进入 OCS2 时会保留；退出 OCS2 或激活控制器时恢复默认模式。HOME 关节参考开关也可在 HOLD、MOVEJ、OCS2 下应用。
 
 #### `mode_command_matches_wbc_state(command: str) -> bool | None`
 
@@ -2869,7 +2884,7 @@ interface.send_fsm_command(FSM_OCS2)
    - 如果未配置这些话题，`get_target_pose()` 和 `check_arrival()` 将无法正常工作
 
 9. **Mode 与 FSM**：
-   - `/mode_command` 控制 WBC 身体/双臂/底盘模式；`/fsm_command` 控制 HOME/HOLD/OCS2/MOVEJ
+   - `/mode_command` 控制 WBC 身体、头部、底盘、左右臂使能、双臂耦合和 HOME 关节参考；`/fsm_command` 控制 HOME/HOLD/OCS2/MOVEJ
    - 多条 mode 建议先全部 `send_mode_command`，再一次 `wait_until_mode_commands_applied`，不要按条等待（对端常只更新一次合并后的 `current_state`）
    - 关节 / 位姿控制在开启 `auto_switch_fsm_before_control` 时会隐式切 FSM（关节→MOVEJ，位姿→OCS2）；一般不必显式调用自动切换 API
 
